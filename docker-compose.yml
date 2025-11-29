@@ -1,0 +1,117 @@
+# Docker Compose configuration for InvoiceMe local development
+# 
+# Usage:
+#   docker-compose up -d          # Start all services in background
+#   docker-compose logs -f backend # View backend logs
+#   docker-compose down            # Stop all services
+#   docker-compose down -v         # Stop and remove volumes (⚠️ deletes data)
+#
+# Prerequisites:
+#   - Copy backend/env.example to backend/.env and configure it
+#   - Ensure Docker and Docker Compose are installed
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: invoiceme-postgres
+    environment:
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_DATABASE:-invoiceme}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - invoiceme-network
+
+  # MinIO S3-Compatible Storage
+  minio:
+    image: minio/minio:latest
+    container_name: invoiceme-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+    ports:
+      - "9000:9000"  # API
+      - "9001:9001"  # Console UI
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - invoiceme-network
+
+  # MinIO Bucket Initialization
+  minio-init:
+    image: minio/mc:latest
+    container_name: invoiceme-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set myminio http://minio:9000 ${S3_ACCESS_KEY_ID:-minioadmin} ${S3_SECRET_ACCESS_KEY:-minioadmin} 2>/dev/null; do
+        echo 'Waiting for MinIO to be ready...'
+        sleep 2
+      done &&
+      mc mb myminio/${S3_BUCKET:-invoiceme} --ignore-existing &&
+      mc anonymous set download myminio/${S3_BUCKET:-invoiceme} &&
+      echo 'MinIO bucket initialized successfully'
+      "
+    restart: on-failure
+    networks:
+      - invoiceme-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: invoiceme-backend
+    env_file:
+      - ./backend/.env
+    environment:
+      # Override DB_HOST to use service name
+      DB_HOST: postgres
+      # Override S3_ENDPOINT to use service name
+      S3_ENDPOINT: http://minio:9000
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    # Uncomment below for hot-reload in development (mounts source code)
+    # volumes:
+    #   - ./backend/src:/app/src
+    # command: npm run start:dev
+    restart: unless-stopped
+    networks:
+      - invoiceme-network
+
+volumes:
+  postgres_data:
+    driver: local
+  minio_data:
+    driver: local
+
+networks:
+  invoiceme-network:
+    driver: bridge
+

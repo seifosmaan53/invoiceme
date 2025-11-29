@@ -1,0 +1,86 @@
+name: invoiceme
+description: InvoiceMe mobile application
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State Management
+  flutter_riverpod: ^3.0.3
+
+  # Networking
+  dio: ^5.4.0
+
+  # Local Database
+  sqflite: ^2.3.0
+  path_provider: ^2.1.1
+
+  # UUID
+  uuid: ^4.1.0
+
+  # Storage
+  shared_preferences: ^2.2.2
+  flutter_secure_storage: ^9.0.0
+
+  # PDF
+  pdfx: ^2.9.2
+  printing: ^5.11.0
+
+  # File Picker
+  file_picker: ^10.3.7
+  image_picker: ^1.0.5
+
+  # Date formatting
+  intl: ^0.20.2
+
+  # Connectivity
+  connectivity_plus: ^7.0.0
+
+  # URL Launcher
+  url_launcher: ^6.2.4
+
+  # Share
+  share_plus: ^12.0.1
+
+  # Color Picker
+  flutter_colorpicker: ^1.1.0
+
+  # Package Info
+  package_info_plus: ^9.0.0
+
+  # UI Components
+  flutter_svg: ^2.0.9
+  cached_network_image: ^3.3.0
+  flutter_slidable: ^4.0.3
+  shimmer: ^3.0.0
+  fl_chart: ^1.1.1
+  vector_math: ^2.1.4
+
+  # Error Tracking
+  sentry_flutter: ^9.8.0
+
+  # Payment Processing
+  flutter_stripe: ^11.1.0
+
+  # Internationalization
+  flutter_localizations:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  integration_test:
+    sdk: flutter
+  mockito: ^5.4.4
+  build_runner: ^2.4.7
+  mocktail: ^1.0.1
+
+flutter:
+  uses-material-design: true
+

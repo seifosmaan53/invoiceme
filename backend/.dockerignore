@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment files
+.env
+.env.*
+
+# Test artifacts
+coverage/
+coverage-e2e/
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+
+# Tests
+test/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Docker
+Dockerfile
+.dockerignore
+

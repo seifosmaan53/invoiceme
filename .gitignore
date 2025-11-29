@@ -1,0 +1,41 @@
+# Root level .gitignore for InvoiceMe project
+
+# Environment files
+.env
+.env.local
+.env.production
+.env.*.local
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+
+# Build artifacts (already in subdirectory .gitignore, but listed here for clarity)
+# backend/dist/ - in backend/.gitignore
+# mobile/build/ - in mobile/.gitignore
+

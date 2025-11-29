@@ -1,0 +1,19 @@
+# Build configuration for Flutter
+targets:
+  $default:
+    builders:
+      # Tree shaking configuration
+      build_web_compilers|entrypoint:
+        generate_for:
+          - lib/main.dart
+        options:
+          dart2js_optimization: O3
+          dart2js_minify: true
+          dart2js_csp: true
+          
+      # Asset optimization
+      build_runner|build_web_compilers:
+        options:
+          dart2js_optimization: O3
+          dart2js_minify: true
+

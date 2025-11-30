@@ -28,44 +28,209 @@ export class PdfService {
 
   constructor() {
     // Handle both development and production paths
-    const isProduction = __dirname.includes('dist');
-    if (isProduction) {
-      // In production, templates are in dist/core/templates
-      this.templatePath = path.join(__dirname, 'templates', 'invoice.html');
+    // In development mode (start:dev), code runs from dist but source is in src
+    // In production, code runs from dist and templates are copied there
+    const isProduction = process.env.NODE_ENV === 'production';
+    const isDist = __dirname.includes('dist');
+    
+    // Try multiple possible template locations with fallback order
+    const possiblePaths: string[] = [];
+    
+    if (isDist) {
+      // When running from dist directory
+      // Try dist location first (where templates should be copied)
+      possiblePaths.push(path.join(__dirname, '..', 'templates', 'invoice.html'));
+      
+      // Fallback: try source location (for dev mode)
+      const projectRoot = path.resolve(__dirname, '..', '..', '..', '..');
+      possiblePaths.push(path.join(projectRoot, 'src', 'core', 'templates', 'invoice.html'));
     } else {
-      // In development, templates are in src/core/templates
-      this.templatePath = path.join(__dirname, 'templates', 'invoice.html');
+      // When running from src directory (unlikely but possible)
+      possiblePaths.push(path.join(__dirname, '..', 'templates', 'invoice.html'));
+    }
+    
+    // Find the first existing template path
+    let foundPath: string | null = null;
+    for (const templatePath of possiblePaths) {
+      if (fs.existsSync(templatePath)) {
+        foundPath = templatePath;
+        break;
+      }
+    }
+    
+    // Use first path as default (will fallback to inline template if not found)
+    this.templatePath = foundPath || possiblePaths[0];
+    
+    // Log template path for debugging
+    console.log('PDF Service initialized with template path:', this.templatePath);
+    console.log('Template file exists:', fs.existsSync(this.templatePath));
+    console.log('Current __dirname:', __dirname);
+    console.log('NODE_ENV:', process.env.NODE_ENV || 'undefined');
+    if (!fs.existsSync(this.templatePath)) {
+      console.warn('⚠️  Template file not found - will use inline template fallback');
     }
   }
 
+  /**
+   * Get the Chrome executable path for Puppeteer.
+   * Explicitly sets the path to avoid Rosetta/x64 Node issues on Apple Silicon Macs.
+   * 
+   * On Apple Silicon Macs with x64 Node.js (running through Rosetta), we use
+   * Puppeteer's bundled Chromium (which is arm64) to avoid Rosetta translation
+   * performance issues. This can improve PDF generation speed by 3-5x.
+   */
+  private getChromeExecutablePath(): string | undefined {
+    // 1) If set in .env, use that (most flexible - allows override)
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+      return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+
+    // 2) On macOS with x64 Node.js, use bundled Chromium to avoid Rosetta
+    // This handles the case where Node.js is running through Rosetta on Apple Silicon
+    // Puppeteer's bundled Chromium is arm64 native, avoiding performance degradation
+    if (process.platform === 'darwin' && process.arch === 'x64') {
+      console.log('[PDF Generation] Detected x64 Node.js on macOS - using Puppeteer bundled Chromium to avoid Rosetta performance issues');
+      return undefined; // Let Puppeteer use its bundled Chromium (arm64 native)
+    }
+
+    // 3) On macOS with arm64 Node.js, try system Chrome first
+    if (process.platform === 'darwin' && process.arch === 'arm64') {
+      const chromePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+      if (fs.existsSync(chromePath)) {
+        return chromePath;
+      }
+      const chromiumPath = '/Applications/Chromium.app/Contents/MacOS/Chromium';
+      if (fs.existsSync(chromiumPath)) {
+        return chromiumPath;
+      }
+    }
+
+    // 4) Fallback: let Puppeteer decide (for Linux/Windows or if Chrome not found)
+    // Return undefined to let Puppeteer use its bundled Chromium
+    return undefined;
+  }
+
   async generateInvoicePdf(data: InvoiceData | any): Promise<Buffer> {
-    // Handle both old format (flat object) and new format (structured)
-    const invoiceData = this.normalizeData(data);
-    const html = await this.renderTemplate(invoiceData);
-    
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
-
     try {
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'networkidle0' });
-      
-      const pdf = await page.pdf({
-        format: 'A4',
-        margin: {
-          top: '20mm',
-          right: '20mm',
-          bottom: '20mm',
-          left: '20mm',
-        },
-        printBackground: true,
-      });
+      // Validate input data
+      if (!data) {
+        throw new Error('Invoice data is required');
+      }
 
-      return Buffer.from(pdf);
-    } finally {
-      await browser.close();
+      // Handle both old format (flat object) and new format (structured)
+      const invoiceData = this.normalizeData(data);
+      
+      // Validate normalized data
+      if (!invoiceData.invoice) {
+        throw new Error('Invoice is required');
+      }
+      if (!invoiceData.client) {
+        throw new Error('Client is required');
+      }
+
+      const html = await this.renderTemplate(invoiceData);
+      
+      // Validate HTML was generated
+      if (!html || html.trim().length === 0) {
+        throw new Error('Generated HTML template is empty');
+      }
+
+      // Log context for debugging
+      const invoiceId = invoiceData.invoice?.id || 'unknown';
+      const invoiceNumber = invoiceData.invoice?.number || 'unknown';
+      const clientName = invoiceData.client?.name || 'unknown';
+      console.log(`[PDF Generation] Starting PDF generation for invoice ${invoiceNumber} (ID: ${invoiceId}), client: ${clientName}`);
+      
+      console.log('[PDF Generation] Launching Puppeteer browser...');
+      const chromePath = this.getChromeExecutablePath();
+      if (chromePath) {
+        console.log(`[PDF Generation] Using Chrome executable: ${chromePath}`);
+      } else {
+        console.log('[PDF Generation] Using Puppeteer bundled Chromium');
+      }
+      
+      const launchOptions: puppeteer.PuppeteerLaunchOptions = {
+        headless: 'new', // Use new headless mode for better compatibility
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage', // Overcome limited resource problems
+          '--disable-accelerated-2d-canvas', // Better compatibility
+        ],
+      };
+      
+      // Only set executablePath if we have a specific path
+      // If undefined, Puppeteer will use its bundled Chromium (better for Apple Silicon + x64 Node)
+      if (chromePath) {
+        launchOptions.executablePath = chromePath;
+      }
+      
+      const browser = await puppeteer.launch(launchOptions);
+      console.log('[PDF Generation] Browser launched successfully');
+
+      try {
+        console.log('[PDF Generation] Creating new page...');
+        const page = await browser.newPage();
+        
+        console.log(`[PDF Generation] Setting page content (HTML length: ${html.length} chars)...`);
+        // Set content with timeout to prevent hanging
+        await page.setContent(html, { 
+          waitUntil: 'networkidle0',
+          timeout: 30000, // 30 second timeout
+        });
+        console.log('[PDF Generation] Page content set successfully');
+        
+        console.log('[PDF Generation] Generating PDF...');
+        const pdf = await page.pdf({
+          format: 'A4',
+          margin: {
+            top: '20mm',
+            right: '20mm',
+            bottom: '20mm',
+            left: '20mm',
+          },
+          printBackground: true,
+        });
+        console.log(`[PDF Generation] PDF generated successfully (${pdf.length} bytes)`);
+
+        return Buffer.from(pdf);
+      } finally {
+        await browser.close();
+      }
+    } catch (error) {
+      // Try to extract context for better error logging
+      let invoiceContext = '';
+      try {
+        const invoiceId = data?.invoice?.id || data?.id || 'unknown';
+        const invoiceNumber = data?.invoice?.number || data?.number || 'unknown';
+        invoiceContext = ` (Invoice: ${invoiceNumber}, ID: ${invoiceId})`;
+      } catch {
+        // Ignore errors when extracting context
+      }
+
+      console.error(`=== PDF SERVICE GENERATION ERROR${invoiceContext} ===`);
+      console.error('Error type:', error?.constructor?.name || typeof error);
+
+      if (error instanceof Error) {
+        console.error('Error name:', error.name);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+        // Re-throw the original error so Nest (or your controller) sees the real message
+        // This preserves the original error message and stack trace
+        throw error;
+      }
+
+      // Fallback for non-Error objects
+      try {
+        console.error(
+          'Error object (stringified):',
+          JSON.stringify(error, Object.getOwnPropertyNames(error), 2),
+        );
+      } catch {
+        console.error('Error object (as string):', String(error));
+      }
+
+      throw new Error('Failed to generate PDF (unknown non-Error object)');
     }
   }
 
@@ -88,8 +253,15 @@ export class PdfService {
     // Check if template file exists, if not use inline template
     let template: string;
     try {
-      template = fs.readFileSync(this.templatePath, 'utf-8');
+      if (!fs.existsSync(this.templatePath)) {
+        console.warn(`Template file not found at ${this.templatePath}, using inline template`);
+        template = this.getInlineTemplate();
+      } else {
+        template = fs.readFileSync(this.templatePath, 'utf-8');
+        console.log(`Template loaded from ${this.templatePath} (${template.length} chars)`);
+      }
     } catch (error) {
+      console.error(`Error reading template file from ${this.templatePath}:`, error);
       // Fallback to inline template if file not found
       template = this.getInlineTemplate();
     }
@@ -103,12 +275,31 @@ export class PdfService {
     const issueDate = this.formatDate(invoice.issueDate);
     const dueDate = invoice.dueDate ? this.formatDate(invoice.dueDate) : null;
 
-    // Format currency helper
-    const formatCurrency = (amount: number, currency: string = 'USD'): string => {
+    // Safe getters with defaults (move before formatCurrency function)
+    const invoiceNumber = invoice.number || 'N/A';
+    const invoiceType = invoice.type || 'invoice';
+    const invoiceStatus = invoice.status || 'draft';
+    const invoiceCurrency = invoice.currency || 'USD';
+    const clientName = client.name || 'N/A';
+    const invoiceSubtotal = invoice.subtotal || 0;
+    const invoiceTaxTotal = invoice.taxTotal || 0;
+    const invoiceDiscountTotal = invoice.discountTotal || 0;
+    const invoiceTotal = invoice.total || 0;
+    const statusDisplay = invoiceStatus.charAt(0).toUpperCase() + invoiceStatus.slice(1);
+
+    // Format currency helper - robust handling of number/string and default currency
+    const formatCurrency = (amount: number | string, currency: string = invoiceCurrency): string => {
+      const num = typeof amount === 'string' ? Number(amount) : amount;
+      if (isNaN(num)) {
+        return new Intl.NumberFormat('en-US', {
+          style: 'currency',
+          currency: invoiceCurrency,
+        }).format(0);
+      }
       return new Intl.NumberFormat('en-US', {
         style: 'currency',
-        currency: currency,
-      }).format(amount);
+        currency: currency || invoiceCurrency,
+      }).format(num);
     };
 
     // Format client address
@@ -140,28 +331,28 @@ export class PdfService {
 
     // Replace template variables
     let html = template
-      .replace(/\{\{invoiceNumber\}\}/g, invoice.number)
-      .replace(/\{\{invoiceType\}\}/g, invoice.type === 'invoice' ? 'Invoice' : 'Estimate')
-      .replace(/\{\{invoiceTypeDisplay\}\}/g, invoice.type === 'invoice' ? 'Invoice' : 'Estimate')
+      .replace(/\{\{invoiceNumber\}\}/g, invoiceNumber)
+      .replace(/\{\{invoiceType\}\}/g, invoiceType === 'invoice' ? 'Invoice' : 'Estimate')
+      .replace(/\{\{invoiceTypeDisplay\}\}/g, invoiceType === 'invoice' ? 'Invoice' : 'Estimate')
       .replace(/\{\{issueDate\}\}/g, issueDate)
       .replace(/\{\{#if dueDate\}\}/g, dueDate ? '' : '<!--')
       .replace(/\{\{\/if\}\}/g, dueDate ? '' : '-->')
       .replace(/\{\{dueDate\}\}/g, dueDate || '')
-      .replace(/\{\{status\}\}/g, invoice.status.charAt(0).toUpperCase() + invoice.status.slice(1))
-      .replace(/\{\{currency\}\}/g, invoice.currency || 'USD')
+      .replace(/\{\{status\}\}/g, statusDisplay)
+      .replace(/\{\{currency\}\}/g, invoiceCurrency)
       .replace(/\{\{companyName\}\}/g, user.companyName || 'InvoiceMe')
       .replace(/\{\{logoUrl\}\}/g, logoUrl)
       .replace(/\{\{primaryColor\}\}/g, primaryColor)
       .replace(/\{\{secondaryColor\}\}/g, secondaryColor)
       .replace(/\{\{fontFamily\}\}/g, fontFamily)
-      .replace(/\{\{clientName\}\}/g, this.escapeHtml(client.name))
+      .replace(/\{\{clientName\}\}/g, this.escapeHtml(clientName))
       .replace(/\{\{clientEmail\}\}/g, client.email ? this.escapeHtml(client.email) : '')
       .replace(/\{\{clientPhone\}\}/g, client.phone ? this.escapeHtml(client.phone) : '')
       .replace(/\{\{clientAddress\}\}/g, this.escapeHtml(clientAddress))
-      .replace(/\{\{subtotal\}\}/g, formatCurrency(invoice.subtotal, invoice.currency))
-      .replace(/\{\{taxTotal\}\}/g, formatCurrency(invoice.taxTotal, invoice.currency))
-      .replace(/\{\{discountTotal\}\}/g, formatCurrency(invoice.discountTotal, invoice.currency))
-      .replace(/\{\{total\}\}/g, formatCurrency(invoice.total, invoice.currency))
+      .replace(/\{\{subtotal\}\}/g, formatCurrency(invoiceSubtotal, invoiceCurrency))
+      .replace(/\{\{taxTotal\}\}/g, formatCurrency(invoiceTaxTotal, invoiceCurrency))
+      .replace(/\{\{discountTotal\}\}/g, formatCurrency(invoiceDiscountTotal, invoiceCurrency))
+      .replace(/\{\{total\}\}/g, formatCurrency(invoiceTotal, invoiceCurrency))
       .replace(/\{\{notes\}\}/g, invoice.notes ? this.escapeHtml(invoice.notes) : '')
       .replace(/\{\{showTaxOrDiscount\}\}/g, showTaxOrDiscount ? 'true' : '');
 
@@ -177,18 +368,18 @@ export class PdfService {
         <tr>
           <td class="description">${this.escapeHtml(item.description)}</td>
           <td style="text-align: center;">${item.quantity}</td>
-          <td style="text-align: right;">${formatCurrency(item.unitPrice, invoice.currency)}</td>
+          <td style="text-align: right;">${formatCurrency(item.unitPrice, invoiceCurrency)}</td>
           ${taxCell}
           ${discountCell}
-          <td>${formatCurrency(item.lineTotal, invoice.currency)}</td>
+          <td>${formatCurrency(item.lineTotal, invoiceCurrency)}</td>
         </tr>`;
       })
       .join('');
 
     html = html.replace(/\{\{#each items\}\}([\s\S]*?)\{\{\/each\}\}/g, itemsHtml);
 
-    // Replace status badge class
-    const statusLower = invoice.status.toLowerCase();
+    // Replace status badge class - use invoiceStatus (already has safe default)
+    const statusLower = invoiceStatus.toLowerCase();
     html = html.replace(/class="badge {{status}}"/g, `class="badge ${statusLower}"`);
 
     // Clean up remaining handlebars conditionals

@@ -1,15 +1,15 @@
+import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:share_plus/share_plus.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
 import 'package:dio/dio.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/providers/providers.dart';
 import '../core/widgets/copyable_text.dart';
 import '../core/widgets/copyable_error.dart';
@@ -370,14 +370,108 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
         builder: (context) => const Center(child: CircularProgressIndicator()),
       );
       
-      final response = await apiClient.post('/invoices/${widget.invoice.id}/pdf');
+      // Use Dio directly to handle binary PDF responses
+      final dio = Dio();
       
-      if (mounted) Navigator.pop(context);
+      // Get base URL from the invoice request and read auth token from storage
+      String baseUrl;
+      String? authToken;
+      try {
+        // Use the invoice detail request that already succeeded to get base URL
+        final invoiceResponse = await apiClient.get('/invoices/${widget.invoice.id}');
+        baseUrl = invoiceResponse.requestOptions.baseUrl;
+        
+        // Read auth token directly from storage (same way ApiClient does)
+        if (kIsWeb) {
+          final prefs = await SharedPreferences.getInstance();
+          authToken = prefs.getString('secure_access_token');
+        } else {
+          const secureStorage = FlutterSecureStorage();
+          authToken = await secureStorage.read(key: 'access_token');
+        }
+        
+        // Format token as Bearer if it's not already formatted
+        if (authToken != null && !authToken.startsWith('Bearer ')) {
+          authToken = 'Bearer $authToken';
+        }
+        
+        debugPrint('Extracted base URL: $baseUrl');
+        debugPrint('Has auth token: ${authToken != null && authToken.isNotEmpty}');
+      } catch (e) {
+        debugPrint('Error getting config from invoice request: $e');
+        // Fallback to default base URL
+        if (kIsWeb) {
+          baseUrl = 'http://localhost:3000/api/v1';
+        } else {
+          baseUrl = 'http://10.0.0.133:3000/api/v1';
+        }
+      }
       
-      if (response.statusCode == 201 || response.statusCode == 200) {
-        final pdfUrl = response.data['url'] as String? ?? response.data['pdfUrl'] as String?;
-        if (pdfUrl != null) {
-          final uri = Uri.parse(pdfUrl);
+      // Configure Dio with base URL and auth token
+      dio.options.baseUrl = baseUrl;
+      dio.options.headers['Content-Type'] = 'application/json';
+      
+      // Prepare headers for the request
+      final headers = <String, dynamic>{
+        'Content-Type': 'application/json',
+      };
+      if (authToken != null && authToken.isNotEmpty) {
+        headers['Authorization'] = authToken;
+        dio.options.headers['Authorization'] = authToken;
+      }
+      
+      // Request with bytes response type to handle binary PDF
+      final pdfResponse = await dio.post<dynamic>(
+        '/invoices/${widget.invoice.id}/pdf',
+        options: Options(
+          responseType: ResponseType.bytes,
+          headers: headers,
+          validateStatus: (status) => status != null && status < 500,
+        ),
+      );
+      
+      if (!mounted) return;
+      Navigator.pop(context);
+      
+      if (pdfResponse.statusCode != 200 && pdfResponse.statusCode != 201) {
+        // Try to parse error message
+        String errorMessage = 'PDF generation failed with status ${pdfResponse.statusCode}';
+        try {
+          if (pdfResponse.data is List<int>) {
+            final jsonString = String.fromCharCodes(pdfResponse.data as List<int>);
+            final errorData = jsonDecode(jsonString) as Map<String, dynamic>?;
+            if (errorData != null && errorData['message'] != null) {
+              errorMessage = errorData['message'].toString();
+            }
+          }
+        } catch (e) {
+          // Ignore parsing errors
+        }
+        throw Exception(errorMessage);
+      }
+      
+      // Check Content-Type to determine response format
+      final contentType = pdfResponse.headers.value('content-type')?.toLowerCase() ?? '';
+      
+      if (contentType.contains('application/pdf')) {
+        // Binary PDF response (development mode)
+        if (pdfResponse.data is! List<int>) {
+          throw Exception('Invalid PDF response format');
+        }
+        
+        final pdfBytes = pdfResponse.data as List<int>;
+        
+        // Verify it's a valid PDF
+        if (pdfBytes.length < 4 || String.fromCharCodes(pdfBytes.take(4)) != '%PDF') {
+          throw Exception('Response is not a valid PDF');
+        }
+        
+        if (kIsWeb) {
+          // On web: Create data URL and open in new window
+          final base64Pdf = base64Encode(pdfBytes);
+          final dataUrl = 'data:application/pdf;base64,$base64Pdf';
+          final uri = Uri.parse(dataUrl);
+          
           if (await canLaunchUrl(uri)) {
             await launchUrl(uri, mode: LaunchMode.externalApplication);
             if (mounted) {
@@ -389,27 +483,73 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
               );
             }
           } else {
-            throw Exception('Could not open PDF URL');
+            throw Exception('Could not open PDF in browser');
           }
         } else {
-          throw Exception('PDF URL not found in response');
+          // On mobile: Save to temp file and open
+          final tempDir = await getTemporaryDirectory();
+          final fileName = 'invoice_${widget.invoice.number}.pdf';
+          final filePath = '${tempDir.path}/$fileName';
+          final file = File(filePath);
+          
+          if (await file.exists()) {
+            await file.delete();
+          }
+          
+          await file.writeAsBytes(pdfBytes);
+          
+          final uri = Uri.file(filePath);
+          if (await canLaunchUrl(uri)) {
+            await launchUrl(uri, mode: LaunchMode.externalApplication);
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('PDF opened'),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            }
+          } else {
+            throw Exception('Could not open PDF file');
+          }
         }
       } else {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Error generating PDF (code ${response.statusCode})'),
-              backgroundColor: Colors.red,
-            ),
-          );
+        // JSON response (production mode with S3 URL)
+        String jsonString;
+        if (pdfResponse.data is List<int>) {
+          jsonString = String.fromCharCodes(pdfResponse.data as List<int>);
+        } else {
+          jsonString = pdfResponse.data.toString();
+        }
+        
+        final jsonData = jsonDecode(jsonString) as Map<String, dynamic>;
+        final pdfUrl = jsonData['url'] as String? ?? jsonData['pdfUrl'] as String?;
+        
+        if (pdfUrl == null || pdfUrl.isEmpty) {
+          throw Exception('PDF URL not found in response');
+        }
+        
+        final uri = Uri.parse(pdfUrl);
+        if (await canLaunchUrl(uri)) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('PDF opened in browser'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          }
+        } else {
+          throw Exception('Could not open PDF URL');
         }
       }
     } catch (e) {
       if (mounted) {
-        if (Navigator.canPop(context)) Navigator.pop(context); // Close loading dialog if still open
+        if (Navigator.canPop(context)) Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error generating PDF: ${e.toString()}'),
+            content: Text('Error generating PDF: ${e.toString().replaceFirst('Exception: ', '')}'),
             backgroundColor: Colors.red,
           ),
         );
@@ -418,175 +558,14 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
   }
 
   Future<void> _shareInvoice() async {
-    try {
-      final invoice = _fullInvoice ?? widget.invoice;
-      
-      // Show loading dialog
-      if (mounted) {
-        showDialog(
-          context: context,
-          barrierDismissible: false,
-          builder: (context) => const Center(
-            child: CircularProgressIndicator(),
-          ),
-        );
-      }
-
-      final apiClient = ref.read(apiClientProvider);
-      
-      // Step 1: Generate PDF
-      final pdfResponse = await apiClient.post('/invoices/${invoice.id}/pdf');
-      
-      if (pdfResponse.statusCode != 201 && pdfResponse.statusCode != 200) {
-        throw Exception('Failed to generate PDF');
-      }
-
-      final pdfUrl = pdfResponse.data['url'] as String? ?? pdfResponse.data['pdfUrl'] as String?;
-      
-      if (pdfUrl == null) {
-        throw Exception('PDF URL not found in response');
-      }
-
-      // Step 2: Download PDF file
-      final dio = Dio();
-      final pdfBytesResponse = await dio.get<Uint8List>(
-        pdfUrl,
-        options: Options(
-          responseType: ResponseType.bytes,
-          followRedirects: true,
-        ),
-      );
-
-      if (pdfBytesResponse.data == null) {
-        throw Exception('Failed to download PDF');
-      }
-
-      final pdfBytes = pdfBytesResponse.data!;
-      
-      // Step 3: Save to temporary file
-      XFile? pdfFile;
-      
-      if (kIsWeb) {
-        // Web: Create a blob URL or use bytes directly
-        // For web, we'll share the URL as fallback since file sharing is limited
-        if (mounted) Navigator.pop(context);
-        await Share.share(
-          'Invoice ${invoice.number}\n\nView invoice: $pdfUrl',
-          subject: 'Invoice ${invoice.number}',
-        );
-        
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Invoice shared successfully'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        }
-        return;
-      } else {
-        // Mobile: Save to cache directory (more reliable for sharing)
-        final cacheDir = await getTemporaryDirectory();
-        final fileName = 'Invoice_${invoice.number.replaceAll(RegExp(r'[^\w\s-]'), '_')}.pdf';
-        final filePath = path.join(cacheDir.path, fileName);
-        final file = File(filePath);
-        
-        // Write PDF bytes to file
-        await file.writeAsBytes(pdfBytes);
-        
-        // Verify file exists and has content
-        if (!await file.exists()) {
-          throw Exception('Failed to create PDF file');
-        }
-        
-        final fileSize = await file.length();
-        if (fileSize == 0) {
-          throw Exception('PDF file is empty');
-        }
-        
-        // Create XFile with proper mime type and name
-        pdfFile = XFile(
-          filePath,
-          mimeType: 'application/pdf',
-          name: fileName,
-        );
-        
-        // Verify the file is readable
-        final canRead = await file.exists();
-        if (!canRead) {
-          throw Exception('PDF file is not accessible');
-        }
-      }
-
-      if (mounted) Navigator.pop(context);
-
-      // Step 4: Share the PDF file
-      if (pdfFile != null) {
-        await Share.shareXFiles(
-          [pdfFile],
-          subject: 'Invoice ${invoice.number}',
-          text: 'Invoice ${invoice.number}',
-        );
-        
-        // Clean up temp file after a delay
-        if (!kIsWeb) {
-          Future.delayed(const Duration(seconds: 5), () async {
-            try {
-              final file = File(pdfFile!.path);
-              if (await file.exists()) {
-                await file.delete();
-              }
-            } catch (e) {
-              // Ignore cleanup errors
-            }
-          });
-        }
-        
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Invoice PDF shared successfully'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        }
-      }
-    } catch (e) {
-      if (mounted) {
-        if (Navigator.canPop(context)) Navigator.pop(context);
-        
-        // Fallback: Share invoice text if PDF sharing fails
-        try {
-          final invoice = _fullInvoice ?? widget.invoice;
-          
-          // Try to share PDF URL as text
-          final apiClient = ref.read(apiClientProvider);
-          final pdfResponse = await apiClient.post('/invoices/${invoice.id}/pdf');
-          final pdfUrl = pdfResponse.data['url'] as String? ?? pdfResponse.data['pdfUrl'] as String?;
-          
-          if (pdfUrl != null) {
-            await Share.share(
-              'Invoice ${invoice.number}\n\nView invoice: $pdfUrl',
-              subject: 'Invoice ${invoice.number}',
-            );
-          } else {
-            // Final fallback: Share invoice text
-            final invoiceText = _buildInvoiceText(invoice);
-            await Share.share(
-              invoiceText,
-              subject: 'Invoice ${invoice.number}',
-            );
-          }
-        } catch (shareError) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Error sharing invoice: ${e.toString()}'),
-              backgroundColor: Colors.red,
-            ),
-          );
-        }
-      }
-    }
+    final invoice = _fullInvoice ?? widget.invoice;
+    final shareService = ref.read(shareServiceProvider);
+    
+    await shareService.shareInvoice(
+      invoice: invoice,
+      context: context,
+      showLoading: true,
+    );
   }
 
   Future<void> _editInvoice() async {

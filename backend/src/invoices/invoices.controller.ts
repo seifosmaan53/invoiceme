@@ -11,6 +11,8 @@ import {
   UploadedFile,
   Query,
   BadRequestException,
+  NotFoundException,
+  InternalServerErrorException,
   Req,
 } from '@nestjs/common';
 import { 
@@ -486,40 +488,163 @@ export class InvoicesController {
   }
 
   @Post(':id/pdf')
-  @ApiOperation({ summary: 'Generate PDF for an invoice and upload to S3' })
-  @ApiResponse({ status: 201, description: 'PDF generated and uploaded successfully' })
+  @ApiOperation({ summary: 'Generate PDF for an invoice' })
+  @ApiResponse({ status: 200, description: 'PDF generated successfully' })
   @ApiResponse({ status: 404, description: 'Invoice not found' })
-  async generatePdf(@Param('id') id: string, @CurrentUser() user: any, @Req() req: any) {
-    const invoice = await this.invoicesService.findOne(id, user.userId);
+  @ApiResponse({ status: 500, description: 'PDF generation failed' })
+  async generatePdf(
+    @Param('id') id: string, 
+    @CurrentUser() user: any, 
+    @Req() req: any,
+    @Res() res: Response,
+  ) {
+    try {
+      const invoice = await this.invoicesService.findOne(id, user.userId);
 
-    // Get user info for PDF
-    const userInfo = {
-      name: user.name,
-      companyName: user.companyName,
-    };
+      if (!invoice) {
+        throw new NotFoundException(`Invoice with ID ${id} not found`);
+      }
 
-    const invoiceData = {
-      invoice: invoice,
-      client: invoice.client,
-      items: invoice.items || [],
-      user: userInfo,
-    };
+      if (!invoice.client) {
+        throw new BadRequestException('Invoice must have an associated client');
+      }
 
-    const pdfBuffer = await this.pdfService.generateInvoicePdf(invoiceData);
+      // Get user info for PDF (with safe defaults)
+      const userInfo = {
+        name: user.name || 'User',
+        companyName: user.companyName || '',
+      };
 
-    const key = `pdfs/${invoice.id}/${invoice.number}.pdf`;
-    const url = await this.s3Service.uploadFile(key, pdfBuffer, 'application/pdf');
+      const invoiceData = {
+        invoice: invoice,
+        client: invoice.client,
+        items: invoice.items || [],
+        user: userInfo,
+      };
 
-    await this.auditService.log(
-      user.userId,
-      AuditAction.EXPORT,
-      AuditResource.INVOICE,
-      id,
-      { invoiceNumber: invoice.number, action: 'generate_pdf', pdfUrl: url },
-      req.ip,
-    );
+      const pdfBuffer = await this.pdfService.generateInvoicePdf(invoiceData);
 
-    return { url, invoiceId: invoice.id };
+      if (!pdfBuffer || pdfBuffer.length === 0) {
+        throw new InternalServerErrorException('Generated PDF is empty');
+      }
+
+      const isDevelopment = process.env.NODE_ENV !== 'production';
+      const filename = `${invoice.number || 'invoice'}.pdf`;
+
+      if (isDevelopment) {
+        // In development: Return PDF directly as binary response (no S3 needed)
+        console.log(`[PDF Generation] Returning PDF directly in development mode (${pdfBuffer.length} bytes)`);
+        
+        await this.auditService.log(
+          user.userId,
+          AuditAction.EXPORT,
+          AuditResource.INVOICE,
+          id,
+          { invoiceNumber: invoice.number, action: 'generate_pdf', mode: 'direct_download' },
+          req.ip,
+        );
+
+        // Set response headers and send PDF buffer directly
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Length', pdfBuffer.length.toString());
+        res.send(pdfBuffer);
+        return;
+      } else {
+        // In production: Try to upload to S3, fallback to direct download if S3 unavailable
+        try {
+          const key = `pdfs/${invoice.id}/${invoice.number}.pdf`;
+          const url = await this.s3Service.uploadFile(key, pdfBuffer, 'application/pdf');
+          console.log(`[PDF Generation] PDF uploaded to S3: ${url}`);
+
+          await this.auditService.log(
+            user.userId,
+            AuditAction.EXPORT,
+            AuditResource.INVOICE,
+            id,
+            { invoiceNumber: invoice.number, action: 'generate_pdf', pdfUrl: url },
+            req.ip,
+          );
+
+          // In production, return JSON with URL
+          res.json({ url, invoiceId: invoice.id });
+          return;
+        } catch (s3Error: any) {
+          // Check if it's a connection error (S3 unavailable)
+          const isConnectionError = 
+            s3Error?.code === 'ECONNREFUSED' ||
+            s3Error?.code === 'ENOTFOUND' ||
+            s3Error?.code === 'ETIMEDOUT' ||
+            s3Error?.message?.includes('ECONNREFUSED') ||
+            s3Error?.message?.includes('Connection refused') ||
+            (s3Error?.name === 'AggregateError' && 
+             s3Error?.errors?.some((e: any) => e?.code === 'ECONNREFUSED'));
+
+          if (isConnectionError) {
+            // S3 is unavailable - fallback to direct PDF download
+            console.warn(`[PDF Generation] S3 unavailable (${s3Error?.code || s3Error?.message}), falling back to direct download`);
+            
+            await this.auditService.log(
+              user.userId,
+              AuditAction.EXPORT,
+              AuditResource.INVOICE,
+              id,
+              { 
+                invoiceNumber: invoice.number, 
+                action: 'generate_pdf', 
+                mode: 'direct_download_fallback',
+                s3Error: s3Error?.code || s3Error?.message || 'S3 unavailable'
+              },
+              req.ip,
+            );
+
+            // Return PDF directly as fallback
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+            res.setHeader('Content-Length', pdfBuffer.length.toString());
+            res.send(pdfBuffer);
+            return;
+          } else {
+            // Other S3 errors (permissions, etc.) - re-throw
+            throw s3Error;
+          }
+        }
+      }
+    } catch (error) {
+      // Log the full error for debugging with stack trace
+      console.error('=== PDF GENERATION ENDPOINT ERROR ===');
+      console.error('Error type:', error?.constructor?.name || typeof error);
+      
+      // If it's already an HttpException, re-throw it as-is
+      if (error instanceof NotFoundException || error instanceof BadRequestException || error instanceof InternalServerErrorException) {
+        throw error;
+      }
+      
+      // Enhanced error logging
+      if (error instanceof Error) {
+        console.error('Error name:', error.name);
+        console.error('Error message:', error.message);
+        console.error('Error stack:', error.stack);
+      } else if (error && typeof error === 'object') {
+        try {
+          console.error('Error object (stringified):', JSON.stringify(error, Object.getOwnPropertyNames(error), 2));
+        } catch (stringifyError) {
+          console.error('Error object (as string):', String(error));
+        }
+      } else {
+        console.error('Error (primitive):', error);
+      }
+      
+      // Use helper method to safely extract error message (prevents "[object Object]")
+      const errorMessage = this.extractErrorMessage(error);
+      
+      // Ensure we don't double-wrap "Failed to generate PDF" prefix
+      const finalMessage = errorMessage.startsWith('Failed to generate PDF')
+        ? errorMessage
+        : `Failed to generate PDF: ${errorMessage}`;
+      
+      throw new InternalServerErrorException(finalMessage);
+    }
   }
 
   @Post(':id/pay')
@@ -710,5 +835,120 @@ export class InvoicesController {
     );
 
     return { archived };
+  }
+
+  /**
+   * Safely extract error message from any error type.
+   * Handles Error instances, HttpExceptions, nested objects, and prevents "[object Object]" messages.
+   */
+  private extractErrorMessage(error: unknown, maxDepth: number = 5): string {
+    if (maxDepth <= 0) {
+      return 'Error message extraction exceeded maximum depth';
+    }
+
+    // Handle null/undefined
+    if (error == null) {
+      return 'Unknown error';
+    }
+
+    // Handle AggregateError (common with networking errors)
+    if (error && typeof error === 'object' && 'name' in error && error.name === 'AggregateError') {
+      const aggError = error as any;
+      // AggregateError has an errors array
+      if (Array.isArray(aggError.errors) && aggError.errors.length > 0) {
+        const firstError = aggError.errors[0];
+        const extractedMsg = this.extractErrorMessage(firstError, maxDepth - 1);
+        if (extractedMsg && extractedMsg !== '[object Object]') {
+          return extractedMsg;
+        }
+      }
+      // Check error code (e.g., ECONNREFUSED)
+      if (aggError.code) {
+        if (aggError.code === 'ECONNREFUSED') {
+          return 'Connection refused - S3 storage service is not available. Please check S3 configuration.';
+        }
+        return `Connection error (${aggError.code})`;
+      }
+      // Check message property
+      if (aggError.message) {
+        return this.extractErrorMessage(aggError.message, maxDepth - 1);
+      }
+    }
+
+    // Handle Error instances (includes HttpException)
+    if (error instanceof Error) {
+      // If the error message is already a string, use it
+      if (typeof error.message === 'string' && error.message.length > 0) {
+        // Check if message itself is "[object Object]" or similar
+        if (error.message === '[object Object]' || error.message.startsWith('[object ')) {
+          // Try to extract from nested error if it exists
+          if ((error as any).cause) {
+            return this.extractErrorMessage((error as any).cause, maxDepth - 1);
+          }
+          // Try to extract from error.response if it exists (common in HTTP errors)
+          if ((error as any).response?.data?.message) {
+            const nestedMsg = this.extractErrorMessage((error as any).response.data.message, maxDepth - 1);
+            if (nestedMsg && nestedMsg !== '[object Object]') {
+              return nestedMsg;
+            }
+          }
+          return 'An error occurred during PDF generation';
+        }
+        return error.message;
+      }
+      // If message is an object, recurse
+      if (typeof error.message === 'object') {
+        return this.extractErrorMessage(error.message, maxDepth - 1);
+      }
+      // Fallback to error name
+      return error.name || 'Error';
+    }
+
+    // Handle objects
+    if (typeof error === 'object') {
+      // Try to extract message property
+      if ('message' in error && error.message != null) {
+        const msg = this.extractErrorMessage((error as any).message, maxDepth - 1);
+        if (msg && msg !== '[object Object]') {
+          return msg;
+        }
+      }
+      
+      // Try to extract from error field
+      if ('error' in error && error.error != null) {
+        const errMsg = this.extractErrorMessage((error as any).error, maxDepth - 1);
+        if (errMsg && errMsg !== '[object Object]') {
+          return errMsg;
+        }
+      }
+
+      // Try to stringify safely
+      try {
+        const stringified = JSON.stringify(error, Object.getOwnPropertyNames(error), 2);
+        // If it's a simple object with a message-like structure, extract it
+        if (stringified.length < 500) {
+          return stringified;
+        }
+      } catch {
+        // JSON.stringify failed, try toString
+      }
+    }
+
+    // Handle arrays (sometimes error messages are in arrays)
+    if (Array.isArray(error)) {
+      const messages = error
+        .map((item) => this.extractErrorMessage(item, maxDepth - 1))
+        .filter((msg) => msg && msg !== '[object Object]');
+      if (messages.length > 0) {
+        return messages.join('; ');
+      }
+    }
+
+    // Final fallback - convert to string
+    const stringResult = String(error);
+    if (stringResult === '[object Object]') {
+      return 'An error occurred during PDF generation. Please check server logs for details.';
+    }
+    return stringResult;
   }
 }

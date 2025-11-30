@@ -4,21 +4,46 @@ import * as AWS from 'aws-sdk';
 
 @Injectable()
 export class S3Service {
-  private s3: AWS.S3;
-  private bucket: string;
-  private endpoint: string;
+  private s3: AWS.S3 | null = null;
+  private bucket: string | null = null;
+  private endpoint: string | null = null;
+  private isConfigured: boolean = false;
 
   constructor(private configService: ConfigService) {
+    // Check if S3 is properly configured
     this.endpoint = this.configService.get('S3_ENDPOINT');
     this.bucket = this.configService.get('S3_BUCKET');
+    const accessKeyId = this.configService.get('S3_ACCESS_KEY_ID');
+    const secretAccessKey = this.configService.get('S3_SECRET_ACCESS_KEY');
+    const region = this.configService.get('S3_REGION');
     
-    this.s3 = new AWS.S3({
-      endpoint: this.endpoint,
-      region: this.configService.get('S3_REGION'),
-      accessKeyId: this.configService.get('S3_ACCESS_KEY_ID'),
-      secretAccessKey: this.configService.get('S3_SECRET_ACCESS_KEY'),
-      s3ForcePathStyle: true,
-    });
+    // Only initialize S3 if all required config is present
+    if (this.endpoint && this.bucket && accessKeyId && secretAccessKey) {
+      try {
+        this.s3 = new AWS.S3({
+          endpoint: this.endpoint,
+          region: region || 'us-east-1',
+          accessKeyId: accessKeyId,
+          secretAccessKey: secretAccessKey,
+          s3ForcePathStyle: true,
+        });
+        this.isConfigured = true;
+        console.log(`[S3Service] S3 configured: endpoint=${this.endpoint}, bucket=${this.bucket}`);
+      } catch (error) {
+        console.warn('[S3Service] Failed to initialize S3 client:', error);
+        this.isConfigured = false;
+      }
+    } else {
+      console.log('[S3Service] S3 not configured - missing required environment variables. PDFs will be returned directly.');
+      this.isConfigured = false;
+    }
+  }
+
+  /**
+   * Check if S3 is properly configured and available
+   */
+  isAvailable(): boolean {
+    return this.isConfigured && this.s3 !== null && this.bucket !== null;
   }
 
   /**
@@ -28,8 +53,17 @@ export class S3Service {
    * @param contentType MIME type
    * @param isPublic Whether file should be publicly accessible (default: false for security)
    * @returns URL of uploaded file (public URL if isPublic=true, otherwise returns key for signed URL generation)
+   * @throws Error if S3 is not configured or upload fails
    */
   async uploadFile(key: string, buffer: Buffer, contentType: string, isPublic: boolean = false): Promise<string> {
+    if (!this.isAvailable()) {
+      throw new Error('S3 is not configured or unavailable');
+    }
+
+    if (!this.s3 || !this.bucket) {
+      throw new Error('S3 client not initialized');
+    }
+
     const params: AWS.S3.PutObjectRequest = {
       Bucket: this.bucket,
       Key: key,
@@ -61,6 +95,10 @@ export class S3Service {
    * @param key S3 object key (path)
    */
   async deleteFile(key: string): Promise<void> {
+    if (!this.isAvailable() || !this.s3 || !this.bucket) {
+      throw new Error('S3 is not configured or unavailable');
+    }
+
     const params: AWS.S3.DeleteObjectRequest = {
       Bucket: this.bucket,
       Key: key,
@@ -76,6 +114,10 @@ export class S3Service {
    * @returns Pre-signed URL
    */
   getSignedUrl(key: string, expiresIn: number = 3600): string {
+    if (!this.isAvailable() || !this.s3 || !this.bucket) {
+      throw new Error('S3 is not configured or unavailable');
+    }
+
     return this.s3.getSignedUrl('getObject', {
       Bucket: this.bucket,
       Key: key,
@@ -89,6 +131,10 @@ export class S3Service {
    * @returns Public URL (with CDN if configured)
    */
   getPublicUrl(key: string): string {
+    if (!this.isAvailable() || !this.bucket) {
+      throw new Error('S3 is not configured or unavailable');
+    }
+
     const cdnBaseUrl = this.configService.get<string>('CDN_BASE_URL');
     
     // Use CDN if configured
@@ -97,10 +143,10 @@ export class S3Service {
     }
     
     // Fallback to S3 URL
-    if (this.endpoint.includes('localhost') || this.endpoint.includes('127.0.0.1')) {
+    if (this.endpoint && (this.endpoint.includes('localhost') || this.endpoint.includes('127.0.0.1'))) {
       return `${this.endpoint}/${this.bucket}/${key}`;
     } else {
-      return `https://${this.bucket}.s3.${this.configService.get('S3_REGION')}.amazonaws.com/${key}`;
+      return `https://${this.bucket}.s3.${this.configService.get('S3_REGION') || 'us-east-1'}.amazonaws.com/${key}`;
     }
   }
 

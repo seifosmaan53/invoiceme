@@ -38,6 +38,7 @@ import { EmailService } from '../core/services/email.service';
 import { CsvService } from '../core/services/csv.service';
 import { NotificationService } from '../core/services/notification.service';
 import { InvoicesImportService } from './invoices-import.service';
+import { UserSettingsService } from '../user-settings/user-settings.service';
 import { CreateInvoiceDto, UpdateInvoiceDto } from './dto/invoice.dto';
 import { InvoiceFilterDto } from './dto/invoice-filter.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -75,6 +76,7 @@ export class InvoicesController {
     private readonly invoicesImportService: InvoicesImportService,
     @InjectRepository(Attachment)
     private attachmentRepository: Repository<Attachment>,
+    private readonly userSettingsService: UserSettingsService,
   ) {}
 
   @Get('stats')
@@ -321,11 +323,25 @@ export class InvoicesController {
     let pdfUrl: string | undefined;
     try {
       const userInfo = { name: user.name, companyName: user.companyName };
+      const userSettings = await this.userSettingsService.getForUser(user.userId);
       const invoiceData = {
         invoice: invoice,
         client: invoice.client,
         items: invoice.items || [],
         user: userInfo,
+        settings: {
+          logoUrl: userSettings.pdfLogoUrl || undefined,
+          primaryColor: userSettings.pdfPrimaryColor,
+          secondaryColor: userSettings.pdfSecondaryColor,
+          fontFamily: userSettings.pdfFontFamily,
+          layout: userSettings.pdfLayout,
+          showLogo: userSettings.pdfShowLogo,
+          showClientDetails: userSettings.pdfShowClientDetails,
+          showInvoiceDetails: userSettings.pdfShowInvoiceDetails,
+          showNotes: userSettings.pdfShowNotes,
+          showFooter: userSettings.pdfShowFooter,
+          thankYouMessage: userSettings.pdfThankYouMessage,
+        },
       };
       const pdfBuffer = await this.pdfService.generateInvoicePdf(invoiceData);
       const key = `pdfs/${invoice.id}/${invoice.number}.pdf`;
@@ -551,63 +567,85 @@ export class InvoicesController {
         res.send(pdfBuffer);
         return;
       } else {
-        // In production: Try to upload to S3, fallback to direct download if S3 unavailable
-        try {
-          const key = `pdfs/${invoice.id}/${invoice.number}.pdf`;
-          const url = await this.s3Service.uploadFile(key, pdfBuffer, 'application/pdf');
-          console.log(`[PDF Generation] PDF uploaded to S3: ${url}`);
+        // In production: Try to upload to S3 if available, otherwise return PDF directly
+        if (this.s3Service.isAvailable()) {
+          try {
+            const key = `pdfs/${invoice.id}/${invoice.number}.pdf`;
+            const url = await this.s3Service.uploadFile(key, pdfBuffer, 'application/pdf');
+            console.log(`[PDF Generation] PDF uploaded to S3: ${url}`);
 
-          await this.auditService.log(
-            user.userId,
-            AuditAction.EXPORT,
-            AuditResource.INVOICE,
-            id,
-            { invoiceNumber: invoice.number, action: 'generate_pdf', pdfUrl: url },
-            req.ip,
-          );
-
-          // In production, return JSON with URL
-          res.json({ url, invoiceId: invoice.id });
-          return;
-        } catch (s3Error: any) {
-          // Check if it's a connection error (S3 unavailable)
-          const isConnectionError = 
-            s3Error?.code === 'ECONNREFUSED' ||
-            s3Error?.code === 'ENOTFOUND' ||
-            s3Error?.code === 'ETIMEDOUT' ||
-            s3Error?.message?.includes('ECONNREFUSED') ||
-            s3Error?.message?.includes('Connection refused') ||
-            (s3Error?.name === 'AggregateError' && 
-             s3Error?.errors?.some((e: any) => e?.code === 'ECONNREFUSED'));
-
-          if (isConnectionError) {
-            // S3 is unavailable - fallback to direct PDF download
-            console.warn(`[PDF Generation] S3 unavailable (${s3Error?.code || s3Error?.message}), falling back to direct download`);
-            
             await this.auditService.log(
               user.userId,
               AuditAction.EXPORT,
               AuditResource.INVOICE,
               id,
-              { 
-                invoiceNumber: invoice.number, 
-                action: 'generate_pdf', 
-                mode: 'direct_download_fallback',
-                s3Error: s3Error?.code || s3Error?.message || 'S3 unavailable'
-              },
+              { invoiceNumber: invoice.number, action: 'generate_pdf', pdfUrl: url },
               req.ip,
             );
 
-            // Return PDF directly as fallback
-            res.setHeader('Content-Type', 'application/pdf');
-            res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-            res.setHeader('Content-Length', pdfBuffer.length.toString());
-            res.send(pdfBuffer);
+            // In production, return JSON with URL
+            res.json({ url, invoiceId: invoice.id });
             return;
-          } else {
-            // Other S3 errors (permissions, etc.) - re-throw
-            throw s3Error;
+          } catch (s3Error: any) {
+            // Check if it's a connection error (S3 unavailable)
+            const isConnectionError = 
+              s3Error?.code === 'ECONNREFUSED' ||
+              s3Error?.code === 'ENOTFOUND' ||
+              s3Error?.code === 'ETIMEDOUT' ||
+              s3Error?.message?.includes('ECONNREFUSED') ||
+              s3Error?.message?.includes('Connection refused') ||
+              s3Error?.message?.includes('S3 is not configured') ||
+              (s3Error?.name === 'AggregateError' && 
+               s3Error?.errors?.some((e: any) => e?.code === 'ECONNREFUSED'));
+
+            if (isConnectionError) {
+              // S3 is unavailable - fallback to direct PDF download
+              console.warn(`[PDF Generation] S3 unavailable (${s3Error?.code || s3Error?.message}), falling back to direct download`);
+              
+              await this.auditService.log(
+                user.userId,
+                AuditAction.EXPORT,
+                AuditResource.INVOICE,
+                id,
+                { 
+                  invoiceNumber: invoice.number, 
+                  action: 'generate_pdf', 
+                  mode: 'direct_download_fallback',
+                  s3Error: s3Error?.code || s3Error?.message || 'S3 unavailable'
+                },
+                req.ip,
+              );
+
+              // Return PDF directly as fallback
+              res.setHeader('Content-Type', 'application/pdf');
+              res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+              res.setHeader('Content-Length', pdfBuffer.length.toString());
+              res.send(pdfBuffer);
+              return;
+            } else {
+              // Other S3 errors (permissions, etc.) - re-throw
+              throw s3Error;
+            }
           }
+        } else {
+          // S3 not configured - return PDF directly
+          console.log(`[PDF Generation] S3 not configured, returning PDF directly (${pdfBuffer.length} bytes)`);
+          
+          await this.auditService.log(
+            user.userId,
+            AuditAction.EXPORT,
+            AuditResource.INVOICE,
+            id,
+            { invoiceNumber: invoice.number, action: 'generate_pdf', mode: 'direct_download_no_s3' },
+            req.ip,
+          );
+
+          // Return PDF directly
+          res.setHeader('Content-Type', 'application/pdf');
+          res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+          res.setHeader('Content-Length', pdfBuffer.length.toString());
+          res.send(pdfBuffer);
+          return;
         }
       }
     } catch (error) {

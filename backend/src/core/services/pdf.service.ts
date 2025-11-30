@@ -143,12 +143,9 @@ export class PdfService {
       
       console.log('[PDF Generation] Launching Puppeteer browser...');
       const chromePath = this.getChromeExecutablePath();
-      if (chromePath) {
-        console.log(`[PDF Generation] Using Chrome executable: ${chromePath}`);
-      } else {
-        console.log('[PDF Generation] Using Puppeteer bundled Chromium');
-      }
       
+      // Try to launch browser with fallback logic
+      let browser: puppeteer.Browser;
       const launchOptions: puppeteer.PuppeteerLaunchOptions = {
         headless: 'new', // Use new headless mode for better compatibility
         args: [
@@ -159,14 +156,58 @@ export class PdfService {
         ],
       };
       
-      // Only set executablePath if we have a specific path
-      // If undefined, Puppeteer will use its bundled Chromium (better for Apple Silicon + x64 Node)
-      if (chromePath) {
-        launchOptions.executablePath = chromePath;
+      try {
+        if (chromePath) {
+          console.log(`[PDF Generation] Using Chrome executable: ${chromePath}`);
+          launchOptions.executablePath = chromePath;
+          browser = await puppeteer.launch(launchOptions);
+        } else {
+          console.log('[PDF Generation] Attempting to use Puppeteer bundled Chromium');
+          // Try bundled Chromium first
+          browser = await puppeteer.launch(launchOptions);
+        }
+        console.log('[PDF Generation] Browser launched successfully');
+      } catch (bundledError: any) {
+        // If bundled Chromium fails, try system Chrome as fallback
+        if (!chromePath && process.platform === 'darwin') {
+          console.warn('[PDF Generation] Bundled Chromium failed, trying system Chrome as fallback...');
+          console.warn(`[PDF Generation] Error: ${bundledError?.message || bundledError}`);
+          
+          const systemChromePath = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
+          const systemChromiumPath = '/Applications/Chromium.app/Contents/MacOS/Chromium';
+          
+          let fallbackPath: string | null = null;
+          if (fs.existsSync(systemChromePath)) {
+            fallbackPath = systemChromePath;
+          } else if (fs.existsSync(systemChromiumPath)) {
+            fallbackPath = systemChromiumPath;
+          }
+          
+          if (fallbackPath) {
+            console.log(`[PDF Generation] Using fallback Chrome: ${fallbackPath}`);
+            launchOptions.executablePath = fallbackPath;
+            try {
+              browser = await puppeteer.launch(launchOptions);
+              console.log('[PDF Generation] Browser launched successfully with fallback');
+            } catch (fallbackError: any) {
+              console.error('[PDF Generation] Fallback Chrome also failed:', fallbackError?.message || fallbackError);
+              throw new Error(
+                `Failed to launch browser. Bundled Chromium failed: ${bundledError?.message || 'Unknown error'}. ` +
+                `Fallback Chrome also failed: ${fallbackError?.message || 'Unknown error'}. ` +
+                `Please ensure Chrome is installed or set PUPPETEER_EXECUTABLE_PATH environment variable.`
+              );
+            }
+          } else {
+            throw new Error(
+              `Failed to launch bundled Chromium: ${bundledError?.message || 'Unknown error'}. ` +
+              `No system Chrome found. Please install Chrome or set PUPPETEER_EXECUTABLE_PATH environment variable.`
+            );
+          }
+        } else {
+          // Re-throw if we don't have a fallback option
+          throw bundledError;
+        }
       }
-      
-      const browser = await puppeteer.launch(launchOptions);
-      console.log('[PDF Generation] Browser launched successfully');
 
       try {
         console.log('[PDF Generation] Creating new page...');

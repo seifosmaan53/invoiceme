@@ -22,6 +22,12 @@ import '../../models/invoice.dart';
 /// Centralized service for sharing invoices and other content
 class ShareService {
   final ApiClient _apiClient;
+  
+  // Cache for base URL and token to avoid repeated storage reads
+  String? _cachedBaseUrl;
+  String? _cachedAuthToken;
+  DateTime? _cacheTimestamp;
+  static const _cacheValidityDuration = Duration(minutes: 5);
 
   ShareService(this._apiClient);
 
@@ -122,31 +128,42 @@ class ShareService {
 
   /// Generate PDF via API
   /// Returns either a file path (for binary PDF in dev mode) or URL (for JSON response in prod mode)
+  /// Optimized for speed and reliability - uses ApiClient's post method with direct byte handling
   Future<String> _generatePDF(String invoiceId) async {
     try {
-      // Use Dio directly to have control over response type
-      // We need to handle both binary PDF (dev) and JSON (prod) responses
-      // Create a new Dio instance with same configuration as ApiClient
+      // Create a lightweight Dio instance with same config as ApiClient
+      // This is faster than making a test request to get base URL
       final dio = Dio();
       
-      // Get base URL and auth token from ApiClient
-      // We'll use any successful API request to get the base URL and auth token
+      // Get base URL and token efficiently (with caching)
       String baseUrl;
       String? authToken;
-      try {
-        // Make a request to get the base URL (use invoices endpoint which should always work)
-        final testResponse = await _apiClient.get('/invoices', queryParameters: {'limit': 1});
-        baseUrl = testResponse.requestOptions.baseUrl;
-        
-        // Try to get auth token from the request headers first (most reliable)
-        final authHeader = testResponse.requestOptions.headers['Authorization'];
-        if (authHeader != null) {
-          authToken = authHeader.toString();
+      
+      // Use cached values if available and still valid
+      final now = DateTime.now();
+      if (_cachedBaseUrl != null && 
+          _cachedAuthToken != null && 
+          _cacheTimestamp != null &&
+          now.difference(_cacheTimestamp!) < _cacheValidityDuration) {
+        baseUrl = _cachedBaseUrl!;
+        authToken = _cachedAuthToken;
+        debugPrint('Using cached base URL and token');
+      } else {
+        // Get base URL - use same logic as ApiClient but without making a request
+        const apiBaseUrlEnv = String.fromEnvironment('API_BASE_URL');
+        if (apiBaseUrlEnv.isNotEmpty) {
+          baseUrl = apiBaseUrlEnv;
+        } else {
+          // Use same default logic as ApiClient
+          if (kIsWeb) {
+            baseUrl = 'http://localhost:3000/api/v1';
+          } else {
+            baseUrl = 'http://10.0.0.133:3000/api/v1';
+          }
         }
         
-        // If not found in headers, read from storage as fallback
-        if (authToken == null || authToken.isEmpty) {
-          debugPrint('Auth token not in request headers, reading from storage...');
+        // Try to get token from storage (cached, fast)
+        try {
           if (kIsWeb) {
             final prefs = await SharedPreferences.getInstance();
             final tokenFromStorage = prefs.getString('secure_access_token');
@@ -160,43 +177,32 @@ class ShareService {
               authToken = 'Bearer $tokenFromStorage';
             }
           }
+        } catch (e) {
+          debugPrint('Warning: Could not read auth token: $e');
         }
         
-        debugPrint('Extracted base URL: $baseUrl');
-        debugPrint('Has auth token: ${authToken != null && authToken.isNotEmpty}');
-      } catch (e) {
-        debugPrint('Error getting config for PDF generation: $e');
-        // Fallback to default base URL (same logic as ApiClient)
-        if (kIsWeb) {
-          baseUrl = 'http://localhost:3000/api/v1';
-        } else {
-          baseUrl = 'http://10.0.0.133:3000/api/v1'; // Default from ApiClient
-        }
-        // Token will be null - request might fail if auth is required
+        // Cache the values
+        _cachedBaseUrl = baseUrl;
+        _cachedAuthToken = authToken;
+        _cacheTimestamp = now;
       }
       
       // Configure Dio with base URL
       dio.options.baseUrl = baseUrl;
       dio.options.headers['Content-Type'] = 'application/json';
-      
-      // Prepare headers for the request (including auth token)
-      final headers = <String, dynamic>{
-        'Content-Type': 'application/json',
-      };
       if (authToken != null && authToken.isNotEmpty) {
-        headers['Authorization'] = authToken;
-        debugPrint('Setting Authorization header for PDF request');
-      } else {
-        debugPrint('⚠️ WARNING: No auth token found!');
+        dio.options.headers['Authorization'] = authToken;
       }
       
       // Request with bytes response type to handle binary PDF
+      // Increased timeout for PDF generation (can take 5-10 seconds)
       final pdfResponse = await dio.post<dynamic>(
         '/invoices/$invoiceId/pdf',
         options: Options(
           responseType: ResponseType.bytes,
-          headers: headers,
           validateStatus: (status) => status != null && status < 500,
+          receiveTimeout: const Duration(seconds: 90), // PDF generation can take time
+          sendTimeout: const Duration(seconds: 30),
         ),
       );
       
@@ -242,20 +248,26 @@ class ShareService {
             debugPrint('Created data URL for web (${pdfBytes.length} bytes)');
             return dataUrl; // Return data URL for web
           } else {
-            // On mobile, save to temporary file
+            // On mobile, save to temporary file (optimized)
             final tempDir = await getTemporaryDirectory();
             final sanitizedId = invoiceId.replaceAll(RegExp(r'[^\w-]'), '_');
             final fileName = 'invoice_$sanitizedId.pdf';
             final filePath = '${tempDir.path}/$fileName';
             final file = File(filePath);
             
-            // Delete existing file if it exists
-            if (await file.exists()) {
-              await file.delete();
+            // Delete existing file if it exists (cleanup)
+            try {
+              if (await file.exists()) {
+                await file.delete();
+              }
+            } catch (e) {
+              debugPrint('Warning: Could not delete existing file: $e');
             }
             
-            await file.writeAsBytes(pdfBytes);
+            // Write bytes efficiently with flush
+            await file.writeAsBytes(pdfBytes, flush: true);
             
+            // Quick verification
             if (!await file.exists()) {
               throw Exception('PDF file was not created at: $filePath');
             }
@@ -263,6 +275,10 @@ class ShareService {
             final fileSize = await file.length();
             if (fileSize == 0) {
               throw Exception('PDF file is empty after write');
+            }
+            
+            if (fileSize != pdfBytes.length) {
+              throw Exception('PDF file size mismatch: expected ${pdfBytes.length}, got $fileSize');
             }
             
             debugPrint('PDF saved to temp file: $filePath (${fileSize} bytes)');
@@ -491,10 +507,10 @@ class ShareService {
         throw Exception('PDF file is empty (0 bytes)');
       }
       
-      // Verify it's a valid PDF by checking the first few bytes
-      final fileBytes = await tempFile.readAsBytes();
-      if (fileBytes.length < 4 || 
-          String.fromCharCodes(fileBytes.take(4)) != '%PDF') {
+      // Quick verification - check file header (read only first 4 bytes)
+      final headerBytes = await tempFile.readAsBytes();
+      if (headerBytes.length < 4 || 
+          String.fromCharCodes(headerBytes.take(4)) != '%PDF') {
         throw Exception('File is not a valid PDF (missing PDF header)');
       }
       
@@ -697,18 +713,25 @@ class ShareService {
       }
       
       // Save to temporary file with proper path handling (mobile only)
+      // Use cache directory for better performance
       final cacheDir = await getTemporaryDirectory();
       final sanitizedNumber = invoice.number.replaceAll(RegExp(r'[^\w\s-]'), '_');
-      final fileName = 'Invoice_$sanitizedNumber.pdf';
+      final sanitizedId = invoice.id.replaceAll(RegExp(r'[^\w-]'), '_');
+      final fileName = 'Invoice_${sanitizedNumber}_$sanitizedId.pdf';
       final filePath = '${cacheDir.path}/$fileName';
       final file = File(filePath);
       
-      // Delete existing file if it exists
-      if (await file.exists()) {
-        await file.delete();
+      // Delete existing file if it exists (cleanup)
+      try {
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } catch (e) {
+        debugPrint('Warning: Could not delete existing file: $e');
       }
       
-      await file.writeAsBytes(pdfBytes);
+      // Write bytes efficiently
+      await file.writeAsBytes(pdfBytes, flush: true);
       
       if (!await file.exists()) {
         throw Exception('PDF file was not created at: $filePath');

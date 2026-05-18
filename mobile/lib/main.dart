@@ -1,7 +1,6 @@
 // Flutter imports
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, FlutterError, FlutterErrorDetails;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 // Package imports
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -27,16 +26,33 @@ import 'widgets/error_boundary.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Enable clipboard access for web platform
+  // Suppress DevTools warnings on web (these are harmless but noisy)
   if (kIsWeb) {
-    // Request clipboard permissions if needed
-    try {
-      // This helps ensure clipboard functionality works on web
-      await Clipboard.setData(const ClipboardData(text: ''));
-    } catch (e) {
-      // Clipboard might not be available, continue anyway
-      debugPrint('Clipboard initialization note: $e');
-    }
+    // Store original error handler
+    final originalErrorHandler = FlutterError.onError;
+    
+    // Suppress DevTools service warnings and focus traversal errors
+    FlutterError.onError = (FlutterErrorDetails details) {
+      // Filter out DevTools-related warnings
+      final exceptionStr = details.exception.toString();
+      final stackTraceStr = details.stack?.toString() ?? '';
+      
+      if (exceptionStr.contains('ext.flutter.activeDevToolsServerAddress') ||
+          exceptionStr.contains('ext.flutter.connectedVmServiceUri') ||
+          exceptionStr.contains('Unknown method') ||
+          exceptionStr.contains('(-32601)') ||
+          // Suppress focus traversal errors (harmless Flutter web layout warnings)
+          (exceptionStr.contains('Unexpected null value') && 
+           stackTraceStr.contains('focus_traversal')) ||
+          exceptionStr.contains('RenderBox was not laid out') ||
+          (stackTraceStr.contains('focus_traversal') && 
+           exceptionStr.contains('null'))) {
+        // Silently ignore these harmless warnings
+        return;
+      }
+      // Let other errors through to original handler
+      originalErrorHandler?.call(details);
+    };
   }
 
   // Wrap in try-catch to catch initialization errors

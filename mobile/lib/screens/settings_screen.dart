@@ -14,7 +14,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:share_plus/share_plus.dart';
+import '../core/providers/providers.dart';
+import '../core/services/share_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // Local imports - Core
@@ -715,6 +716,14 @@ class _PdfSettingsTileState extends ConsumerState<_PdfSettingsTile> {
   Color _primaryColor = const Color(0xFF4a90e2);
   Color _secondaryColor = const Color(0xFF333333);
   String _fontFamily = 'Arial';
+  String _layout = 'classic';
+  bool _showLogo = true;
+  bool _showClientDetails = true;
+  bool _showInvoiceDetails = true;
+  bool _showNotes = true;
+  bool _showFooter = true;
+  String _thankYouMessage = 'Thank you for your business!';
+  final TextEditingController _thankYouController = TextEditingController();
   bool _isLoading = true;
   bool _isSaving = false;
 
@@ -722,6 +731,12 @@ class _PdfSettingsTileState extends ConsumerState<_PdfSettingsTile> {
   void initState() {
     super.initState();
     _loadSettings();
+  }
+
+  @override
+  void dispose() {
+    _thankYouController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSettings() async {
@@ -739,6 +754,16 @@ class _PdfSettingsTileState extends ConsumerState<_PdfSettingsTile> {
         _primaryColor = _hexToColor(primaryColorStr);
         _secondaryColor = _hexToColor(secondaryColorStr);
         _fontFamily = data['pdfFontFamily'] ?? data['pdf_font_family'] ?? 'Arial';
+        _layout = (data['pdfLayout'] ?? data['pdf_layout'] ?? 'classic').toString();
+        _showLogo = _readBool(data, 'pdfShowLogo', 'pdf_show_logo', true);
+        _showClientDetails = _readBool(data, 'pdfShowClientDetails', 'pdf_show_client_details', true);
+        _showInvoiceDetails = _readBool(data, 'pdfShowInvoiceDetails', 'pdf_show_invoice_details', true);
+        _showNotes = _readBool(data, 'pdfShowNotes', 'pdf_show_notes', true);
+        _showFooter = _readBool(data, 'pdfShowFooter', 'pdf_show_footer', true);
+        _thankYouMessage = data['pdfThankYouMessage'] ??
+            data['pdf_thank_you_message'] ??
+            'Thank you for your business!';
+        _thankYouController.text = _thankYouMessage;
         _isLoading = false;
       });
     } catch (e) {
@@ -753,6 +778,22 @@ class _PdfSettingsTileState extends ConsumerState<_PdfSettingsTile> {
         );
       }
     }
+  }
+
+  bool _readBool(Map<String, dynamic> data, String camelKey, String snakeKey, bool fallback) {
+    dynamic value = data[camelKey];
+    if (value == null) {
+      value = data[snakeKey];
+    }
+    if (value == null) {
+      return fallback;
+    }
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      return value.toLowerCase() == 'true' || value == '1';
+    }
+    return fallback;
   }
 
   Color _hexToColor(String hex) {
@@ -819,10 +860,17 @@ class _PdfSettingsTileState extends ConsumerState<_PdfSettingsTile> {
       final apiClient = ref.read(apiClientProvider);
       // Correct path: /user-settings (base URL already includes /api/v1)
       await apiClient.patch('/user-settings', data: {
-        if (_logoUrl != null && _logoUrl!.isNotEmpty) 'pdfLogoUrl': _logoUrl,
+        'pdfLogoUrl': _logoUrl,
         'pdfPrimaryColor': _colorToHex(_primaryColor),
         'pdfSecondaryColor': _colorToHex(_secondaryColor),
         'pdfFontFamily': _fontFamily,
+        'pdfLayout': _layout,
+        'pdfShowLogo': _showLogo,
+        'pdfShowClientDetails': _showClientDetails,
+        'pdfShowInvoiceDetails': _showInvoiceDetails,
+        'pdfShowNotes': _showNotes,
+        'pdfShowFooter': _showFooter,
+        'pdfThankYouMessage': _thankYouMessage.trim().isEmpty ? null : _thankYouMessage.trim(),
       });
       if (mounted) {
         // Reload settings from backend to ensure UI reflects saved values
@@ -974,6 +1022,75 @@ class _PdfSettingsTileState extends ConsumerState<_PdfSettingsTile> {
               DropdownMenuItem(value: 'Verdana', child: Text('Verdana')),
             ],
             onChanged: (value) => setState(() => _fontFamily = value!),
+          ),
+        ),
+        const Divider(height: 1),
+
+        // Layout selection
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: DropdownButtonFormField<String>(
+            value: _layout,
+            decoration: const InputDecoration(
+              labelText: 'Layout Style',
+              border: OutlineInputBorder(),
+            ),
+            items: const [
+              DropdownMenuItem(value: 'classic', child: Text('Classic (detailed)')),
+              DropdownMenuItem(value: 'minimal', child: Text('Minimal (clean)')),
+            ],
+            onChanged: (value) {
+              if (value == null) return;
+              setState(() => _layout = value);
+            },
+          ),
+        ),
+
+        // Toggles
+        SwitchListTile.adaptive(
+          title: const Text('Show Logo'),
+          subtitle: const Text('Display company logo in header'),
+          value: _showLogo,
+          onChanged: (value) => setState(() => _showLogo = value),
+        ),
+        SwitchListTile.adaptive(
+          title: const Text('Show Client Details'),
+          subtitle: const Text('Display Bill To section'),
+          value: _showClientDetails,
+          onChanged: (value) => setState(() => _showClientDetails = value),
+        ),
+        SwitchListTile.adaptive(
+          title: const Text('Show Invoice Details'),
+          subtitle: const Text('Display metadata block (currency, type, etc.)'),
+          value: _showInvoiceDetails,
+          onChanged: (value) => setState(() => _showInvoiceDetails = value),
+        ),
+        SwitchListTile.adaptive(
+          title: const Text('Show Notes'),
+          subtitle: const Text('Include notes when invoice has notes'),
+          value: _showNotes,
+          onChanged: (value) => setState(() => _showNotes = value),
+        ),
+        SwitchListTile.adaptive(
+          title: const Text('Show Footer'),
+          subtitle: const Text('Display thank-you message at bottom of PDF'),
+          value: _showFooter,
+          onChanged: (value) => setState(() => _showFooter = value),
+        ),
+
+        // Thank you message
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: TextField(
+            controller: _thankYouController,
+            maxLines: 2,
+            maxLength: 200,
+            decoration: const InputDecoration(
+              labelText: 'Thank-you Message',
+              hintText: 'Thank you for your business!',
+              border: OutlineInputBorder(),
+            ),
+            onChanged: (value) => _thankYouMessage = value,
           ),
         ),
 
@@ -1503,8 +1620,10 @@ class _DataManagementTile extends ConsumerWidget {
             : response.data.toString();
         
         // Share the CSV file
-        await Share.share(
-          csvData,
+        final shareService = ref.read(shareServiceProvider);
+        await shareService.shareText(
+          text: csvData,
+          context: context,
           subject: 'InvoiceMe ${choice == 'clients' ? 'Clients' : 'Invoices'} Export',
         );
         
@@ -1707,8 +1826,10 @@ class _DataManagementTile extends ConsumerWidget {
       
       if (context.mounted) {
         Navigator.pop(context); // Close loading dialog
-        await Share.share(
-          jsonString,
+        final shareService = ref.read(shareServiceProvider);
+        await shareService.shareText(
+          text: jsonString,
+          context: context,
           subject: 'InvoiceMe Data Export',
         );
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1944,8 +2065,10 @@ class _GdprTile extends ConsumerWidget {
       
       if (context.mounted) {
         Navigator.pop(context); // Close loading dialog
-        await Share.share(
-          jsonString,
+        final shareService = ref.read(shareServiceProvider);
+        await shareService.shareText(
+          text: jsonString,
+          context: context,
           subject: 'InvoiceMe Data Export',
         );
         ScaffoldMessenger.of(context).showSnackBar(
@@ -2183,7 +2306,7 @@ class _GdprTile extends ConsumerWidget {
                         : null,
                   ),
                   onChanged: (value) => setState(() {}),
-                  autofocus: true,
+                  // autofocus: true, // Disabled to prevent Flutter web focus errors
                 ),
               ],
             ),
@@ -2387,12 +2510,21 @@ class _AboutTile extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
-                TextButton.icon(
-                  onPressed: () async {
-                    await Share.share('Check out InvoiceMe - Professional invoicing made simple!');
+                Consumer(
+                  builder: (context, ref, _) {
+                    return TextButton.icon(
+                      onPressed: () async {
+                        final shareService = ref.read(shareServiceProvider);
+                        await shareService.shareText(
+                          text: 'Check out InvoiceMe - Professional invoicing made simple!',
+                          context: context,
+                          subject: 'InvoiceMe App',
+                        );
+                      },
+                      icon: const Icon(Icons.share),
+                      label: const Text('Share'),
+                    );
                   },
-                  icon: const Icon(Icons.share),
-                  label: const Text('Share'),
                 ),
                 TextButton.icon(
                   onPressed: () async {

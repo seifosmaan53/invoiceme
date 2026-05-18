@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart' show kIsWeb, debugPrint;
+import 'package:flutter/foundation.dart' show kIsWeb, kDebugMode, debugPrint;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -686,6 +686,12 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
       );
 
       final apiClient = ref.read(apiClientProvider);
+      
+      // Clear cache for this invoice and related endpoints to avoid stale data
+      apiClient.clearCache('/invoices/${invoice.id}');
+      apiClient.clearCache('/invoices');
+      apiClient.clearCache('/invoices/stats');
+      
       await apiClient.patch(
         '/invoices/${invoice.id}',
         data: {'status': newStatus.name},
@@ -693,8 +699,43 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
 
       if (mounted) {
         Navigator.pop(context); // Close loading dialog
-        await _loadFullInvoice(); // Reload to show updated status and recalculate if needed
-        setState(() {}); // Force UI update
+        
+        // Optimistic update: Create new invoice instance with updated status
+        if (_fullInvoice != null) {
+          setState(() {
+            _fullInvoice = Invoice(
+              id: _fullInvoice!.id,
+              userId: _fullInvoice!.userId,
+              clientId: _fullInvoice!.clientId,
+              type: _fullInvoice!.type,
+              number: _fullInvoice!.number,
+              status: newStatus, // Updated status
+              issueDate: _fullInvoice!.issueDate,
+              dueDate: _fullInvoice!.dueDate,
+              currency: _fullInvoice!.currency,
+              subtotal: _fullInvoice!.subtotal,
+              taxTotal: _fullInvoice!.taxTotal,
+              discountTotal: _fullInvoice!.discountTotal,
+              total: _fullInvoice!.total,
+              notes: _fullInvoice!.notes,
+              metadataJson: _fullInvoice!.metadataJson,
+              createdAt: _fullInvoice!.createdAt,
+              updatedAt: DateTime.now(), // Update timestamp
+              deletedAt: _fullInvoice!.deletedAt,
+              client: _fullInvoice!.client,
+              items: _fullInvoice!.items,
+            );
+          });
+        }
+        
+        // Reload in background for any server-side calculations, but don't block UI
+        _loadFullInvoice().catchError((e) {
+          // If reload fails, we already updated UI optimistically
+          if (kDebugMode) {
+            debugPrint('Background reload failed: $e');
+          }
+        });
+        
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Status changed to ${newStatus.name.toUpperCase()}'),
@@ -715,20 +756,57 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
     
     try {
       final apiClient = ref.read(apiClientProvider);
+      
+      // Clear cache for this invoice and related endpoints
+      apiClient.clearCache('/invoices/${_fullInvoice!.id}');
+      apiClient.clearCache('/invoices');
+      apiClient.clearCache('/invoices/stats');
+      
       await apiClient.patch(
         '/invoices/${_fullInvoice!.id}',
         data: {'status': 'sent'},
       );
       
       if (mounted) {
+        // Optimistic update: Create new invoice instance with updated status
+        setState(() {
+          _fullInvoice = Invoice(
+            id: _fullInvoice!.id,
+            userId: _fullInvoice!.userId,
+            clientId: _fullInvoice!.clientId,
+            type: _fullInvoice!.type,
+            number: _fullInvoice!.number,
+            status: InvoiceStatus.sent, // Updated status
+            issueDate: _fullInvoice!.issueDate,
+            dueDate: _fullInvoice!.dueDate,
+            currency: _fullInvoice!.currency,
+            subtotal: _fullInvoice!.subtotal,
+            taxTotal: _fullInvoice!.taxTotal,
+            discountTotal: _fullInvoice!.discountTotal,
+            total: _fullInvoice!.total,
+            notes: _fullInvoice!.notes,
+            metadataJson: _fullInvoice!.metadataJson,
+            createdAt: _fullInvoice!.createdAt,
+            updatedAt: DateTime.now(), // Update timestamp
+            deletedAt: _fullInvoice!.deletedAt,
+            client: _fullInvoice!.client,
+            items: _fullInvoice!.items,
+          );
+        });
+        
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Invoice marked as sent successfully!'),
             backgroundColor: Colors.green,
           ),
         );
-        await _loadFullInvoice(); // Reload to show updated status immediately
-        setState(() {}); // Force UI update
+        
+        // Reload in background for any server-side calculations
+        _loadFullInvoice().catchError((e) {
+          if (kDebugMode) {
+            debugPrint('Background reload failed: $e');
+          }
+        });
       }
     } catch (e) {
       if (mounted) {

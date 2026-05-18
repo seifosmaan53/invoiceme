@@ -76,18 +76,28 @@ class _PaymentScreenState extends ConsumerState<PaymentScreen> {
 
     try {
       final apiClient = ref.read(apiClientProvider);
+      
+      // Clear cache for this invoice and invoices list to avoid stale data
+      apiClient.clearCache('/invoices/${widget.invoice.id}');
+      apiClient.clearCache('/invoices');
+      apiClient.clearCache('/invoices/stats');
+      
       final response = await apiClient.patch(
         '/invoices/${widget.invoice.id}',
         data: {'status': 'paid'},
       );
 
       if (response.statusCode == 200) {
-        // Trigger refresh to update invoice status in all screens
-        triggerRefresh(ref, RefreshType.invoices);
-        triggerRefresh(ref, RefreshType.dashboard);
-        
+        // Update state immediately (optimistic update)
         setState(() {
           _isLoading = false;
+        });
+
+        // Trigger refresh AFTER UI update for better perceived performance
+        // Use a small delay to let UI update first
+        Future.microtask(() {
+          triggerRefresh(ref, RefreshType.invoices);
+          triggerRefresh(ref, RefreshType.dashboard);
         });
 
         if (mounted) {

@@ -13,6 +13,7 @@ import { Payment } from '../entities/payment.entity';
 import { CoreServicesModule } from '../core/core-services.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { ApiKeysModule } from '../api-keys/api-keys.module';
+import { UserSettingsModule } from '../user-settings/user-settings.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { ApiKeysModule } from '../api-keys/api-keys.module';
     CoreServicesModule,
     PaymentsModule,
     ApiKeysModule,
+    UserSettingsModule,
   ],
   controllers: [InvoicesController],
   providers: [InvoicesService, InvoiceStatusService, InvoicesImportService],

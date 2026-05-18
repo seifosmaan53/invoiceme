@@ -39,9 +39,12 @@ class _ErrorBoundaryState extends ConsumerState<ErrorBoundary> {
       // Only show error UI for real errors, not harmless web warnings
       // Skip "No Directionality widget found" and similar web-specific warnings
       final exceptionStr = details.exception.toString();
+      final stackTraceStr = details.stack?.toString() ?? '';
       if (exceptionStr.contains('No Directionality widget found') ||
           exceptionStr.contains('LegacyJavaScriptObject') ||
-          exceptionStr.contains('DiagnosticsNode')) {
+          exceptionStr.contains('DiagnosticsNode') ||
+          (exceptionStr.contains('Unexpected null value') && 
+           stackTraceStr.contains('focus_traversal'))) {
         // These are harmless Flutter web warnings, don't show error UI
         return;
       }

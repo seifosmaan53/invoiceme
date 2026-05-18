@@ -26,6 +26,13 @@ export class UserSettingsService {
         pdfPrimaryColor: '#4a90e2',
         pdfSecondaryColor: '#333333',
         pdfFontFamily: 'Arial',
+        pdfLayout: 'classic',
+        pdfShowLogo: true,
+        pdfShowClientDetails: true,
+        pdfShowInvoiceDetails: true,
+        pdfShowNotes: true,
+        pdfShowFooter: true,
+        pdfThankYouMessage: null,
       });
       settings = await this.userSettingsRepo.save(settings);
     }
@@ -54,6 +61,27 @@ export class UserSettingsService {
     }
     if (dto.pdfFontFamily !== undefined) {
       existing.pdfFontFamily = dto.pdfFontFamily;
+    }
+    if (dto.pdfLayout !== undefined) {
+      existing.pdfLayout = dto.pdfLayout;
+    }
+    if (dto.pdfShowLogo !== undefined) {
+      existing.pdfShowLogo = dto.pdfShowLogo;
+    }
+    if (dto.pdfShowClientDetails !== undefined) {
+      existing.pdfShowClientDetails = dto.pdfShowClientDetails;
+    }
+    if (dto.pdfShowInvoiceDetails !== undefined) {
+      existing.pdfShowInvoiceDetails = dto.pdfShowInvoiceDetails;
+    }
+    if (dto.pdfShowNotes !== undefined) {
+      existing.pdfShowNotes = dto.pdfShowNotes;
+    }
+    if (dto.pdfShowFooter !== undefined) {
+      existing.pdfShowFooter = dto.pdfShowFooter;
+    }
+    if (dto.pdfThankYouMessage !== undefined) {
+      existing.pdfThankYouMessage = dto.pdfThankYouMessage || null;
     }
 
     return this.userSettingsRepo.save(existing);

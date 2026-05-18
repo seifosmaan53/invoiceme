@@ -79,10 +79,17 @@ final lightTheme = ThemeData(
       TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
     },
   ),
-  appBarTheme: const AppBarTheme(
-    backgroundColor: Color(0xFF4a90e2),
-    foregroundColor: Colors.white,
+  appBarTheme: AppBarTheme(
+    backgroundColor: ColorScheme.fromSeed(
+      seedColor: const Color(0xFF4a90e2),
+      brightness: Brightness.light,
+    ).surface,
+    foregroundColor: ColorScheme.fromSeed(
+      seedColor: const Color(0xFF4a90e2),
+      brightness: Brightness.light,
+    ).onSurface,
     elevation: 0,
+    surfaceTintColor: Colors.transparent,
     centerTitle: false,
   ),
   cardTheme: CardThemeData(
@@ -127,10 +134,17 @@ final darkTheme = ThemeData(
       TargetPlatform.linux: FadeUpwardsPageTransitionsBuilder(),
     },
   ),
-  appBarTheme: const AppBarTheme(
-    backgroundColor: Color(0xFF1a1a1a),
-    foregroundColor: Colors.white,
+  appBarTheme: AppBarTheme(
+    backgroundColor: ColorScheme.fromSeed(
+      seedColor: const Color(0xFF4a90e2),
+      brightness: Brightness.dark,
+    ).surface,
+    foregroundColor: ColorScheme.fromSeed(
+      seedColor: const Color(0xFF4a90e2),
+      brightness: Brightness.dark,
+    ).onSurface,
     elevation: 0,
+    surfaceTintColor: Colors.transparent,
     centerTitle: false,
   ),
   cardTheme: CardThemeData(

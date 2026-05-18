@@ -2,8 +2,8 @@
   "name": "invoiceme-backend",
   "version": "1.0.0",
   "description": "InvoiceMe backend API",
-  "author": "",
-  "license": "UNLICENSED",
+  "author": "Seif Osman",
+  "license": "MIT",
   "scripts": {
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",

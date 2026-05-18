@@ -324,24 +324,28 @@ export class InvoicesController {
     try {
       const userInfo = { name: user.name, companyName: user.companyName };
       const userSettings = await this.userSettingsService.getForUser(user.userId);
+      
+      // Map user settings to PDF service format (same as generatePdf)
+      const pdfSettings = {
+        logoUrl: userSettings.pdfLogoUrl || '',
+        primaryColor: userSettings.pdfPrimaryColor || '#4a90e2',
+        secondaryColor: userSettings.pdfSecondaryColor || '#333333',
+        fontFamily: userSettings.pdfFontFamily || 'Arial',
+        layout: userSettings.pdfLayout || 'classic',
+        showLogo: userSettings.pdfShowLogo !== false,
+        showClientDetails: userSettings.pdfShowClientDetails !== false,
+        showInvoiceDetails: userSettings.pdfShowInvoiceDetails !== false,
+        showNotes: userSettings.pdfShowNotes !== false,
+        showFooter: userSettings.pdfShowFooter !== false,
+        thankYouMessage: userSettings.pdfThankYouMessage || 'Thank you for your business!',
+      };
+
       const invoiceData = {
         invoice: invoice,
         client: invoice.client,
         items: invoice.items || [],
         user: userInfo,
-        settings: {
-          logoUrl: userSettings.pdfLogoUrl || undefined,
-          primaryColor: userSettings.pdfPrimaryColor,
-          secondaryColor: userSettings.pdfSecondaryColor,
-          fontFamily: userSettings.pdfFontFamily,
-          layout: userSettings.pdfLayout,
-          showLogo: userSettings.pdfShowLogo,
-          showClientDetails: userSettings.pdfShowClientDetails,
-          showInvoiceDetails: userSettings.pdfShowInvoiceDetails,
-          showNotes: userSettings.pdfShowNotes,
-          showFooter: userSettings.pdfShowFooter,
-          thankYouMessage: userSettings.pdfThankYouMessage,
-        },
+        settings: pdfSettings,
       };
       const pdfBuffer = await this.pdfService.generateInvoicePdf(invoiceData);
       const key = `pdfs/${invoice.id}/${invoice.number}.pdf`;
@@ -531,11 +535,30 @@ export class InvoicesController {
         companyName: user.companyName || '',
       };
 
+      // Fetch user settings for PDF customization
+      const userSettings = await this.userSettingsService.getForUser(user.userId);
+
+      // Map user settings to PDF service format
+      const pdfSettings = {
+        logoUrl: userSettings.pdfLogoUrl || '',
+        primaryColor: userSettings.pdfPrimaryColor || '#4a90e2',
+        secondaryColor: userSettings.pdfSecondaryColor || '#333333',
+        fontFamily: userSettings.pdfFontFamily || 'Arial',
+        layout: userSettings.pdfLayout || 'classic',
+        showLogo: userSettings.pdfShowLogo !== false,
+        showClientDetails: userSettings.pdfShowClientDetails !== false,
+        showInvoiceDetails: userSettings.pdfShowInvoiceDetails !== false,
+        showNotes: userSettings.pdfShowNotes !== false,
+        showFooter: userSettings.pdfShowFooter !== false,
+        thankYouMessage: userSettings.pdfThankYouMessage || 'Thank you for your business!',
+      };
+
       const invoiceData = {
         invoice: invoice,
         client: invoice.client,
         items: invoice.items || [],
         user: userInfo,
+        settings: pdfSettings,
       };
 
       const pdfBuffer = await this.pdfService.generateInvoicePdf(invoiceData);
@@ -710,16 +733,35 @@ export class InvoicesController {
       throw new BadRequestException('Invoice total must be greater than zero');
     }
 
+    // Check if Stripe is configured
+    if (!this.stripeService.isAvailable()) {
+      throw new BadRequestException(
+        'Payment processing is not configured. Please contact support or configure Stripe in the backend settings.'
+      );
+    }
+
     // Create Stripe PaymentIntent
-    const paymentIntent = await this.stripeService.createPaymentIntent(
-      invoice.total,
-      invoice.currency,
-      {
-        invoice_id: invoice.id,
-        user_id: user.userId,
-        invoice_number: invoice.number,
-      },
-    );
+    let paymentIntent;
+    try {
+      paymentIntent = await this.stripeService.createPaymentIntent(
+        invoice.total,
+        invoice.currency,
+        {
+          invoice_id: invoice.id,
+          user_id: user.userId,
+          invoice_number: invoice.number,
+        },
+      );
+    } catch (error: any) {
+      // Provide user-friendly error messages
+      if (error?.message?.includes('Invalid Stripe API key')) {
+        throw new BadRequestException(
+          'Payment processing is not properly configured. Please contact support.'
+        );
+      }
+      // Re-throw other errors
+      throw error;
+    }
 
     // Create payment record in database
     await this.paymentsService.createPayment(

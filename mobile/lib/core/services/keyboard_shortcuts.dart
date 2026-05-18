@@ -77,7 +77,7 @@ class KeyboardShortcuts {
           _FocusSearchIntent: _FocusSearchAction(),
         },
         child: Focus(
-          autofocus: true,
+          // autofocus: true, // Disabled to prevent Flutter web focus errors
           child: child,
         ),
       ),

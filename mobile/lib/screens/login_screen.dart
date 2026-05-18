@@ -1,5 +1,5 @@
 // Flutter imports
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter/material.dart';
 
 // Package imports
@@ -382,17 +382,13 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final scaffold = Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24.0),
-            child: Form(
-              key: _formKey,
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
+    // On web, use full width with centered form; on mobile, use constrained width
+    final formContent = Form(
+      key: _formKey,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
                   Semantics(
                     label: 'InvoiceMe login',
                     child: const Icon(
@@ -578,16 +574,45 @@ class _LoginScreenState extends ConsumerState<LoginScreen> {
                   ),
                 ],
               ),
-            ),
-          ),
-        ),
+    );
+    
+    final scaffold = Scaffold(
+      body: SafeArea(
+        child: kIsWeb
+            ? LayoutBuilder(
+                builder: (context, constraints) {
+                  // Use responsive width on web - wider on larger screens
+                  final maxWidth = constraints.maxWidth > 800 ? 600.0 : 500.0;
+                  return Center(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.all(24.0),
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxWidth: maxWidth,
+                          minWidth: 0,
+                        ),
+                        child: formContent,
+                      ),
+                    ),
+                  );
+                },
+              )
+            : Center(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(24.0),
+                  child: formContent,
+                ),
+              ),
       ),
     );
     
-    // Wrap with MobileViewWrapper for consistent mobile-like layout on all platforms
+    // On web, return full-width scaffold; on mobile, use MobileViewWrapper
+    if (kIsWeb) {
+      return scaffold; // Full width on web
+    }
     return MobileViewWrapper(
       child: scaffold,
-      maxWidth: 500, // Slightly narrower for login screen
+      maxWidth: 500, // Constrained width on mobile
     );
   }
 }

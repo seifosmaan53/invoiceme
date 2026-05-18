@@ -595,9 +595,6 @@ export class InvoicesService {
     });
   }
 
-  /**
-   * Get dashboard statistics for a user
-   */
   async getDashboardStats(userId: string): Promise<{
     totalInvoices: number;
     totalUnpaid: number;
@@ -606,57 +603,35 @@ export class InvoicesService {
     totalRevenue: number;
     monthlyRevenue: number;
   }> {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const currentYear = today.getFullYear();
-    const currentMonth = today.getMonth() + 1; // PostgreSQL months are 1-indexed
+    const year = new Date().getFullYear();
+    const month = new Date().getMonth() + 1;
 
-    // Get all invoices for the user (only select needed fields for performance)
-    const allInvoices = await this.invoiceRepository
-      .createQueryBuilder('invoice')
-      .select(['invoice.status', 'invoice.total', 'invoice.dueDate', 'invoice.issueDate'])
-      .where('invoice.userId = :userId', { userId })
-      .andWhere('invoice.deletedAt IS NULL')
-      .getMany();
-
-    const totalInvoices = allInvoices.length;
-    const totalPaid = allInvoices.filter((inv) => inv.status === InvoiceStatus.PAID).length;
-    const totalUnpaid = allInvoices.filter(
-      (inv) => inv.status !== InvoiceStatus.PAID && inv.status !== InvoiceStatus.CANCELLED,
-    ).length;
-    const totalOverdue = allInvoices.filter((inv) => {
-      if (!inv.dueDate || inv.status === InvoiceStatus.PAID || inv.status === InvoiceStatus.CANCELLED) {
-        return false;
-      }
-      const dueDate = new Date(inv.dueDate);
-      dueDate.setHours(0, 0, 0, 0);
-      return dueDate < today;
-    }).length;
-
-    const totalRevenue = allInvoices
-      .filter((inv) => inv.status === InvoiceStatus.PAID)
-      .reduce((sum, inv) => sum + parseFloat(inv.total.toString()), 0);
-
-    // Monthly revenue: Use SQL query to filter by current month/year for accuracy
-    // This ensures we compare dates correctly regardless of timezone
-    const monthlyRevenueResult = await this.invoiceRepository
-      .createQueryBuilder('invoice')
-      .select('COALESCE(SUM(invoice.total), 0)', 'total')
-      .where('invoice.userId = :userId', { userId })
-      .andWhere('invoice.deletedAt IS NULL')
-      .andWhere('EXTRACT(YEAR FROM invoice.issue_date) = :year', { year: currentYear })
-      .andWhere('EXTRACT(MONTH FROM invoice.issue_date) = :month', { month: currentMonth })
-      .getRawOne(); 
-
-    const monthlyRevenue = parseFloat(monthlyRevenueResult?.total || '0');
+    const [raw] = await this.dataSource.query(
+      `
+      SELECT
+        COUNT(*)::int AS "totalInvoices",
+        SUM(CASE WHEN status = $2 THEN 1 ELSE 0 END)::int AS "totalPaid",
+        SUM(CASE WHEN status != $2 AND status != $3 THEN 1 ELSE 0 END)::int AS "totalUnpaid",
+        SUM(CASE WHEN status != $2 AND status != $3
+                 AND due_date IS NOT NULL AND due_date < CURRENT_DATE THEN 1 ELSE 0 END)::int AS "totalOverdue",
+        COALESCE(SUM(CASE WHEN status = $2 THEN total ELSE 0 END), 0) AS "totalRevenue",
+        COALESCE(SUM(CASE WHEN status = $2
+                          AND EXTRACT(YEAR  FROM issue_date) = $4
+                          AND EXTRACT(MONTH FROM issue_date) = $5
+                          THEN total ELSE 0 END), 0) AS "monthlyRevenue"
+      FROM invoices
+      WHERE user_id = $1 AND deleted_at IS NULL
+      `,
+      [userId, InvoiceStatus.PAID, InvoiceStatus.CANCELLED, year, month],
+    );
 
     return {
-      totalInvoices,
-      totalUnpaid,
-      totalPaid,
-      totalOverdue,
-      totalRevenue: Math.round(totalRevenue * 100) / 100,
-      monthlyRevenue: Math.round(monthlyRevenue * 100) / 100,
+      totalInvoices: raw.totalInvoices || 0,
+      totalUnpaid: raw.totalUnpaid || 0,
+      totalPaid: raw.totalPaid || 0,
+      totalOverdue: raw.totalOverdue || 0,
+      totalRevenue: Math.round(parseFloat(raw.totalRevenue) * 100) / 100,
+      monthlyRevenue: Math.round(parseFloat(raw.monthlyRevenue) * 100) / 100,
     };
   }
 }

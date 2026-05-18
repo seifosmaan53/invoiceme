@@ -4,11 +4,27 @@ import 'package:flutter/services.dart' show TargetPlatform;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Simple cache entry with timestamp
+class _CacheEntry {
+  final dynamic data;
+  final DateTime timestamp;
+  final Duration ttl;
+
+  _CacheEntry(this.data, this.timestamp, this.ttl);
+
+  bool get isExpired => DateTime.now().difference(timestamp) > ttl;
+}
+
 class ApiClient {
   late Dio _dio;
   String? _baseUrl;
   String? _accessToken;
   final FlutterSecureStorage? _secureStorage = kIsWeb ? null : const FlutterSecureStorage();
+  SharedPreferences? _sharedPreferences; // Cache SharedPreferences instance
+  
+  // Simple in-memory cache for GET requests (5 second TTL for performance)
+  final Map<String, _CacheEntry> _cache = {};
+  static const Duration _defaultCacheTTL = Duration(seconds: 5);
 
   ApiClient() {
     // Get the base URL with environment detection and fallback logic
@@ -36,19 +52,22 @@ class ApiClient {
       receiveTimeout: Duration(seconds: receiveTimeoutSeconds),
     ));
 
-    // Add logging interceptor to see exact request/response
-    _dio.interceptors.add(LogInterceptor(
-      requestBody: true,
-      responseBody: true,
-      requestHeader: true,
-      responseHeader: false,
-      error: true,
-      logPrint: (obj) {
-        if (kIsWeb) {
-          print(obj); // Print to browser console
-        }
-      },
-    ));
+    // Add logging interceptor ONLY in debug mode (performance optimization)
+    // Logging every request/response is extremely slow, especially on web
+    if (kDebugMode) {
+      _dio.interceptors.add(LogInterceptor(
+        requestBody: false, // Disable body logging for performance
+        responseBody: false, // Disable body logging for performance
+        requestHeader: false, // Disable header logging for performance
+        responseHeader: false,
+        error: true, // Keep error logging for debugging
+        logPrint: (obj) {
+          if (kIsWeb) {
+            print(obj); // Print to browser console
+          }
+        },
+      ));
+    }
 
     _dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
@@ -58,24 +77,18 @@ class ApiClient {
           options.headers['Authorization'] = 'Bearer $_accessToken';
         }
         
-        // Log request details for web debugging (only in debug mode)
-        if (kIsWeb && kDebugMode) {
-          debugPrint('API Request: ${options.method} ${options.baseUrl}${options.path}');
+        // Minimal logging for performance (only method and path, no body/headers)
+        if (kDebugMode) {
+          debugPrint('API Request: ${options.method} ${options.path}');
         }
         return handler.next(options);
       },
       onError: (error, handler) async {
-        // Enhanced error logging for web (only in debug mode)
-        if (kIsWeb && kDebugMode) {
+        // Minimal error logging for performance (only in debug mode)
+        if (kDebugMode) {
           debugPrint('API Error: ${error.type} - ${error.message}');
-          debugPrint('Path: ${error.requestOptions.path}');
-          
           if (error.type == DioExceptionType.connectionError) {
-            debugPrint('Connection Error - Backend may not be running at ${error.requestOptions.baseUrl}');
-          }
-          
-          if (error.response != null) {
-            debugPrint('Status: ${error.response!.statusCode}');
+            debugPrint('Connection Error - Backend may not be running');
           }
         }
         
@@ -197,11 +210,20 @@ class ApiClient {
     return false;
   }
 
+  /// Get or create SharedPreferences instance (cached for performance)
+  Future<SharedPreferences> _getSharedPreferences() async {
+    if (kIsWeb) {
+      _sharedPreferences ??= await SharedPreferences.getInstance();
+      return _sharedPreferences!;
+    }
+    throw UnsupportedError('SharedPreferences only used on web');
+  }
+
   /// Read from secure storage (with web fallback)
   Future<String?> _readSecure(String key) async {
     if (kIsWeb) {
-      // Use SharedPreferences for web
-      final prefs = await SharedPreferences.getInstance();
+      // Use cached SharedPreferences instance for better performance
+      final prefs = await _getSharedPreferences();
       return prefs.getString('secure_$key');
     } else {
       return await _secureStorage?.read(key: key);
@@ -211,8 +233,8 @@ class ApiClient {
   /// Write to secure storage (with web fallback)
   Future<void> _writeSecure(String key, String value) async {
     if (kIsWeb) {
-      // Use SharedPreferences for web
-      final prefs = await SharedPreferences.getInstance();
+      // Use cached SharedPreferences instance for better performance
+      final prefs = await _getSharedPreferences();
       await prefs.setString('secure_$key', value);
     } else {
       await _secureStorage?.write(key: key, value: value);
@@ -222,27 +244,92 @@ class ApiClient {
   /// Delete from secure storage (with web fallback)
   Future<void> _deleteSecure(String key) async {
     if (kIsWeb) {
-      // Use SharedPreferences for web
-      final prefs = await SharedPreferences.getInstance();
+      // Use cached SharedPreferences instance for better performance
+      final prefs = await _getSharedPreferences();
       await prefs.remove('secure_$key');
     } else {
       await _secureStorage?.delete(key: key);
     }
   }
 
-  Future<Response> get(String path, {Map<String, dynamic>? queryParameters}) async {
-    return await _dio.get(path, queryParameters: queryParameters);
+  /// Generate cache key from path and query parameters
+  String _getCacheKey(String path, Map<String, dynamic>? queryParameters) {
+    if (queryParameters == null || queryParameters.isEmpty) {
+      return path;
+    }
+    // Sort query params for consistent cache keys
+    final sortedParams = Map.fromEntries(
+      queryParameters.entries.toList()..sort((a, b) => a.key.compareTo(b.key))
+    );
+    final queryString = sortedParams.entries
+        .map((e) => '${e.key}=${e.value}')
+        .join('&');
+    return '$path?$queryString';
+  }
+
+  /// Clear cache for a specific path or all cache
+  void clearCache([String? path]) {
+    if (path == null) {
+      _cache.clear();
+    } else {
+      _cache.removeWhere((key, _) => key.startsWith(path));
+    }
+  }
+
+  Future<Response> get(String path, {Map<String, dynamic>? queryParameters, bool useCache = true}) async {
+    // Check cache first for GET requests (only if useCache is true)
+    if (useCache) {
+      final cacheKey = _getCacheKey(path, queryParameters);
+      final cached = _cache[cacheKey];
+      
+      if (cached != null && !cached.isExpired) {
+        if (kDebugMode) {
+          debugPrint('Cache HIT: $cacheKey');
+        }
+        // Return cached response
+        return Response(
+          requestOptions: RequestOptions(path: path),
+          data: cached.data,
+          statusCode: 200,
+        );
+      }
+      
+      // Clean expired entries periodically
+      if (_cache.length > 100) {
+        _cache.removeWhere((_, entry) => entry.isExpired);
+      }
+    }
+
+    // Make actual request
+    final response = await _dio.get(path, queryParameters: queryParameters);
+    
+    // Cache successful GET responses (only if useCache is true)
+    if (useCache && response.statusCode == 200) {
+      final cacheKey = _getCacheKey(path, queryParameters);
+      _cache[cacheKey] = _CacheEntry(response.data, DateTime.now(), _defaultCacheTTL);
+      if (kDebugMode) {
+        debugPrint('Cache SET: $cacheKey');
+      }
+    }
+    
+    return response;
   }
 
   Future<Response> post(String path, {dynamic data}) async {
+    // Invalidate related cache entries on POST
+    clearCache(path);
     return await _dio.post(path, data: data);
   }
 
   Future<Response> patch(String path, {dynamic data}) async {
+    // Invalidate related cache entries on PATCH
+    clearCache(path);
     return await _dio.patch(path, data: data);
   }
 
   Future<Response> delete(String path) async {
+    // Invalidate related cache entries on DELETE
+    clearCache(path);
     return await _dio.delete(path);
   }
 
@@ -280,11 +367,12 @@ class ApiClient {
     } else {
       // Mobile platform - detect iOS vs Android
       try {
-        // iOS simulator - try localhost first, but can also use machine IP
+        // iOS - use machine IP address (works for both simulator and physical devices)
         if (defaultTargetPlatform == TargetPlatform.iOS) {
-          // iOS simulator can use localhost, but if that fails, use 127.0.0.1
-          // For physical devices, use --dart-define=API_BASE_URL=http://<your-ip>:3000/api/v1
-          return 'http://127.0.0.1:3000/api/v1';
+          // Use machine's local IP address - works for both simulator and physical devices
+          // If your IP changes, update this or use --dart-define=API_BASE_URL=http://<your-ip>:3000/api/v1
+          // To find your IP: ifconfig | grep "inet " | grep -v 127.0.0.1
+          return 'http://10.0.0.133:3000/api/v1';
         }
         // Android emulator needs 10.0.2.2
         // Physical devices should use --dart-define with actual IP

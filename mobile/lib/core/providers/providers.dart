@@ -6,6 +6,7 @@ import '../database/database_helper.dart';
 import '../services/api_client.dart';
 import '../services/auth_service.dart';
 import '../services/sync_service.dart';
+import '../services/share_service.dart';
 
 // Providers exported for use throughout the app
 final apiClientProvider = Provider<ApiClient>((ref) {
@@ -24,5 +25,11 @@ final syncServiceProvider = Provider<SyncService?>((ref) {
 
 final dbHelperProvider = Provider<DatabaseHelper?>((ref) {
   throw UnimplementedError('dbHelperProvider must be overridden');
+});
+
+// ShareService provider - automatically creates instance from ApiClient
+final shareServiceProvider = Provider<ShareService>((ref) {
+  final apiClient = ref.watch(apiClientProvider);
+  return ShareService(apiClient);
 });
 

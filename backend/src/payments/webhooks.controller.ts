@@ -21,6 +21,11 @@ export class WebhooksController {
     @Req() req: RawBodyRequest<Request>,
     @Headers('stripe-signature') signature: string,
   ) {
+    // Check if Stripe is configured
+    if (!this.stripeService.isAvailable()) {
+      throw new BadRequestException('Stripe is not configured. Webhook processing is unavailable.');
+    }
+
     if (!signature) {
       throw new BadRequestException('Missing stripe-signature header');
     }

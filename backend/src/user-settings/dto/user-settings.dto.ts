@@ -1,4 +1,4 @@
-import { IsOptional, IsString, MaxLength, Matches } from 'class-validator';
+import { IsOptional, IsString, MaxLength, Matches, IsBoolean, IsIn } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class UpdateUserSettingsDto {
@@ -40,5 +40,49 @@ export class UpdateUserSettingsDto {
   @IsOptional()
   @MaxLength(50)
   pdfFontFamily?: string;
+
+  @ApiPropertyOptional({
+    description: 'Layout style for PDF rendering',
+    example: 'classic',
+    enum: ['classic', 'minimal'],
+  })
+  @IsString()
+  @IsOptional()
+  @IsIn(['classic', 'minimal'], { message: 'Layout must be classic or minimal' })
+  pdfLayout?: string;
+
+  @ApiPropertyOptional({ description: 'Show company logo in PDF header', example: true })
+  @IsBoolean()
+  @IsOptional()
+  pdfShowLogo?: boolean;
+
+  @ApiPropertyOptional({ description: 'Show client details block', example: true })
+  @IsBoolean()
+  @IsOptional()
+  pdfShowClientDetails?: boolean;
+
+  @ApiPropertyOptional({ description: 'Show invoice metadata block', example: true })
+  @IsBoolean()
+  @IsOptional()
+  pdfShowInvoiceDetails?: boolean;
+
+  @ApiPropertyOptional({ description: 'Show notes section when notes exist', example: true })
+  @IsBoolean()
+  @IsOptional()
+  pdfShowNotes?: boolean;
+
+  @ApiPropertyOptional({ description: 'Show footer / thank you message', example: true })
+  @IsBoolean()
+  @IsOptional()
+  pdfShowFooter?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Custom thank you message displayed in footer',
+    example: 'Thanks for choosing InvoiceMe!',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(200)
+  pdfThankYouMessage?: string;
 }
 

@@ -159,11 +159,7 @@ async function bootstrap() {
     });
   }
 
-  // Global exception filter (with ConfigService injection)
-  const globalExceptionFilter = new GlobalExceptionFilter();
-  // Inject ConfigService manually since filter is created before app context
-  (globalExceptionFilter as any).configService = configService;
-  app.useGlobalFilters(globalExceptionFilter);
+  app.useGlobalFilters(new GlobalExceptionFilter(configService));
 
   // Global validation pipe with security enhancements
   app.useGlobalPipes(
@@ -287,8 +283,10 @@ Access tokens expire. Use \`POST /api/v1/auth/refresh\` with your refresh token 
   }
 
   const port = process.env.API_PORT || 3000;
-  await app.listen(port);
+  // Listen on all network interfaces (0.0.0.0) to allow mobile app connections
+  await app.listen(port, '0.0.0.0');
   console.log(`Application is running on: http://localhost:${port}/api`);
+  console.log(`Network accessible at: http://0.0.0.0:${port}/api`);
   if (enableSwagger) {
     console.log(`API Documentation available at: http://localhost:${port}/api/docs`);
   }

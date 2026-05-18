@@ -19,6 +19,13 @@ interface InvoiceData {
     primaryColor?: string;
     secondaryColor?: string;
     fontFamily?: string;
+    layout?: 'classic' | 'minimal';
+    showLogo?: boolean;
+    showClientDetails?: boolean;
+    showInvoiceDetails?: boolean;
+    showNotes?: boolean;
+    showFooter?: boolean;
+    thankYouMessage?: string;
   };
 }
 
@@ -369,6 +376,48 @@ export class PdfService {
     const primaryColor = settings.primaryColor || '#4a90e2';
     const secondaryColor = settings.secondaryColor || '#333333';
     const fontFamily = settings.fontFamily || 'Arial';
+    const layout = settings.layout === 'minimal' ? 'minimal' : 'classic';
+    const showLogo = settings.showLogo !== false;
+    const showClientDetails = settings.showClientDetails !== false;
+    const showInvoiceDetails = settings.showInvoiceDetails !== false;
+    const showFooter = settings.showFooter !== false;
+    const rawNotes = invoice.notes ? this.escapeHtml(invoice.notes) : '';
+    const hasNotesContent = Boolean(rawNotes);
+    const showNotes = settings.showNotes !== false && hasNotesContent;
+    const thankYouMessage = settings.thankYouMessage?.trim() || 'Thank you for your business!';
+    const thankYouMessageEscaped = this.escapeHtml(thankYouMessage);
+    const companyName = this.escapeHtml(user.companyName || 'InvoiceMe');
+
+    const bodyClass = [
+      `layout-${layout}`,
+      showLogo && logoUrl ? 'show-logo' : 'hide-logo',
+      showClientDetails ? 'show-client-details' : 'hide-client-details',
+      showInvoiceDetails ? 'show-invoice-details' : 'hide-invoice-details',
+      showFooter ? 'show-footer' : 'hide-footer',
+      showNotes ? 'show-notes' : 'hide-notes',
+    ].join(' ');
+
+    const escapedLogoUrl = logoUrl ? this.escapeHtml(logoUrl) : '';
+    const logoBlock = showLogo && escapedLogoUrl
+      ? `<img src="${escapedLogoUrl}" alt="Company logo" class="company-logo" />`
+      : '';
+
+    const notesSection = showNotes
+      ? `
+    <div class="notes-section">
+      <div class="section-title">Notes</div>
+      <div class="notes-content">${rawNotes}</div>
+    </div>`
+      : '';
+
+    const footerSection = showFooter
+      ? `
+    <div class="footer">
+      <p>${thankYouMessageEscaped}</p>
+      <p class="brand">${companyName}</p>
+      <p>This is a computer-generated ${invoiceType === 'invoice' ? 'invoice' : 'estimate'}.</p>
+    </div>`
+      : '';
 
     // Replace template variables
     let html = template
@@ -381,7 +430,7 @@ export class PdfService {
       .replace(/\{\{dueDate\}\}/g, dueDate || '')
       .replace(/\{\{status\}\}/g, statusDisplay)
       .replace(/\{\{currency\}\}/g, invoiceCurrency)
-      .replace(/\{\{companyName\}\}/g, user.companyName || 'InvoiceMe')
+      .replace(/\{\{companyName\}\}/g, companyName)
       .replace(/\{\{logoUrl\}\}/g, logoUrl)
       .replace(/\{\{primaryColor\}\}/g, primaryColor)
       .replace(/\{\{secondaryColor\}\}/g, secondaryColor)
@@ -394,8 +443,12 @@ export class PdfService {
       .replace(/\{\{taxTotal\}\}/g, formatCurrency(invoiceTaxTotal, invoiceCurrency))
       .replace(/\{\{discountTotal\}\}/g, formatCurrency(invoiceDiscountTotal, invoiceCurrency))
       .replace(/\{\{total\}\}/g, formatCurrency(invoiceTotal, invoiceCurrency))
-      .replace(/\{\{notes\}\}/g, invoice.notes ? this.escapeHtml(invoice.notes) : '')
-      .replace(/\{\{showTaxOrDiscount\}\}/g, showTaxOrDiscount ? 'true' : '');
+      .replace(/\{\{notes\}\}/g, rawNotes)
+      .replace(/\{\{showTaxOrDiscount\}\}/g, showTaxOrDiscount ? 'true' : '')
+      .replace(/\{\{bodyClass\}\}/g, bodyClass.trim())
+      .replace(/\{\{logoBlock\}\}/g, logoBlock)
+      .replace(/\{\{notesSection\}\}/g, notesSection)
+      .replace(/\{\{footerSection\}\}/g, footerSection);
 
     // Replace items
     const itemsHtml = items
@@ -423,7 +476,21 @@ export class PdfService {
     const statusLower = invoiceStatus.toLowerCase();
     html = html.replace(/class="badge {{status}}"/g, `class="badge ${statusLower}"`);
 
-    // Clean up remaining handlebars conditionals
+    // Handle client field conditionals (email, phone, address)
+    const hasClientEmail = Boolean(client.email);
+    const hasClientPhone = Boolean(client.phone);
+    const hasClientAddress = Boolean(clientAddress);
+    const hasDiscountTotal = invoiceDiscountTotal > 0;
+    const hasTaxTotal = invoiceTaxTotal > 0;
+
+    // Replace client conditionals
+    html = html.replace(/\{\{#if clientEmail\}\}([\s\S]*?)\{\{\/if\}\}/g, hasClientEmail ? '$1' : '');
+    html = html.replace(/\{\{#if clientPhone\}\}([\s\S]*?)\{\{\/if\}\}/g, hasClientPhone ? '$1' : '');
+    html = html.replace(/\{\{#if clientAddress\}\}([\s\S]*?)\{\{\/if\}\}/g, hasClientAddress ? '$1' : '');
+    html = html.replace(/\{\{#if discountTotal\}\}([\s\S]*?)\{\{\/if\}\}/g, hasDiscountTotal ? '$1' : '');
+    html = html.replace(/\{\{#if taxTotal\}\}([\s\S]*?)\{\{\/if\}\}/g, hasTaxTotal ? '$1' : '');
+
+    // Clean up any remaining handlebars conditionals
     html = html.replace(/\{\{#if ([^}]+)\}\}/g, '');
     html = html.replace(/\{\{\/if\}\}/g, '');
 
@@ -470,13 +537,9 @@ export class PdfService {
     h1, h2 { color: {{primaryColor}}; }
   </style>
 </head>
-<body>
+<body class="{{bodyClass}}">
   <div class="header">
-    {{#if logoUrl}}
-    <img src="{{logoUrl}}" alt="Logo" class="logo" />
-    {{else}}
-    <h1>InvoiceMe</h1>
-    {{/if}}
+    {{logoBlock}}
     <div class="invoice-info">
       <h2>{{invoiceType}} #{{invoiceNumber}}</h2>
       <p>Date: {{issueDate}}</p>
@@ -514,6 +577,8 @@ export class PdfService {
     <p>Tax: {{taxTotal}}</p>
     <p class="total">Total: {{total}}</p>
   </div>
+  {{notesSection}}
+  {{footerSection}}
 </body>
 </html>`;
   }

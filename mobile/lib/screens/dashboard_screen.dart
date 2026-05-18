@@ -79,8 +79,8 @@ class _DashboardScreenState extends ConsumerState<DashboardScreen> {
             }
           },
           type: BottomNavigationBarType.fixed,
-          selectedItemColor: const Color(0xFF4a90e2),
-          unselectedItemColor: Colors.grey,
+          selectedItemColor: Theme.of(context).colorScheme.primary,
+          unselectedItemColor: Theme.of(context).colorScheme.onSurfaceVariant,
           selectedFontSize: 12,
           unselectedFontSize: 12,
           iconSize: 24,

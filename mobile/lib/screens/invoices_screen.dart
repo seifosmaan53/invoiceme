@@ -1,17 +1,12 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
-import 'package:share_plus/share_plus.dart';
 import 'package:dio/dio.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
 import '../core/providers/providers.dart';
+import '../core/services/share_service.dart';
 import '../core/providers/refresh_provider.dart';
 import '../core/utils/app_animations.dart';
 import '../core/services/keyboard_shortcuts.dart';
@@ -22,6 +17,7 @@ import '../models/invoice.dart';
 import '../models/invoice_template.dart';
 import 'invoice_detail_screen.dart';
 import 'create_invoice_screen.dart';
+import 'create_invoice_template_screen.dart';
 import 'edit_invoice_screen.dart';
 
 class InvoicesScreen extends ConsumerStatefulWidget {
@@ -80,9 +76,11 @@ class _InvoicesScreenState extends ConsumerState<InvoicesScreen> with AutomaticK
       if (!mounted) return;
       final query = _searchController.text.trim();
       if (query != _searchQuery) {
+        // Update search query and trigger load in one setState
         setState(() {
           _searchQuery = query.isEmpty ? null : query;
         });
+        // Load invoices after state update (no need for another setState)
         _loadInvoices(refresh: true);
       }
     });
@@ -131,19 +129,21 @@ class _InvoicesScreenState extends ConsumerState<InvoicesScreen> with AutomaticK
 
     if (refresh) {
       if (!mounted) return;
+      // Combine all refresh state updates into one setState call
       setState(() {
         _currentPage = 1;
         _hasMore = true;
         _invoices = []; // Clear existing invoices when refreshing
+        _isLoadingInvoices = true; // Set loading state here too
+      });
+    } else {
+      if (!_hasMore) return;
+      if (!mounted) return;
+      // Only update loading state if not refreshing (refresh already set it)
+      setState(() {
+        _isLoadingInvoices = true;
       });
     }
-
-    if (!_hasMore && !refresh) return;
-
-    if (!mounted) return;
-    setState(() {
-      _isLoadingInvoices = true;
-    });
 
     try {
       final apiClient = ref.read(apiClientProvider);
@@ -527,101 +527,12 @@ class _InvoicesScreenState extends ConsumerState<InvoicesScreen> with AutomaticK
                               ),
                               SlidableAction(
                                 onPressed: (context) async {
-                                  // Share invoice as PDF file
-                                  try {
-                                    final apiClient = ref.read(apiClientProvider);
-                                    
-                                    // Generate PDF
-                                    final pdfResponse = await apiClient.post('/invoices/${invoice.id}/pdf');
-                                    if (pdfResponse.statusCode != 201 && pdfResponse.statusCode != 200) {
-                                      throw Exception('Failed to generate PDF');
-                                    }
-
-                                    final pdfUrl = pdfResponse.data['url'] as String? ?? pdfResponse.data['pdfUrl'] as String?;
-                                    if (pdfUrl == null) {
-                                      throw Exception('PDF URL not found');
-                                    }
-
-                                    // Download PDF
-                                    final dio = Dio();
-                                    final pdfBytesResponse = await dio.get<Uint8List>(
-                                      pdfUrl,
-                                      options: Options(
-                                        responseType: ResponseType.bytes,
-                                        followRedirects: true,
-                                      ),
-                                    );
-
-                                    if (pdfBytesResponse.data == null) {
-                                      throw Exception('Failed to download PDF');
-                                    }
-
-                                    final pdfBytes = pdfBytesResponse.data!;
-                                    
-                                    // Share as file (mobile) or URL (web)
-                                    if (kIsWeb) {
-                                      await Share.share(
-                                        'Invoice ${invoice.number}\nTotal: ${invoice.currency}${invoice.total.toStringAsFixed(2)}\n\nView PDF: $pdfUrl',
-                                        subject: 'Invoice ${invoice.number}',
-                                      );
-                                    } else {
-                                      // Mobile: Save to cache directory (more reliable for sharing)
-                                      final cacheDir = await getTemporaryDirectory();
-                                      final fileName = 'Invoice_${invoice.number.replaceAll(RegExp(r'[^\w\s-]'), '_')}.pdf';
-                                      final filePath = path.join(cacheDir.path, fileName);
-                                      final file = File(filePath);
-                                      
-                                      // Write PDF bytes to file
-                                      await file.writeAsBytes(pdfBytes);
-                                      
-                                      // Verify file exists and has content
-                                      if (!await file.exists()) {
-                                        throw Exception('Failed to create PDF file');
-                                      }
-                                      
-                                      final fileSize = await file.length();
-                                      if (fileSize == 0) {
-                                        throw Exception('PDF file is empty');
-                                      }
-                                      
-                                      // Create XFile with proper mime type and name
-                                      final pdfFile = XFile(
-                                        filePath,
-                                        mimeType: 'application/pdf',
-                                        name: fileName,
-                                      );
-                                      
-                                      // Verify the file is readable
-                                      final canRead = await file.exists();
-                                      if (!canRead) {
-                                        throw Exception('PDF file is not accessible');
-                                      }
-                                      
-                                      // Share the PDF file
-                                      await Share.shareXFiles(
-                                        [pdfFile],
-                                        subject: 'Invoice ${invoice.number}',
-                                        text: 'Please find attached invoice ${invoice.number}',
-                                      );
-                                      
-                                      // Clean up after delay
-                                      Future.delayed(const Duration(seconds: 5), () async {
-                                        try {
-                                          if (await file.exists()) {
-                                            await file.delete();
-                                          }
-                                        } catch (e) {
-                                          // Ignore cleanup errors
-                                        }
-                                      });
-                                    }
-                                  } catch (e) {
-                                    if (mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(
-                                        SnackBar(content: Text('Error sharing: $e')),
-                                      );
-                                    }
-                                  }
+                                  final shareService = ref.read(shareServiceProvider);
+                                  await shareService.shareInvoice(
+                                    invoice: invoice,
+                                    context: context,
+                                    showLoading: false,
+                                  );
                                 },
                                 backgroundColor: Colors.green,
                                 foregroundColor: Colors.white,
@@ -845,12 +756,42 @@ class _InvoicesScreenState extends ConsumerState<InvoicesScreen> with AutomaticK
       if (!mounted) return;
 
       if (templates.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No templates available. Create a template first.'),
-            backgroundColor: Colors.orange,
+        // Show dialog with option to create a template
+        final shouldCreateTemplate = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('No Templates Available'),
+            content: const Text(
+              'You don\'t have any invoice templates yet. Would you like to create one?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Create Template'),
+              ),
+            ],
           ),
         );
+
+        if (shouldCreateTemplate == true && mounted) {
+          // Navigate to create template screen
+          final templateCreated = await Navigator.push(
+            context,
+            AppPageTransitions.scale(
+              const CreateInvoiceTemplateScreen(),
+            ),
+          );
+
+          // If template was created, reload templates and show selection dialog again
+          if (templateCreated == true && mounted) {
+            // Reload templates and show selection dialog
+            _showTemplateSelectionDialog();
+          }
+        }
         return;
       }
 

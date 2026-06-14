@@ -1,5 +1,8 @@
 # InvoiceMe
 
+<!--portfolio-note-->
+> **Portfolio note —** one of three invoicing builds exploring the same problem across stacks. **This is the mobile, offline-first take: Flutter + NestJS** (works offline, syncs when connected). Siblings: [pizza-box-system](https://github.com/seifosmaan53/pizza-box-system) (React + Express + Prisma) and [asset-vault](https://github.com/seifosmaan53/asset-vault) (React 19 + NestJS + tRPC).
+
 A self-hosted invoicing platform built for freelancers and small businesses. Flutter app on the front, NestJS API on the back — works offline, syncs when connected.
 
 Built after getting tired of paying $30/month for basic invoicing software that should take a weekend to build. Runs comfortably on a $5 VPS.

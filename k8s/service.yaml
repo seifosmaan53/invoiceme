@@ -1,0 +1,15 @@
+# Kubernetes Service for the InvoiceMe backend.
+# Usage: kubectl apply -f k8s/
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: invoiceme-backend
+spec:
+  selector:
+    app: invoiceme-backend
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 3000
+  type: LoadBalancer

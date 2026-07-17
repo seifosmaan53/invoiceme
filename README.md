@@ -41,13 +41,13 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 │  Invoices ──► PDF (Puppeteer) ──► MinIO / S3                   │
 │  Sync ──► Device-change log ──► Conflict resolution            │
 │  Stripe ──► Webhooks ──► Invoice status automation             │
-│  Rate limiting ──► Redis cache ──► PostgreSQL                  │
+│  Rate limiting (in-memory, per-IP) ──► PostgreSQL              │
 └──────────────────┬──────────────────────┬───────────────────────┘
                    │                      │
                    ▼                      ▼
           PostgreSQL 15               Redis 7          MinIO / S3
-          (primary store)         (cache + rate       (PDFs, file
-                                   limit state)       attachments)
+          (primary store)          (optional cache;    (PDFs, file
+                                   in-memory fallback)   attachments)
 ```
 
 ---
@@ -61,7 +61,7 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 | NestJS | 10 | Opinionated module/guard/interceptor structure. Decorator-based DI removes boilerplate. TypeScript first-class. |
 | PostgreSQL | 15 | Reliable, supports the `EXTRACT` + window functions used in dashboard aggregations. |
 | TypeORM | 0.3 | Query builder handles filtered paginated queries cleanly. Raw SQL used where ORM overhead matters (dashboard stats). |
-| Redis | 7 | Rate limit state and PDF cache. Avoids re-running Puppeteer for unchanged invoices. |
+| Redis | 7 | Optional `cache-manager` backing store — falls back to in-memory cache if `REDIS_HOST` isn't set. Backs PDF template caching so Puppeteer doesn't re-read template files from disk on every render. |
 | Puppeteer | 21 | HTML/CSS invoice templates are far easier to maintain than programmatic PDF construction. Trade-off is memory footprint and Docker complexity. |
 | Stripe | 14 | Payment links + webhook signature verification. Raw body parsing required before JSON middleware. |
 | Speakeasy | 2 | TOTP 2FA implementation. QR code enrollment via `qrcode` package. |
@@ -80,9 +80,9 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 
 ### Infrastructure
 
-- Docker Compose: local dev stack (Postgres + Redis + MinIO + API)
-- Kubernetes manifests in `/k8s` for production horizontal scaling
-- GitHub Actions CI: lint → unit tests → e2e tests → Docker build
+- Docker Compose: local dev stack (Postgres + MinIO + API); point the API at an external Redis via `REDIS_HOST` if you want one
+- Kubernetes manifests in `/k8s`: `deployment.yaml`, `service.yaml`, `hpa.yaml` — Deployment (3 replicas), LoadBalancer Service, and HPA (2-10 replicas on CPU/memory)
+- GitHub Actions CI (`.github/workflows/ci.yml`): backend unit tests + e2e tests against a Postgres service container, then a Docker build; mobile job runs the Flutter widget/service/utility test suites
 
 ---
 
@@ -97,8 +97,10 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 ### 1. Start infrastructure
 
 ```bash
-docker-compose up -d postgres redis minio
+docker-compose up -d postgres minio
 ```
+
+Redis is optional — the backend falls back to an in-memory cache if `REDIS_HOST` isn't set. Point `REDIS_HOST`/`REDIS_PORT` at your own instance if you want a shared cache across multiple backend replicas.
 
 ### 2. Backend
 
@@ -137,7 +139,7 @@ Key variables in `backend/env.example`:
 | `STRIPE_SECRET_KEY` | For payments | Stripe API key |
 | `STRIPE_WEBHOOK_SECRET` | For payments | From Stripe dashboard webhook config |
 | `S3_ENDPOINT`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET` | For file uploads | MinIO or AWS S3 |
-| `REDIS_URL` | Yes | Redis connection string |
+| `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` | Optional | Redis connection — omit to use the in-memory cache fallback |
 | `CORS_ORIGIN` | Yes (production) | Comma-separated allowed origins — never `*` in production |
 | `SENTRY_DSN` | Optional | Error tracking |
 | `ENABLE_SWAGGER` | Optional | Set `true` to expose `/api/docs` |
@@ -148,7 +150,7 @@ Key variables in `backend/env.example`:
 ## Project Structure
 
 ```
-invoice-maker/
+invoiceme/
 ├── backend/
 │   ├── src/
 │   │   ├── auth/           JWT, TOTP, refresh tokens, password reset
@@ -184,7 +186,11 @@ docker-compose up -d
 
 **Kubernetes:**
 
-See `/k8s` directory. Includes Deployment, Service, and HPA configs. The backend is stateless and scales horizontally — Redis handles shared rate limit state.
+```bash
+kubectl apply -f k8s/
+```
+
+`/k8s` has three manifests: `deployment.yaml`, `service.yaml`, `hpa.yaml`. The backend is stateless (per-IP rate limiting is in-memory, so it's approximate across replicas rather than globally enforced) and scales horizontally behind the Service. Secrets (`DB_HOST`, `DB_PASSWORD`, etc.) are expected in a Kubernetes Secret named `invoiceme-secrets`, created separately before applying the Deployment.
 
 ---
 
@@ -264,9 +270,16 @@ flutter test integration_test/  # integration tests
 
 ---
 
+## Documentation
+
+Full docs live in [`/docs`](docs/README.md): architecture, API reference, database schema, deployment (Docker Compose, manual, Kubernetes), security, testing, developer guide, and user manual.
+
+---
+
 ## Author
 
 **Seif Osman**
+[seifosman.com](https://seifosman.com) · [@seifosmaan53](https://github.com/seifosmaan53) · seifosman53@gmail.com
 
 ---
 

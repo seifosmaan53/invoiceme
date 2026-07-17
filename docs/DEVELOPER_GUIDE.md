@@ -33,13 +33,13 @@ Complete guide for developers working on InvoiceMe.
 ```bash
 # Clone repository
 git clone <repository-url>
-cd invoice-maker/backend
+cd invoiceme/backend
 
 # Install dependencies
 npm install
 
 # Copy environment file
-cp .env.example .env
+cp env.example .env
 
 # Edit .env with your configuration
 # Required: DB_HOST, DB_PORT, DB_USERNAME, DB_PASSWORD, DB_DATABASE

@@ -45,7 +45,7 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 └──────────────────┬──────────────────────┬───────────────────────┘
                    │                      │
                    ▼                      ▼
-          PostgreSQL 15               Redis 7          MinIO / S3
+          PostgreSQL 15               Redis            MinIO / S3
           (primary store)          (optional cache;    (PDFs, file
                                    in-memory fallback)   attachments)
 ```
@@ -61,7 +61,7 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 | NestJS | 10 | Opinionated module/guard/interceptor structure. Decorator-based DI removes boilerplate. TypeScript first-class. |
 | PostgreSQL | 15 | Reliable, supports the `EXTRACT` + window functions used in dashboard aggregations. |
 | TypeORM | 0.3 | Query builder handles filtered paginated queries cleanly. Raw SQL used where ORM overhead matters (dashboard stats). |
-| Redis | 7 | Optional `cache-manager` backing store — falls back to in-memory cache if `REDIS_HOST` isn't set. Backs PDF template caching so Puppeteer doesn't re-read template files from disk on every render. |
+| Redis | external | Optional, user-provided `cache-manager` backing store (none bundled in the compose stack) — falls back to in-memory cache if `REDIS_HOST` isn't set. Backs PDF template caching so Puppeteer doesn't re-read template files from disk on every render. |
 | Puppeteer | 21 | HTML/CSS invoice templates are far easier to maintain than programmatic PDF construction. Trade-off is memory footprint and Docker complexity. |
 | Stripe | 14 | Payment links + webhook signature verification. Raw body parsing required before JSON middleware. |
 | Speakeasy | 2 | TOTP 2FA implementation. QR code enrollment via `qrcode` package. |
@@ -92,7 +92,7 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 
 - Node.js 20+
 - Flutter 3.19+
-- Docker (for Postgres, Redis, MinIO)
+- Docker (for Postgres and MinIO)
 
 ### 1. Start infrastructure
 
@@ -129,7 +129,7 @@ For web: `flutter run -d chrome`
 
 ## Configuration
 
-Key variables in `backend/env.example`:
+Key environment variables the backend reads (see `backend/env.example`; `REDIS_*` and `SENTRY_DSN` are honored but not listed there):
 
 | Variable | Required | Description |
 |---|---|---|

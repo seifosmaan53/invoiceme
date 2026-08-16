@@ -113,13 +113,13 @@ describe('Invoices E2E Tests', () => {
 
   beforeEach(async () => {
     // Clean tables
-    await auditLogRepository.delete({});
-    await paymentRepository.delete({});
-    await attachmentRepository.delete({});
-    await invoiceItemRepository.delete({});
-    await invoiceRepository.delete({});
-    await clientRepository.delete({});
-    await userRepository.delete({});
+    // FK-safe full reset (shared test DB): CASCADE handles delete ordering.
+    const ds = userRepository.manager.connection;
+    await ds.query(
+      'TRUNCATE TABLE ' +
+        ds.entityMetadatas.map((m) => `"${m.tableName}"`).join(', ') +
+        ' RESTART IDENTITY CASCADE',
+    );
 
     // Create test user and auth token
     const password = 'password123';
@@ -133,7 +133,7 @@ describe('Invoices E2E Tests', () => {
     await userRepository.save(testUser);
 
     authToken = jwtService.sign(
-      { userId: testUser.id, email: testUser.email },
+      { sub: testUser.id, email: testUser.email },
       { secret: configService.get('JWT_SECRET'), expiresIn: '15m' },
     );
   });

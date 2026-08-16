@@ -45,8 +45,11 @@ import { UserSettings } from '../entities/user-settings.entity';
           ApiKey,
           UserSettings,
         ],
-        synchronize: false,
-        logging: true,
+        // Never auto-sync in real environments. Opt-in only via
+        // DB_SYNCHRONIZE=true (used by E2E CI to build the schema from
+        // entities, since the raw .sql files aren't TypeORM migration classes).
+        synchronize: configService.get('DB_SYNCHRONIZE') === 'true',
+        logging: configService.get('DB_SYNCHRONIZE') === 'true' ? false : true,
       }),
       inject: [ConfigService],
     }),

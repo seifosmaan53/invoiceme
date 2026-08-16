@@ -20,7 +20,13 @@ import { AttachmentOwnerType } from '../src/entities/attachment.entity';
 import { AuditAction, AuditResource } from '../src/entities/audit-log.entity';
 import { CreateInvoiceDto, UpdateInvoiceDto } from '../src/invoices/dto/invoice.dto';
 import { PaginationDto } from '../src/core/dto/pagination.dto';
-import { JwtAuthGuard } from '../src/auth/guards/jwt-auth.guard';
+import { ApiKeyOrJwtGuard } from '../src/auth/guards/api-key-or-jwt.guard';
+import { PermissionGuard } from '../src/auth/guards/permission.guard';
+import { CsvService } from '../src/core/services/csv.service';
+import { NotificationService } from '../src/core/services/notification.service';
+import { EmailService } from '../src/core/services/email.service';
+import { InvoicesImportService } from '../src/invoices/invoices-import.service';
+import { UserSettingsService } from '../src/user-settings/user-settings.service';
 import { Repository } from 'typeorm';
 
 describe('InvoicesController', () => {
@@ -44,6 +50,16 @@ describe('InvoicesController', () => {
     ip: '127.0.0.1',
   };
 
+  // generatePdf streams via an Express Response; build a fresh chainable stub.
+  const createMockResponse = () => {
+    const res: any = {};
+    res.setHeader = jest.fn().mockReturnValue(res);
+    res.status = jest.fn().mockReturnValue(res);
+    res.send = jest.fn().mockReturnValue(res);
+    res.json = jest.fn().mockReturnValue(res);
+    return res;
+  };
+
   beforeEach(async () => {
     const mockInvoicesService = {
       findAll: jest.fn(),
@@ -60,6 +76,8 @@ describe('InvoicesController', () => {
 
     const mockS3Service = {
       uploadFile: jest.fn(),
+      isAvailable: jest.fn().mockReturnValue(true),
+      getSignedUrl: jest.fn().mockReturnValue('https://s3.example.com/signed-url'),
     };
 
     const mockStripeService = {
@@ -81,6 +99,31 @@ describe('InvoicesController', () => {
       create: jest.fn(),
       save: jest.fn(),
       find: jest.fn(),
+    };
+
+    const mockCsvService = {
+      exportToCsv: jest.fn(),
+      parseCsv: jest.fn(),
+    };
+
+    const mockNotificationService = {
+      notifyInvoicePaid: jest.fn(),
+      notifyPaymentReceived: jest.fn(),
+      notifyInvoiceSent: jest.fn(),
+    };
+
+    const mockEmailService = {
+      sendInvoiceEmail: jest.fn(),
+    };
+
+    const mockInvoicesImportService = {
+      importFromCsv: jest.fn(),
+    };
+
+    const mockUserSettingsService = {
+      // Controller reads pdf* fields off this; empty object exercises the
+      // built-in defaults in generatePdf.
+      getForUser: jest.fn().mockResolvedValue({}),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -114,12 +157,34 @@ describe('InvoicesController', () => {
           provide: getRepositoryToken(Attachment),
           useValue: mockAttachmentRepository,
         },
+        {
+          provide: CsvService,
+          useValue: mockCsvService,
+        },
+        {
+          provide: NotificationService,
+          useValue: mockNotificationService,
+        },
+        {
+          provide: EmailService,
+          useValue: mockEmailService,
+        },
+        {
+          provide: InvoicesImportService,
+          useValue: mockInvoicesImportService,
+        },
+        {
+          provide: UserSettingsService,
+          useValue: mockUserSettingsService,
+        },
       ],
     })
-      .overrideGuard(JwtAuthGuard)
-      .useValue({
-        canActivate: jest.fn(() => true),
-      })
+      // Controller is protected by @UseGuards(ApiKeyOrJwtGuard, PermissionGuard);
+      // stub both to always allow (auth is covered by the guard specs).
+      .overrideGuard(ApiKeyOrJwtGuard)
+      .useValue({ canActivate: jest.fn(() => true) })
+      .overrideGuard(PermissionGuard)
+      .useValue({ canActivate: jest.fn(() => true) })
       .compile();
 
     controller = module.get<InvoicesController>(InvoicesController);
@@ -164,7 +229,20 @@ describe('InvoicesController', () => {
       const filters = { ...pagination, type: type as InvoiceType } as any;
       const result = await controller.findAll(filters, mockUser);
 
-      expect(invoicesService.findAll).toHaveBeenCalledWith(mockUser.userId, type as InvoiceType, filters);
+      // Controller forwards (userId, type, filters, search, status, dateFrom,
+      // dateTo, amountMin, amountMax); with none of the extra filters set the
+      // trailing six are undefined.
+      expect(invoicesService.findAll).toHaveBeenCalledWith(
+        mockUser.userId,
+        type as InvoiceType,
+        filters,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      );
       expect(result).toEqual(paginatedResponse);
     });
 
@@ -219,7 +297,17 @@ describe('InvoicesController', () => {
 
       await controller.findAll(pagination, mockUser);
 
-      expect(invoicesService.findAll).toHaveBeenCalledWith(mockUser.userId, undefined, pagination);
+      expect(invoicesService.findAll).toHaveBeenCalledWith(
+        mockUser.userId,
+        undefined,
+        pagination,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      );
     });
 
     it('should handle pagination parameters (page, limit)', async () => {
@@ -242,7 +330,17 @@ describe('InvoicesController', () => {
 
       await controller.findAll(pagination, mockUser);
 
-      expect(invoicesService.findAll).toHaveBeenCalledWith(mockUser.userId, undefined, pagination);
+      expect(invoicesService.findAll).toHaveBeenCalledWith(
+        mockUser.userId,
+        undefined,
+        pagination,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      );
     });
   });
 
@@ -583,7 +681,8 @@ describe('InvoicesController', () => {
 
       expect(invoicesService.findOne).toHaveBeenCalledWith(id, mockUser.userId);
       expect(invoicesService.archive).toHaveBeenCalledWith(id, mockUser.userId);
-      expect(result).toEqual({ message: 'Invoice deleted' });
+      // Delete is documented @ApiNoContentResponse (204) — no response body.
+      expect(result).toBeUndefined();
     });
 
     it('should call auditService.log with DELETE action', async () => {
@@ -610,7 +709,7 @@ describe('InvoicesController', () => {
       );
     });
 
-    it('should return success message: { message: \'Invoice deleted\' }', async () => {
+    it('should resolve with no content (204)', async () => {
       const id = 'invoice-id';
       const invoice = {
         id,
@@ -624,7 +723,7 @@ describe('InvoicesController', () => {
 
       const result = await controller.delete(id, mockUser, mockRequest as any);
 
-      expect(result).toEqual({ message: 'Invoice deleted' });
+      expect(result).toBeUndefined();
     });
   });
 
@@ -790,33 +889,58 @@ describe('InvoicesController', () => {
     });
   });
 
-  describe('POST /invoices/:id/send (send email stub)', () => {
+  describe('POST /invoices/:id/send (send email)', () => {
+    // send() now really sends: it requires a client email, generates + uploads
+    // a PDF, emails the client, notifies the user, audits action 'send', and
+    // returns { message, invoiceId, pdfUrl }.
+    const s3Url = 'https://s3.amazonaws.com/bucket/pdfs/invoice-id/INV-001.pdf';
+    const buildInvoice = (id: string) => ({
+      id,
+      userId: mockUser.userId,
+      number: 'INV-001',
+      total: 100,
+      currency: 'USD',
+      client: { id: 'client-id', name: 'Client', email: 'client@example.com' },
+      items: [],
+    });
+
     it('should call invoicesService.findOne to verify invoice exists', async () => {
       const id = 'invoice-id';
-      const invoice = {
-        id,
-        userId: mockUser.userId,
-        number: 'INV-001',
-      };
+      const invoice = buildInvoice(id);
 
       invoicesService.findOne.mockResolvedValue(invoice as any);
+      pdfService.generateInvoicePdf.mockResolvedValue(Buffer.from('pdf'));
+      s3Service.uploadFile.mockResolvedValue(s3Url);
       auditService.log.mockResolvedValue(undefined);
 
       const result = await controller.send(id, mockUser, mockRequest as any);
 
       expect(invoicesService.findOne).toHaveBeenCalledWith(id, mockUser.userId);
-      expect(result).toEqual({ message: 'Invoice sent (stub)', invoiceId: invoice.id });
+      expect(result).toEqual({
+        message: 'Invoice sent successfully',
+        invoiceId: invoice.id,
+        pdfUrl: s3Url,
+      });
     });
 
-    it('should call auditService.log with EXPORT action', async () => {
+    it('should throw BadRequestException when the client has no email', async () => {
       const id = 'invoice-id';
-      const invoice = {
-        id,
-        userId: mockUser.userId,
-        number: 'INV-001',
-      };
+      const invoice = { ...buildInvoice(id), client: { id: 'client-id', name: 'Client' } };
 
       invoicesService.findOne.mockResolvedValue(invoice as any);
+
+      await expect(controller.send(id, mockUser, mockRequest as any)).rejects.toThrow(
+        BadRequestException,
+      );
+    });
+
+    it('should call auditService.log with the send action and pdfUrl', async () => {
+      const id = 'invoice-id';
+      const invoice = buildInvoice(id);
+
+      invoicesService.findOne.mockResolvedValue(invoice as any);
+      pdfService.generateInvoicePdf.mockResolvedValue(Buffer.from('pdf'));
+      s3Service.uploadFile.mockResolvedValue(s3Url);
       auditService.log.mockResolvedValue(undefined);
 
       await controller.send(id, mockUser, mockRequest as any);
@@ -826,25 +950,27 @@ describe('InvoicesController', () => {
         AuditAction.EXPORT,
         AuditResource.INVOICE,
         id,
-        { invoiceNumber: invoice.number, action: 'send' },
+        { invoiceNumber: invoice.number, action: 'send', pdfUrl: s3Url },
         mockRequest.ip,
       );
     });
 
-    it('should return stub message: { message: \'Invoice sent (stub)\', invoiceId }', async () => {
+    it('should return { message, invoiceId, pdfUrl } on success', async () => {
       const id = 'invoice-id';
-      const invoice = {
-        id,
-        userId: mockUser.userId,
-        number: 'INV-001',
-      };
+      const invoice = buildInvoice(id);
 
       invoicesService.findOne.mockResolvedValue(invoice as any);
+      pdfService.generateInvoicePdf.mockResolvedValue(Buffer.from('pdf'));
+      s3Service.uploadFile.mockResolvedValue(s3Url);
       auditService.log.mockResolvedValue(undefined);
 
       const result = await controller.send(id, mockUser, mockRequest as any);
 
-      expect(result).toEqual({ message: 'Invoice sent (stub)', invoiceId: invoice.id });
+      expect(result).toEqual({
+        message: 'Invoice sent successfully',
+        invoiceId: invoice.id,
+        pdfUrl: s3Url,
+      });
     });
   });
 
@@ -1021,6 +1147,7 @@ describe('InvoicesController', () => {
         expect.stringMatching(/^invoices\/invoice-id\/attachments\/\d+-test\.pdf$/),
         file.buffer,
         file.mimetype,
+        false, // private object (attachments are served via signed URLs)
       );
     });
 
@@ -1058,10 +1185,12 @@ describe('InvoicesController', () => {
 
       await controller.uploadAttachment(id, file as any, mockUser, mockRequest as any);
 
+      // The stored url is the signed URL derived from the uploaded key, not
+      // the raw upload return value.
       expect(attachmentRepository.create).toHaveBeenCalledWith({
         ownerType: AttachmentOwnerType.INVOICE,
         ownerId: invoice.id,
-        url: s3Url,
+        url: 'https://s3.example.com/signed-url',
         filename: file.originalname,
         contentType: file.mimetype,
         sizeBytes: file.size,
@@ -1164,6 +1293,20 @@ describe('InvoicesController', () => {
   });
 
   describe('POST /invoices/:id/pdf (generatePdf)', () => {
+    // generatePdf branches on NODE_ENV: in production (with S3 available) it
+    // uploads to S3 and responds res.json({ url, invoiceId }); in dev it
+    // streams the PDF directly. These tests target the production/S3 path.
+    let prevNodeEnv: string | undefined;
+
+    beforeEach(() => {
+      prevNodeEnv = process.env.NODE_ENV;
+      process.env.NODE_ENV = 'production';
+    });
+
+    afterEach(() => {
+      process.env.NODE_ENV = prevNodeEnv;
+    });
+
     it('should call invoicesService.findOne to get invoice with relations', async () => {
       const id = 'invoice-id';
       const invoice = {
@@ -1182,7 +1325,7 @@ describe('InvoicesController', () => {
       s3Service.uploadFile.mockResolvedValue(s3Url);
       auditService.log.mockResolvedValue(undefined);
 
-      await controller.generatePdf(id, mockUser, mockRequest as any);
+      await controller.generatePdf(id, mockUser, mockRequest as any, createMockResponse());
 
       expect(invoicesService.findOne).toHaveBeenCalledWith(id, mockUser.userId);
     });
@@ -1205,17 +1348,21 @@ describe('InvoicesController', () => {
       s3Service.uploadFile.mockResolvedValue(s3Url);
       auditService.log.mockResolvedValue(undefined);
 
-      await controller.generatePdf(id, mockUser, mockRequest as any);
+      await controller.generatePdf(id, mockUser, mockRequest as any, createMockResponse());
 
-      expect(pdfService.generateInvoicePdf).toHaveBeenCalledWith({
-        invoice: invoice,
-        client: invoice.client,
-        items: invoice.items || [],
-        user: {
-          name: mockUser.name,
-          companyName: mockUser.companyName,
-        },
-      });
+      // The controller now also passes rendering `settings`; assert the core
+      // payload without pinning the exact settings object.
+      expect(pdfService.generateInvoicePdf).toHaveBeenCalledWith(
+        expect.objectContaining({
+          invoice: invoice,
+          client: invoice.client,
+          items: invoice.items || [],
+          user: {
+            name: mockUser.name,
+            companyName: mockUser.companyName,
+          },
+        }),
+      );
     });
 
     it('should call s3Service.uploadFile with key pattern: pdfs/{id}/{number}.pdf', async () => {
@@ -1236,7 +1383,7 @@ describe('InvoicesController', () => {
       s3Service.uploadFile.mockResolvedValue(s3Url);
       auditService.log.mockResolvedValue(undefined);
 
-      await controller.generatePdf(id, mockUser, mockRequest as any);
+      await controller.generatePdf(id, mockUser, mockRequest as any, createMockResponse());
 
       expect(s3Service.uploadFile).toHaveBeenCalledWith(
         `pdfs/${invoice.id}/${invoice.number}.pdf`,
@@ -1263,7 +1410,7 @@ describe('InvoicesController', () => {
       s3Service.uploadFile.mockResolvedValue(s3Url);
       auditService.log.mockResolvedValue(undefined);
 
-      await controller.generatePdf(id, mockUser, mockRequest as any);
+      await controller.generatePdf(id, mockUser, mockRequest as any, createMockResponse());
 
       expect(auditService.log).toHaveBeenCalledWith(
         mockUser.userId,
@@ -1275,7 +1422,7 @@ describe('InvoicesController', () => {
       );
     });
 
-    it('should return { url, invoiceId }', async () => {
+    it('should respond with { url, invoiceId } via res.json', async () => {
       const id = 'invoice-id';
       const invoice = {
         id,
@@ -1293,9 +1440,12 @@ describe('InvoicesController', () => {
       s3Service.uploadFile.mockResolvedValue(s3Url);
       auditService.log.mockResolvedValue(undefined);
 
-      const result = await controller.generatePdf(id, mockUser, mockRequest as any);
+      const res = createMockResponse();
+      await controller.generatePdf(id, mockUser, mockRequest as any, res);
 
-      expect(result).toEqual({ url: s3Url, invoiceId: invoice.id });
+      // Production/S3 path returns the URL via the response object, not a
+      // return value.
+      expect(res.json).toHaveBeenCalledWith({ url: s3Url, invoiceId: invoice.id });
     });
   });
 

@@ -2,8 +2,6 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
 import { UnauthorizedException } from '@nestjs/common';
 import { JwtStrategy } from '../src/core/strategies/jwt.strategy';
-import { PassportStrategy } from '@nestjs/passport';
-import { Strategy, ExtractJwt } from 'passport-jwt';
 
 describe('JwtStrategy', () => {
   let strategy: JwtStrategy;
@@ -30,7 +28,9 @@ describe('JwtStrategy', () => {
     strategy = module.get<JwtStrategy>(JwtStrategy);
     configService = module.get(ConfigService);
 
-    jest.clearAllMocks();
+    // NOTE: do NOT clear mocks here — the constructor calls
+    // configService.get('JWT_SECRET') during super(), and several tests
+    // below assert that call happened. Clearing would wipe that history.
   });
 
   describe('constructor', () => {
@@ -216,8 +216,12 @@ describe('JwtStrategy', () => {
     });
 
     it('should verify strategy registered with Passport as \'jwt\' strategy', () => {
-      // JwtStrategy extends PassportStrategy(Strategy) which registers it with Passport
-      expect(strategy).toBeInstanceOf(PassportStrategy);
+      // JwtStrategy extends PassportStrategy(Strategy). PassportStrategy is a
+      // mixin factory (returns a fresh class per call), so `instanceof
+      // PassportStrategy` is never true. Assert the concrete class and the
+      // Passport contract (a validate method) instead.
+      expect(strategy).toBeInstanceOf(JwtStrategy);
+      expect(typeof strategy.validate).toBe('function');
     });
   });
 });

@@ -69,9 +69,13 @@ describe('Auth E2E Tests', () => {
 
   beforeEach(async () => {
     // Clean auth-related tables
-    await passwordResetTokenRepository.delete({});
-    await refreshTokenRepository.delete({});
-    await userRepository.delete({});
+    // FK-safe full reset (shared test DB): CASCADE handles delete ordering.
+    const ds = userRepository.manager.connection;
+    await ds.query(
+      'TRUNCATE TABLE ' +
+        ds.entityMetadatas.map((m) => `"${m.tableName}"`).join(', ') +
+        ' RESTART IDENTITY CASCADE',
+    );
   });
 
   describe('POST /api/v1/auth/register', () => {
@@ -223,7 +227,7 @@ describe('Auth E2E Tests', () => {
 
       // Create valid refresh token
       const refreshTokenValue = jwtService.sign(
-        { userId: user.id, email: user.email },
+        { sub: user.id, email: user.email },
         { secret: configService.get('JWT_REFRESH_SECRET'), expiresIn: '7d' },
       );
       const refreshToken = refreshTokenRepository.create({
@@ -541,7 +545,7 @@ describe('Auth E2E Tests', () => {
       // Create expired token (expired 1 hour ago by setting exp in the past)
       const pastDate = Math.floor(Date.now() / 1000) - 3600; // 1 hour ago
       const expiredToken = jwtService.sign(
-        { userId: user.id, email: user.email, exp: pastDate },
+        { sub: user.id, email: user.email, exp: pastDate },
         { secret: configService.get('JWT_SECRET') },
       );
 

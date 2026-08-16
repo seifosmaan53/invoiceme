@@ -82,12 +82,13 @@ describe('Sync E2E Tests', () => {
 
   beforeEach(async () => {
     // Clean tables
-    await deviceChangeRepository.delete({});
-    await attachmentRepository.delete({});
-    await invoiceItemRepository.delete({});
-    await invoiceRepository.delete({});
-    await clientRepository.delete({});
-    await userRepository.delete({});
+    // FK-safe full reset (shared test DB): CASCADE handles delete ordering.
+    const ds = userRepository.manager.connection;
+    await ds.query(
+      'TRUNCATE TABLE ' +
+        ds.entityMetadatas.map((m) => `"${m.tableName}"`).join(', ') +
+        ' RESTART IDENTITY CASCADE',
+    );
 
     // Create test users and auth tokens
     const password = 'password123';
@@ -109,12 +110,12 @@ describe('Sync E2E Tests', () => {
     await userRepository.save(testUser2);
 
     authToken = jwtService.sign(
-      { userId: testUser.id, email: testUser.email },
+      { sub: testUser.id, email: testUser.email },
       { secret: configService.get('JWT_SECRET'), expiresIn: '15m' },
     );
 
     authToken2 = jwtService.sign(
-      { userId: testUser2.id, email: testUser2.email },
+      { sub: testUser2.id, email: testUser2.email },
       { secret: configService.get('JWT_SECRET'), expiresIn: '15m' },
     );
   });

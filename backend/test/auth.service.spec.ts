@@ -8,6 +8,9 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { AuthService } from '../src/auth/auth.service';
+import { AuthResponseDto } from '../src/auth/dto/auth-response.dto';
+import { EmailService } from '../src/core/services/email.service';
+import { TotpService } from '../src/core/services/totp.service';
 import { User } from '../src/entities/user.entity';
 import { RefreshToken } from '../src/entities/refresh-token.entity';
 import { PasswordResetToken } from '../src/entities/password-reset-token.entity';
@@ -15,7 +18,14 @@ import * as bcrypt from 'bcrypt';
 import * as crypto from 'crypto';
 
 jest.mock('bcrypt');
-jest.mock('crypto');
+// Partial mock: keep the real crypto (NestJS's DI container calls
+// crypto.createHash internally to hash module tokens — a full auto-mock
+// makes that return undefined and crashes module compilation). We only
+// need randomBytes controllable for the password-reset token tests.
+jest.mock('crypto', () => ({
+  ...jest.requireActual('crypto'),
+  randomBytes: jest.fn(),
+}));
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -24,6 +34,8 @@ describe('AuthService', () => {
   let mockPasswordResetTokenRepository: any;
   let mockJwtService: any;
   let mockConfigService: any;
+  let mockEmailService: any;
+  let mockTotpService: any;
 
   beforeEach(async () => {
     mockUserRepository = {
@@ -58,6 +70,21 @@ describe('AuthService', () => {
       }),
     };
 
+    mockEmailService = {
+      sendPasswordResetEmail: jest.fn().mockResolvedValue(undefined),
+      sendInvoiceEmail: jest.fn().mockResolvedValue(undefined),
+      sendEmail: jest.fn().mockResolvedValue(undefined),
+      verifyConnection: jest.fn().mockResolvedValue(true),
+    };
+
+    mockTotpService = {
+      generateSecret: jest.fn(),
+      generateQRCode: jest.fn(),
+      verifyToken: jest.fn(),
+      generateBackupCodes: jest.fn(),
+      verifyBackupCode: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         AuthService,
@@ -80,6 +107,14 @@ describe('AuthService', () => {
         {
           provide: ConfigService,
           useValue: mockConfigService,
+        },
+        {
+          provide: EmailService,
+          useValue: mockEmailService,
+        },
+        {
+          provide: TotpService,
+          useValue: mockTotpService,
         },
       ],
     }).compile();
@@ -144,7 +179,9 @@ describe('AuthService', () => {
       expect(mockRefreshTokenRepository.save).toHaveBeenCalled();
       expect(result).toHaveProperty('accessToken', accessToken);
       expect(result).toHaveProperty('refreshToken', refreshToken);
-      expect(result.user).toEqual({
+      // This path has no TOTP, so login resolves to AuthResponseDto (not the
+      // { requiresTotp } branch); narrow the union so `.user` is accessible.
+      expect((result as AuthResponseDto).user).toEqual({
         id: savedUser.id,
         email: savedUser.email,
         name: savedUser.name,
@@ -220,7 +257,9 @@ describe('AuthService', () => {
       );
       expect(result).toHaveProperty('accessToken', accessToken);
       expect(result).toHaveProperty('refreshToken', refreshToken);
-      expect(result.user).toEqual({
+      // This path has no TOTP, so login resolves to AuthResponseDto (not the
+      // { requiresTotp } branch); narrow the union so `.user` is accessible.
+      expect((result as AuthResponseDto).user).toEqual({
         id: user.id,
         email: user.email,
         name: user.name,
@@ -425,6 +464,7 @@ describe('AuthService', () => {
       const user = {
         id: 'user-id',
         email: passwordResetRequestDto.email,
+        name: 'Test User',
       };
 
       const resetToken = 'resetToken123';
@@ -446,8 +486,6 @@ describe('AuthService', () => {
       mockPasswordResetTokenRepository.create.mockReturnValue(resetTokenEntity);
       mockPasswordResetTokenRepository.save.mockResolvedValue(resetTokenEntity);
 
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
       const result = await service.requestPasswordReset(passwordResetRequestDto);
 
       expect(mockUserRepository.findOne).toHaveBeenCalledWith({
@@ -463,11 +501,13 @@ describe('AuthService', () => {
       expect(result.message).toBe(
         'If an account exists, a password reset email has been sent',
       );
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        `Password reset token for ${user.email}: ${resetToken}`,
+      // The token is now delivered by email (not console.log). Verify the
+      // reset email is sent with the recipient, the generated token, and name.
+      expect(mockEmailService.sendPasswordResetEmail).toHaveBeenCalledWith(
+        user.email,
+        resetToken,
+        user.name,
       );
-
-      consoleLogSpy.mockRestore();
     });
 
     it('should return same message when user does not exist (security)', async () => {

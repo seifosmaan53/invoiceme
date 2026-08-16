@@ -4,11 +4,15 @@ import { NotFoundException } from '@nestjs/common';
 import { PaymentsService } from '../src/payments/payments.service';
 import { Payment, PaymentStatus } from '../src/entities/payment.entity';
 import { Invoice, InvoiceStatus } from '../src/entities/invoice.entity';
+import { User } from '../src/entities/user.entity';
+import { NotificationService } from '../src/core/services/notification.service';
 
 describe('PaymentsService', () => {
   let service: PaymentsService;
   let mockPaymentRepository: any;
   let mockInvoiceRepository: any;
+  let mockUserRepository: any;
+  let mockNotificationService: any;
 
   beforeEach(async () => {
     mockPaymentRepository = {
@@ -22,6 +26,14 @@ describe('PaymentsService', () => {
       save: jest.fn(),
     };
 
+    mockUserRepository = {
+      findOne: jest.fn(),
+    };
+
+    mockNotificationService = {
+      notifyPaymentReceived: jest.fn(),
+    };
+
     const module: TestingModule = await Test.createTestingModule({
       providers: [
         PaymentsService,
@@ -32,6 +44,14 @@ describe('PaymentsService', () => {
         {
           provide: getRepositoryToken(Invoice),
           useValue: mockInvoiceRepository,
+        },
+        {
+          provide: getRepositoryToken(User),
+          useValue: mockUserRepository,
+        },
+        {
+          provide: NotificationService,
+          useValue: mockNotificationService,
         },
       ],
     }).compile();
@@ -287,7 +307,11 @@ describe('PaymentsService', () => {
       mockPaymentRepository.save.mockResolvedValue(updatedPayment);
       mockInvoiceRepository.save.mockResolvedValue(updatedInvoice);
 
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
+      mockUserRepository.findOne.mockResolvedValue({
+        id: 'user-id',
+        email: 'owner@example.com',
+        name: 'Owner',
+      });
 
       const result = await service.updatePaymentStatus(
         providerPaymentId,
@@ -299,12 +323,11 @@ describe('PaymentsService', () => {
           status: InvoiceStatus.PAID,
         }),
       );
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        `Invoice ${invoice.number} marked as paid`,
+      // On completion the service notifies the invoice owner (replaced the old console.log path).
+      expect(mockNotificationService.notifyPaymentReceived).toHaveBeenCalledWith(
+        expect.objectContaining({ invoiceNumber: invoice.number }),
       );
       expect(result.status).toBe(PaymentStatus.COMPLETED);
-
-      consoleLogSpy.mockRestore();
     });
 
     it('should not update invoice status when payment is not completed', async () => {

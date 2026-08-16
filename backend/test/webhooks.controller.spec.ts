@@ -16,6 +16,7 @@ describe('WebhooksController', () => {
     };
 
     const mockStripeService = {
+      isAvailable: jest.fn().mockReturnValue(true),
       verifyWebhookSignature: jest.fn(),
     };
 

@@ -50,7 +50,7 @@ describe('InvoicesController', () => {
       findOne: jest.fn(),
       create: jest.fn(),
       update: jest.fn(),
-      delete: jest.fn(),
+      archive: jest.fn(),
       convertEstimateToInvoice: jest.fn(),
     };
 
@@ -63,6 +63,7 @@ describe('InvoicesController', () => {
     };
 
     const mockStripeService = {
+      isAvailable: jest.fn().mockReturnValue(true),
       createPaymentIntent: jest.fn(),
       verifyWebhookSignature: jest.fn(),
     };
@@ -159,9 +160,11 @@ describe('InvoicesController', () => {
 
       invoicesService.findAll.mockResolvedValue(paginatedResponse as any);
 
-      const result = await controller.findAll(type as InvoiceType, pagination, mockUser);
+      // Controller now takes a single filters DTO (type lives inside it).
+      const filters = { ...pagination, type: type as InvoiceType } as any;
+      const result = await controller.findAll(filters, mockUser);
 
-      expect(invoicesService.findAll).toHaveBeenCalledWith(mockUser.userId, type as InvoiceType, pagination);
+      expect(invoicesService.findAll).toHaveBeenCalledWith(mockUser.userId, type as InvoiceType, filters);
       expect(result).toEqual(paginatedResponse);
     });
 
@@ -189,7 +192,7 @@ describe('InvoicesController', () => {
 
       invoicesService.findAll.mockResolvedValue(paginatedResponse as any);
 
-      const result = await controller.findAll(undefined, pagination, mockUser);
+      const result = await controller.findAll(pagination, mockUser);
 
       expect(result).toHaveProperty('data');
       expect(result).toHaveProperty('meta');
@@ -214,7 +217,7 @@ describe('InvoicesController', () => {
 
       invoicesService.findAll.mockResolvedValue(paginatedResponse as any);
 
-      await controller.findAll(undefined, pagination, mockUser);
+      await controller.findAll(pagination, mockUser);
 
       expect(invoicesService.findAll).toHaveBeenCalledWith(mockUser.userId, undefined, pagination);
     });
@@ -237,7 +240,7 @@ describe('InvoicesController', () => {
 
       invoicesService.findAll.mockResolvedValue(paginatedResponse as any);
 
-      await controller.findAll(undefined, pagination, mockUser);
+      await controller.findAll(pagination, mockUser);
 
       expect(invoicesService.findAll).toHaveBeenCalledWith(mockUser.userId, undefined, pagination);
     });
@@ -564,7 +567,7 @@ describe('InvoicesController', () => {
   });
 
   describe('DELETE /invoices/:id (delete)', () => {
-    it('should call invoicesService.findOne then invoicesService.delete (soft delete)', async () => {
+    it('should call invoicesService.findOne then invoicesService.archive (soft delete)', async () => {
       const id = 'invoice-id';
       const invoice = {
         id,
@@ -573,13 +576,13 @@ describe('InvoicesController', () => {
       };
 
       invoicesService.findOne.mockResolvedValue(invoice as any);
-      invoicesService.delete.mockResolvedValue(undefined);
+      invoicesService.archive.mockResolvedValue(undefined);
       auditService.log.mockResolvedValue(undefined);
 
       const result = await controller.delete(id, mockUser, mockRequest as any);
 
       expect(invoicesService.findOne).toHaveBeenCalledWith(id, mockUser.userId);
-      expect(invoicesService.delete).toHaveBeenCalledWith(id, mockUser.userId);
+      expect(invoicesService.archive).toHaveBeenCalledWith(id, mockUser.userId);
       expect(result).toEqual({ message: 'Invoice deleted' });
     });
 
@@ -592,7 +595,7 @@ describe('InvoicesController', () => {
       };
 
       invoicesService.findOne.mockResolvedValue(invoice as any);
-      invoicesService.delete.mockResolvedValue(undefined);
+      invoicesService.archive.mockResolvedValue(undefined);
       auditService.log.mockResolvedValue(undefined);
 
       await controller.delete(id, mockUser, mockRequest as any);
@@ -616,7 +619,7 @@ describe('InvoicesController', () => {
       };
 
       invoicesService.findOne.mockResolvedValue(invoice as any);
-      invoicesService.delete.mockResolvedValue(undefined);
+      invoicesService.archive.mockResolvedValue(undefined);
       auditService.log.mockResolvedValue(undefined);
 
       const result = await controller.delete(id, mockUser, mockRequest as any);
@@ -1612,7 +1615,7 @@ describe('InvoicesController', () => {
       };
 
       invoicesService.findOne.mockResolvedValue(invoice as any);
-      invoicesService.delete.mockResolvedValue(undefined);
+      invoicesService.archive.mockResolvedValue(undefined);
       auditService.log.mockResolvedValue(undefined);
 
       await controller.delete(id, mockUser, mockRequest as any);

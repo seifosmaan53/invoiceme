@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { EmailService } from '../src/core/services/email.service';
 import * as nodemailer from 'nodemailer';
@@ -6,6 +7,21 @@ import * as fs from 'fs';
 
 jest.mock('nodemailer');
 jest.mock('fs');
+
+// Stable, non-mock default config lookup. Overrides below fall back to THIS
+// (not mockConfigService.get) — falling back to the mock being redefined
+// recurses into itself infinitely and blows the stack.
+const DEFAULT_CONFIG: Record<string, any> = {
+  SMTP_HOST: 'smtp.example.com',
+  SMTP_PORT: 587,
+  SMTP_USER: 'test@example.com',
+  SMTP_PASS: 'test-password',
+  EMAIL_FROM: 'noreply@invoiceme.com',
+  FRONTEND_URL: 'http://localhost:8080',
+  SUPPORT_EMAIL: 'support@invoiceme.com',
+  NODE_ENV: 'development',
+};
+const getDefaultConfig = (key: string) => DEFAULT_CONFIG[key] ?? null;
 
 describe('EmailService', () => {
   let service: EmailService;
@@ -27,19 +43,7 @@ describe('EmailService', () => {
 
     // Mock ConfigService
     mockConfigService = {
-      get: jest.fn((key: string) => {
-        const config: Record<string, any> = {
-          SMTP_HOST: 'smtp.example.com',
-          SMTP_PORT: 587,
-          SMTP_USER: 'test@example.com',
-          SMTP_PASS: 'test-password',
-          EMAIL_FROM: 'noreply@invoiceme.com',
-          FRONTEND_URL: 'http://localhost:8080',
-          SUPPORT_EMAIL: 'support@invoiceme.com',
-          NODE_ENV: 'development',
-        };
-        return config[key] || null;
-      }),
+      get: jest.fn(getDefaultConfig),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -127,7 +131,7 @@ describe('EmailService', () => {
     it('should log instead of send in test environment', async () => {
       mockConfigService.get.mockImplementation((key: string) => {
         if (key === 'NODE_ENV') return 'test';
-        return mockConfigService.get(key);
+        return getDefaultConfig(key);
       });
 
       // Recreate service with test NODE_ENV
@@ -311,11 +315,11 @@ describe('EmailService', () => {
 
       const sendPromise = (service as any).sendEmailWithRetry(mailOptions);
 
-      // Fast-forward through retries
-      await Promise.resolve();
-      jest.advanceTimersByTime(1000);
-      await Promise.resolve();
-      jest.advanceTimersByTime(2000);
+      // advanceTimersByTimeAsync advances the fake clock AND drains the
+      // microtask queue between fired timers, so the async retry chain
+      // (reject -> backoff -> retry) progresses without real waiting.
+      await jest.advanceTimersByTimeAsync(1000); // first backoff: 1s
+      await jest.advanceTimersByTimeAsync(2000); // second backoff: 2s
       await sendPromise;
 
       expect(mockSendMail).toHaveBeenCalledTimes(3);
@@ -327,6 +331,7 @@ describe('EmailService', () => {
     });
 
     it('should throw error with retry count after max retries', async () => {
+      jest.useFakeTimers();
       mockSendMail.mockRejectedValue(new Error('Persistent error'));
 
       const mailOptions = {
@@ -335,10 +340,17 @@ describe('EmailService', () => {
         html: '<html>Test</html>',
       };
 
-      await expect((service as any).sendEmailWithRetry(mailOptions)).rejects.toThrow(
-        'Failed to send email after 3 attempts',
-      );
+      const assertion = expect(
+        (service as any).sendEmailWithRetry(mailOptions),
+      ).rejects.toThrow('Failed to send email after 3 attempts');
+
+      // Drive both backoff delays so all 3 attempts run without real waiting.
+      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(2000);
+      await assertion;
+
       expect(mockSendMail).toHaveBeenCalledTimes(3);
+      jest.useRealTimers();
     });
   });
 
@@ -346,8 +358,12 @@ describe('EmailService', () => {
     it('should handle missing SMTP_HOST gracefully', async () => {
       mockConfigService.get.mockImplementation((key: string) => {
         if (key === 'SMTP_HOST') return null;
-        return mockConfigService.get(key);
+        return getDefaultConfig(key);
       });
+
+      // The warning is emitted inside the constructor, so the spy must be in
+      // place on the Logger prototype BEFORE the service is instantiated.
+      const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
 
       const module: TestingModule = await Test.createTestingModule({
         providers: [
@@ -359,16 +375,25 @@ describe('EmailService', () => {
         ],
       }).compile();
 
-      const serviceWithoutConfig = module.get<EmailService>(EmailService);
-      const logSpy = jest.spyOn(serviceWithoutConfig['logger'], 'warn');
+      module.get<EmailService>(EmailService);
 
       // Service should be created but warn about missing config
-      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('SMTP_HOST not configured'));
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('SMTP_HOST not configured'));
 
-      logSpy.mockRestore();
+      warnSpy.mockRestore();
     });
 
-    it('should create transporter with correct configuration', () => {
+    it('should create transporter with correct configuration', async () => {
+      // beforeEach clears mocks after constructing `service`, so build a fresh
+      // instance here to capture its createTransport call.
+      const module = await Test.createTestingModule({
+        providers: [
+          EmailService,
+          { provide: ConfigService, useValue: mockConfigService },
+        ],
+      }).compile();
+      module.get<EmailService>(EmailService);
+
       expect(nodemailer.createTransport).toHaveBeenCalledWith(
         expect.objectContaining({
           host: 'smtp.example.com',
@@ -382,21 +407,19 @@ describe('EmailService', () => {
       );
     });
 
-    it('should use secure connection for port 465', () => {
+    it('should use secure connection for port 465', async () => {
       mockConfigService.get.mockImplementation((key: string) => {
         if (key === 'SMTP_PORT') return 465;
-        return mockConfigService.get(key);
+        return getDefaultConfig(key);
       });
 
-      Test.createTestingModule({
+      const module = await Test.createTestingModule({
         providers: [
           EmailService,
-          {
-            provide: ConfigService,
-            useValue: mockConfigService,
-          },
+          { provide: ConfigService, useValue: mockConfigService },
         ],
       }).compile();
+      module.get<EmailService>(EmailService);
 
       expect(nodemailer.createTransport).toHaveBeenCalledWith(
         expect.objectContaining({

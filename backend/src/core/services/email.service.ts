@@ -193,8 +193,11 @@ export class EmailService {
       if (pdfUrl) {
         html = html.replace(/\{\{pdfUrl\}\}/g, pdfUrl);
       } else {
-        // Remove PDF download button if no PDF URL
-        html = html.replace(/<a href="\{\{pdfUrl\}\}"[^>]*>.*?Download PDF.*?<\/a>/gs, '');
+        // Remove PDF download button if no PDF URL, then strip any leftover
+        // {{pdfUrl}} placeholder so no raw template token leaks into the email.
+        html = html
+          .replace(/<a href="\{\{pdfUrl\}\}"[^>]*>.*?Download PDF.*?<\/a>/gs, '')
+          .replace(/\{\{pdfUrl\}\}/g, '');
       }
 
       const mailOptions = {

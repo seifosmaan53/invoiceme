@@ -24,9 +24,9 @@
     "setup:smtp": "bash scripts/setup-smtp-dev.sh",
     "setup:email": "node scripts/setup-email-auto.js",
     "setup:email:quick": "bash scripts/setup-email-quick.sh",
-    "migration:generate": "typeorm migration:generate",
-    "migration:run": "typeorm migration:run",
-    "migration:revert": "typeorm migration:revert"
+    "migration:generate": "typeorm-ts-node-commonjs migration:generate",
+    "migration:run": "typeorm-ts-node-commonjs migration:run",
+    "migration:revert": "typeorm-ts-node-commonjs migration:revert"
   },
   "dependencies": {
     "@nestjs/cache-manager": "^3.0.1",

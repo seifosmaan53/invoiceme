@@ -38,6 +38,10 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        env:
+          # Every test mocks PdfService, so no real Chromium is ever launched.
+          # Skipping the ~170MB Puppeteer download keeps install fast and reliable.
+          PUPPETEER_SKIP_DOWNLOAD: 'true'
 
       - name: Unit tests
         run: npm test

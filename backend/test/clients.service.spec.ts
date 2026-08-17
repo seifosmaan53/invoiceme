@@ -9,12 +9,26 @@ import { PaginationDto } from '../src/core/dto/pagination.dto';
 describe('ClientsService', () => {
   let service: ClientsService;
   let mockClientRepository: any;
+  let mockQueryBuilder: any;
 
   beforeEach(async () => {
+    // findAll builds a fluent TypeORM QueryBuilder; each chain method returns
+    // the builder itself, and getManyAndCount is the terminal that resolves
+    // [rows, total].
+    mockQueryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      take: jest.fn().mockReturnThis(),
+      getManyAndCount: jest.fn(),
+    };
+
     mockClientRepository = {
       find: jest.fn(),
       findOne: jest.fn(),
       findAndCount: jest.fn(),
+      createQueryBuilder: jest.fn(() => mockQueryBuilder),
       create: jest.fn(),
       save: jest.fn(),
     };
@@ -58,14 +72,18 @@ describe('ClientsService', () => {
 
       mockClientRepository.findAndCount.mockResolvedValue([clients, total]);
 
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([clients, total]);
+
       const result = await service.findAll(userId);
 
-      expect(mockClientRepository.findAndCount).toHaveBeenCalledWith({
-        where: { userId, deletedAt: null },
-        order: { createdAt: 'DESC' },
-        skip: 0,
-        take: 20,
-      });
+      expect(mockClientRepository.createQueryBuilder).toHaveBeenCalledWith('client');
+      expect(mockQueryBuilder.where).toHaveBeenCalledWith(
+        'client.userId = :userId',
+        { userId },
+      );
+      expect(mockQueryBuilder.orderBy).toHaveBeenCalledWith('client.createdAt', 'DESC');
+      expect(mockQueryBuilder.skip).toHaveBeenCalledWith(0);
+      expect(mockQueryBuilder.take).toHaveBeenCalledWith(20);
       expect(result.data).toEqual(clients);
       expect(result.meta).toEqual({
         page: 1,
@@ -91,16 +109,12 @@ describe('ClientsService', () => {
       ];
       const total = 25;
 
-      mockClientRepository.findAndCount.mockResolvedValue([clients, total]);
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([clients, total]);
 
       const result = await service.findAll(userId, pagination);
 
-      expect(mockClientRepository.findAndCount).toHaveBeenCalledWith({
-        where: { userId, deletedAt: null },
-        order: { createdAt: 'DESC' },
-        skip: 10, // (page - 1) * limit = (2 - 1) * 10 = 10
-        take: 10,
-      });
+      expect(mockQueryBuilder.skip).toHaveBeenCalledWith(10); // (2 - 1) * 10
+      expect(mockQueryBuilder.take).toHaveBeenCalledWith(10);
       expect(result.data).toEqual(clients);
       expect(result.meta).toEqual({
         page: 2,
@@ -115,16 +129,12 @@ describe('ClientsService', () => {
       const clients: Client[] = [];
       const total = 0;
 
-      mockClientRepository.findAndCount.mockResolvedValue([clients, total]);
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([clients, total]);
 
       const result = await service.findAll(userId);
 
-      expect(mockClientRepository.findAndCount).toHaveBeenCalledWith({
-        where: { userId, deletedAt: null },
-        order: { createdAt: 'DESC' },
-        skip: 0,
-        take: 20,
-      });
+      expect(mockQueryBuilder.skip).toHaveBeenCalledWith(0);
+      expect(mockQueryBuilder.take).toHaveBeenCalledWith(20);
       expect(result.data).toEqual([]);
       expect(result.meta).toEqual({
         page: 1,
@@ -139,14 +149,17 @@ describe('ClientsService', () => {
       const clients: Client[] = [];
       const total = 0;
 
-      mockClientRepository.findAndCount.mockResolvedValue([clients, total]);
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([clients, total]);
 
       await service.findAll(userId);
 
-      expect(mockClientRepository.findAndCount).toHaveBeenCalledWith(
-        expect.objectContaining({
-          where: { userId, deletedAt: null },
-        }),
+      expect(mockQueryBuilder.where).toHaveBeenCalledWith(
+        'client.userId = :userId',
+        { userId },
+      );
+      // Soft-deleted rows are excluded.
+      expect(mockQueryBuilder.andWhere).toHaveBeenCalledWith(
+        'client.deletedAt IS NULL',
       );
     });
 
@@ -155,15 +168,11 @@ describe('ClientsService', () => {
       const clients: Client[] = [];
       const total = 0;
 
-      mockClientRepository.findAndCount.mockResolvedValue([clients, total]);
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([clients, total]);
 
       await service.findAll(userId);
 
-      expect(mockClientRepository.findAndCount).toHaveBeenCalledWith(
-        expect.objectContaining({
-          order: { createdAt: 'DESC' },
-        }),
-      );
+      expect(mockQueryBuilder.orderBy).toHaveBeenCalledWith('client.createdAt', 'DESC');
     });
 
     it('should calculate totalPages correctly', async () => {
@@ -175,7 +184,7 @@ describe('ClientsService', () => {
         limit: 10,
       };
 
-      mockClientRepository.findAndCount.mockResolvedValue([clients, total]);
+      mockQueryBuilder.getManyAndCount.mockResolvedValue([clients, total]);
 
       const result = await service.findAll(userId, pagination);
 
@@ -265,7 +274,7 @@ describe('ClientsService', () => {
         name: 'New Client',
         email: 'newclient@example.com',
         phone: '+1234567890',
-        addressJson: { street: '123 Main St', city: 'New York' },
+        address_json: { street: '123 Main St', city: 'New York' },
       };
 
       const createdClient = {
@@ -279,8 +288,14 @@ describe('ClientsService', () => {
 
       const result = await service.create(createClientDto, userId);
 
+      // Service maps DTO (address_json/tags) onto entity columns
+      // (addressJson/tagsJson) and defaults tags to [].
       expect(mockClientRepository.create).toHaveBeenCalledWith({
-        ...createClientDto,
+        name: createClientDto.name,
+        email: createClientDto.email,
+        phone: createClientDto.phone,
+        addressJson: createClientDto.address_json,
+        tagsJson: [],
         userId,
       });
       expect(mockClientRepository.save).toHaveBeenCalledWith(createdClient);
@@ -305,7 +320,9 @@ describe('ClientsService', () => {
       const result = await service.create(createClientDto, userId);
 
       expect(mockClientRepository.create).toHaveBeenCalledWith({
-        ...createClientDto,
+        name: createClientDto.name,
+        addressJson: undefined,
+        tagsJson: [],
         userId,
       });
       expect(mockClientRepository.save).toHaveBeenCalledWith(createdClient);
@@ -330,7 +347,9 @@ describe('ClientsService', () => {
       await service.create(createClientDto, userId);
 
       expect(mockClientRepository.create).toHaveBeenCalledWith({
-        ...createClientDto,
+        name: createClientDto.name,
+        addressJson: undefined,
+        tagsJson: [],
         userId,
       });
     });

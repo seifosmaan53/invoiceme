@@ -10,7 +10,10 @@ import { ClientsController } from '../src/clients/clients.controller';
 import { ClientsService } from '../src/clients/clients.service';
 import { CreateClientDto, UpdateClientDto } from '../src/clients/dto/client.dto';
 import { PaginationDto } from '../src/core/dto/pagination.dto';
-import { JwtAuthGuard } from '../src/auth/guards/jwt-auth.guard';
+import { ApiKeyOrJwtGuard } from '../src/auth/guards/api-key-or-jwt.guard';
+import { PermissionGuard } from '../src/auth/guards/permission.guard';
+import { CsvService } from '../src/core/services/csv.service';
+import { AuditService } from '../src/core/services/audit.service';
 
 describe('ClientsController', () => {
   let controller: ClientsController;
@@ -28,6 +31,18 @@ describe('ClientsController', () => {
       create: jest.fn(),
       update: jest.fn(),
       archive: jest.fn(),
+      findAllForExport: jest.fn(),
+      bulkCreate: jest.fn(),
+      bulkArchive: jest.fn(),
+    };
+
+    const mockCsvService = {
+      exportToCsv: jest.fn(),
+      parseCsv: jest.fn(),
+    };
+
+    const mockAuditService = {
+      log: jest.fn(),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -37,12 +52,24 @@ describe('ClientsController', () => {
           provide: ClientsService,
           useValue: mockClientsService,
         },
+        {
+          provide: CsvService,
+          useValue: mockCsvService,
+        },
+        {
+          provide: AuditService,
+          useValue: mockAuditService,
+        },
       ],
     })
-      .overrideGuard(JwtAuthGuard)
-      .useValue({
-        canActivate: jest.fn(() => true),
-      })
+      // The controller is protected by @UseGuards(ApiKeyOrJwtGuard,
+      // PermissionGuard). Both pull in extra deps (ApiKeysService, Reflector),
+      // so stub them to always allow — auth behavior is covered by the guard
+      // specs, not here.
+      .overrideGuard(ApiKeyOrJwtGuard)
+      .useValue({ canActivate: jest.fn(() => true) })
+      .overrideGuard(PermissionGuard)
+      .useValue({ canActivate: jest.fn(() => true) })
       .compile();
 
     controller = module.get<ClientsController>(ClientsController);
@@ -78,7 +105,15 @@ describe('ClientsController', () => {
 
       const result = await controller.findAll(pagination, mockUser);
 
-      expect(clientsService.findAll).toHaveBeenCalledWith(mockUser.userId, pagination);
+      // Controller forwards (userId, filters, tags, dateFrom, dateTo); with no
+      // tags/date filters the trailing three are undefined.
+      expect(clientsService.findAll).toHaveBeenCalledWith(
+        mockUser.userId,
+        pagination,
+        undefined,
+        undefined,
+        undefined,
+      );
       expect(result).toEqual(paginatedResponse);
     });
 
@@ -137,7 +172,15 @@ describe('ClientsController', () => {
 
       await controller.findAll(pagination, mockUser);
 
-      expect(clientsService.findAll).toHaveBeenCalledWith(mockUser.userId, pagination);
+      // Controller forwards (userId, filters, tags, dateFrom, dateTo); with no
+      // tags/date filters the trailing three are undefined.
+      expect(clientsService.findAll).toHaveBeenCalledWith(
+        mockUser.userId,
+        pagination,
+        undefined,
+        undefined,
+        undefined,
+      );
     });
 
     it('should pass query parameters (page, limit) to service', async () => {
@@ -160,7 +203,15 @@ describe('ClientsController', () => {
 
       await controller.findAll(pagination, mockUser);
 
-      expect(clientsService.findAll).toHaveBeenCalledWith(mockUser.userId, pagination);
+      // Controller forwards (userId, filters, tags, dateFrom, dateTo); with no
+      // tags/date filters the trailing three are undefined.
+      expect(clientsService.findAll).toHaveBeenCalledWith(
+        mockUser.userId,
+        pagination,
+        undefined,
+        undefined,
+        undefined,
+      );
     });
 
     it('should handle empty pagination (default page=1, limit=20)', async () => {
@@ -180,7 +231,15 @@ describe('ClientsController', () => {
 
       await controller.findAll(pagination, mockUser);
 
-      expect(clientsService.findAll).toHaveBeenCalledWith(mockUser.userId, pagination);
+      // Controller forwards (userId, filters, tags, dateFrom, dateTo); with no
+      // tags/date filters the trailing three are undefined.
+      expect(clientsService.findAll).toHaveBeenCalledWith(
+        mockUser.userId,
+        pagination,
+        undefined,
+        undefined,
+        undefined,
+      );
     });
 
     it('should verify JwtAuthGuard protects endpoint', async () => {
@@ -324,13 +383,16 @@ describe('ClientsController', () => {
         name: 'New Client',
         email: 'client@example.com',
         phone: '+1234567890',
-        addressJson: { street: '123 Main St', city: 'New York' },
+        address_json: { street: '123 Main St', city: 'New York' },
       };
 
       const createdClient = {
         id: 'client-id',
         userId: mockUser.userId,
         ...createClientDto,
+        // The service maps the DTO's snake_case address_json onto the
+        // entity's camelCase addressJson column; model that here.
+        addressJson: createClientDto.address_json,
       };
 
       clientsService.create.mockResolvedValue(createdClient as any);
@@ -339,7 +401,7 @@ describe('ClientsController', () => {
 
       expect(result.email).toBe(createClientDto.email);
       expect(result.phone).toBe(createClientDto.phone);
-      expect(result.addressJson).toEqual(createClientDto.addressJson);
+      expect(result.addressJson).toEqual(createClientDto.address_json);
     });
   });
 
@@ -440,18 +502,18 @@ describe('ClientsController', () => {
       const result = await controller.archive(id, mockUser);
 
       expect(clientsService.archive).toHaveBeenCalledWith(id, mockUser.userId);
-      expect(result).toEqual({ message: 'Client archived' });
+      // Endpoint is documented @ApiNoContentResponse (204) — it returns no body.
+      expect(result).toBeUndefined();
     });
 
-    it('should return success message: { message: \'Client archived\' }', async () => {
+    it('should resolve with no content (204) after archiving', async () => {
       const id = 'client-id';
 
       clientsService.archive.mockResolvedValue(undefined);
 
       const result = await controller.archive(id, mockUser);
 
-      expect(result).toEqual({ message: 'Client archived' });
-      expect(result.message).toBe('Client archived');
+      expect(result).toBeUndefined();
     });
 
     it('should propagate NotFoundException when client not found', async () => {
@@ -497,14 +559,15 @@ describe('ClientsController', () => {
       expect(controller).toBeDefined();
     });
 
-    it('should verify response transformations (e.g., archive returns message object)', async () => {
+    it('should verify response transformations (e.g., archive returns no content)', async () => {
       const id = 'client-id';
 
       clientsService.archive.mockResolvedValue(undefined);
 
       const result = await controller.archive(id, mockUser);
 
-      expect(result).toEqual({ message: 'Client archived' });
+      // Archive is a 204 No Content endpoint (@ApiNoContentResponse).
+      expect(result).toBeUndefined();
     });
 
     it('should verify error propagation from service layer', async () => {

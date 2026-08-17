@@ -4,6 +4,10 @@ import { InvoicesService } from '../src/invoices/invoices.service';
 import { Invoice } from '../src/entities/invoice.entity';
 import { InvoiceItem } from '../src/entities/invoice-item.entity';
 import { Client } from '../src/entities/client.entity';
+import { User } from '../src/entities/user.entity';
+import { Payment } from '../src/entities/payment.entity';
+import { NotificationService } from '../src/core/services/notification.service';
+import { InvoiceNumberFormatterService } from '../src/core/services/invoice-number-formatter.service';
 import { DataSource } from 'typeorm';
 
 describe('InvoicesService - Math Calculations', () => {
@@ -11,6 +15,10 @@ describe('InvoicesService - Math Calculations', () => {
   let mockInvoiceRepository: any;
   let mockInvoiceItemRepository: any;
   let mockClientRepository: any;
+  let mockUserRepository: any;
+  let mockPaymentRepository: any;
+  let mockNotificationService: any;
+  let mockInvoiceNumberFormatter: any;
   let mockDataSource: any;
 
   beforeEach(async () => {
@@ -33,6 +41,23 @@ describe('InvoicesService - Math Calculations', () => {
 
     mockClientRepository = {
       findOne: jest.fn(),
+    };
+
+    mockUserRepository = {
+      findOne: jest.fn(),
+    };
+
+    mockPaymentRepository = {
+      find: jest.fn().mockResolvedValue([]),
+    };
+
+    mockNotificationService = {
+      notifyInvoicePaid: jest.fn(),
+    };
+
+    mockInvoiceNumberFormatter = {
+      format: jest.fn(),
+      extractSequence: jest.fn(),
     };
 
     mockDataSource = {
@@ -63,6 +88,22 @@ describe('InvoicesService - Math Calculations', () => {
         {
           provide: getRepositoryToken(Client),
           useValue: mockClientRepository,
+        },
+        {
+          provide: getRepositoryToken(User),
+          useValue: mockUserRepository,
+        },
+        {
+          provide: getRepositoryToken(Payment),
+          useValue: mockPaymentRepository,
+        },
+        {
+          provide: NotificationService,
+          useValue: mockNotificationService,
+        },
+        {
+          provide: InvoiceNumberFormatterService,
+          useValue: mockInvoiceNumberFormatter,
         },
         {
           provide: DataSource,

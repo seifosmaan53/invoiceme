@@ -12,6 +12,9 @@ import { Client } from '../src/entities/client.entity';
 import { Invoice, InvoiceType, InvoiceStatus } from '../src/entities/invoice.entity';
 import { InvoiceItem } from '../src/entities/invoice-item.entity';
 import { User } from '../src/entities/user.entity';
+import { Payment } from '../src/entities/payment.entity';
+import { NotificationService } from '../src/core/services/notification.service';
+import { InvoiceNumberFormatterService } from '../src/core/services/invoice-number-formatter.service';
 import { DataSource } from 'typeorm';
 import { PaginationDto } from '../src/core/dto/pagination.dto';
 
@@ -27,6 +30,7 @@ describe('Filtering Functionality', () => {
         where: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
         orderBy: jest.fn().mockReturnThis(),
+        addOrderBy: jest.fn().mockReturnThis(),
         skip: jest.fn().mockReturnThis(),
         take: jest.fn().mockReturnThis(),
         getManyAndCount: jest.fn(),
@@ -210,6 +214,7 @@ describe('Filtering Functionality', () => {
         where: jest.fn().mockReturnThis(),
         andWhere: jest.fn().mockReturnThis(),
         orderBy: jest.fn().mockReturnThis(),
+        addOrderBy: jest.fn().mockReturnThis(),
         skip: jest.fn().mockReturnThis(),
         take: jest.fn().mockReturnThis(),
         getManyAndCount: jest.fn(),
@@ -248,19 +253,21 @@ describe('Filtering Functionality', () => {
             useValue: mockUserRepository,
           },
           {
+            provide: getRepositoryToken(Payment),
+            useValue: { find: jest.fn().mockResolvedValue([]) },
+          },
+          {
             provide: DataSource,
             useValue: mockDataSource,
           },
+          // Provide services by their real class tokens (not string tokens) —
+          // Nest resolves constructor deps by class reference.
           {
-            provide: 'NotificationService',
+            provide: NotificationService,
             useValue: { notifyInvoicePaid: jest.fn() },
           },
           {
-            provide: 'CacheService',
-            useValue: {},
-          },
-          {
-            provide: 'InvoiceNumberFormatterService',
+            provide: InvoiceNumberFormatterService,
             useValue: { format: jest.fn(), extractSequence: jest.fn() },
           },
         ],

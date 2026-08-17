@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -51,6 +51,11 @@ describe('Auth E2E Tests', () => {
       .compile();
 
     app = moduleFixture.createNestApplication();
+    app.useGlobalPipes(
+
+      new ValidationPipe({ transform: true, transformOptions: { enableImplicitConversion: true } }),
+
+    );
     app.setGlobalPrefix('api');
     await app.init();
 
@@ -69,9 +74,13 @@ describe('Auth E2E Tests', () => {
 
   beforeEach(async () => {
     // Clean auth-related tables
-    await passwordResetTokenRepository.delete({});
-    await refreshTokenRepository.delete({});
-    await userRepository.delete({});
+    // FK-safe full reset (shared test DB): CASCADE handles delete ordering.
+    const ds = userRepository.manager.connection;
+    await ds.query(
+      'TRUNCATE TABLE ' +
+        ds.entityMetadatas.map((m) => `"${m.tableName}"`).join(', ') +
+        ' RESTART IDENTITY CASCADE',
+    );
   });
 
   describe('POST /api/v1/auth/register', () => {
@@ -199,13 +208,15 @@ describe('Auth E2E Tests', () => {
       await request(app.getHttpServer()).post('/api/v1/auth/login').send(loginDto).expect(401);
     });
 
-    it('should return 400 Bad Request for missing credentials', async () => {
+    it('should return 401 Unauthorized for missing credentials', async () => {
       const loginDto = {
         email: 'test@example.com',
         // Missing password
       };
 
-      await request(app.getHttpServer()).post('/api/v1/auth/login').send(loginDto).expect(400);
+      // Login is behind LocalAuthGuard, which runs before the validation pipe,
+      // so passport rejects the missing credential with 401 (not a 400).
+      await request(app.getHttpServer()).post('/api/v1/auth/login').send(loginDto).expect(401);
     });
   });
 
@@ -223,7 +234,7 @@ describe('Auth E2E Tests', () => {
 
       // Create valid refresh token
       const refreshTokenValue = jwtService.sign(
-        { userId: user.id, email: user.email },
+        { sub: user.id, email: user.email },
         { secret: configService.get('JWT_REFRESH_SECRET'), expiresIn: '7d' },
       );
       const refreshToken = refreshTokenRepository.create({
@@ -538,11 +549,12 @@ describe('Auth E2E Tests', () => {
       });
       await userRepository.save(user);
 
-      // Create expired token (expired 1 hour ago by setting exp in the past)
-      const pastDate = Math.floor(Date.now() / 1000) - 3600; // 1 hour ago
+      // Create an already-expired token. Use a negative expiresIn rather than
+      // an explicit `exp` claim — the module sets a default expiresIn, and
+      // jsonwebtoken rejects signing when both are present.
       const expiredToken = jwtService.sign(
-        { userId: user.id, email: user.email, exp: pastDate },
-        { secret: configService.get('JWT_SECRET') },
+        { sub: user.id, email: user.email },
+        { secret: configService.get('JWT_SECRET'), expiresIn: '-1h' },
       );
 
       await request(app.getHttpServer())

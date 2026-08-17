@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Query, UseGuards } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, UseGuards, HttpCode, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery, ApiBody } from '@nestjs/swagger';
 import { SyncService, SyncPushDto } from './sync.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -12,8 +12,9 @@ export class SyncController {
   constructor(private readonly syncService: SyncService) {}
 
   @Post('push')
-  @ApiOperation({ 
-    summary: 'Push local changes to server', 
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Push local changes to server',
     description: 'Synchronizes local changes (creates, updates, deletes) to the server for offline-first mobile support. Use this when your mobile app has been offline and needs to sync changes back to the server.' 
   })
   @ApiBody({ 

@@ -2,8 +2,6 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { UnauthorizedException } from '@nestjs/common';
 import { LocalStrategy } from '../src/core/strategies/local.strategy';
 import { AuthService } from '../src/auth/auth.service';
-import { PassportStrategy } from '@nestjs/passport';
-import { Strategy } from 'passport-local';
 
 describe('LocalStrategy', () => {
   let strategy: LocalStrategy;
@@ -280,8 +278,12 @@ describe('LocalStrategy', () => {
     });
 
     it('should verify strategy registered with Passport as \'local\' strategy', () => {
-      // LocalStrategy extends PassportStrategy(Strategy) which registers it with Passport
-      expect(strategy).toBeInstanceOf(PassportStrategy);
+      // LocalStrategy extends PassportStrategy(Strategy). PassportStrategy is
+      // a mixin factory (returns a fresh class per call), so `instanceof
+      // PassportStrategy` is never true. Assert the concrete class and the
+      // Passport contract (a validate method) instead.
+      expect(strategy).toBeInstanceOf(LocalStrategy);
+      expect(typeof strategy.validate).toBe('function');
     });
 
     it('should verify usernameField configured as \'email\' (not default \'username\')', () => {

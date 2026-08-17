@@ -511,8 +511,9 @@ export class InvoicesService {
       );
       
       if (extractedSequence !== null) {
-        // Check if it's from the same year/month (depending on format)
-        const date = issueDate || new Date();
+        // Check if it's from the same year/month (depending on format).
+        // issueDate may arrive as an ISO string from the DTO, so normalize.
+        const date = issueDate ? new Date(issueDate) : new Date();
         const year = date.getFullYear();
         // Convert lastInvoice.issueDate to Date if it's a string
         let lastYear = year;

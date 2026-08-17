@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -51,6 +51,11 @@ describe('Clients E2E Tests - Filtering', () => {
       .compile();
 
     app = moduleFixture.createNestApplication();
+    app.useGlobalPipes(
+
+      new ValidationPipe({ transform: true, transformOptions: { enableImplicitConversion: true } }),
+
+    );
     app.setGlobalPrefix('api');
     await app.init();
 
@@ -66,8 +71,13 @@ describe('Clients E2E Tests - Filtering', () => {
 
   beforeEach(async () => {
     // Clean tables
-    await clientRepository.delete({});
-    await userRepository.delete({});
+    // FK-safe full reset (shared test DB): CASCADE handles delete ordering.
+    const ds = userRepository.manager.connection;
+    await ds.query(
+      'TRUNCATE TABLE ' +
+        ds.entityMetadatas.map((m) => `"${m.tableName}"`).join(', ') +
+        ' RESTART IDENTITY CASCADE',
+    );
 
     // Create test user and auth token
     const password = 'password123';
@@ -81,7 +91,7 @@ describe('Clients E2E Tests - Filtering', () => {
     await userRepository.save(testUser);
 
     authToken = jwtService.sign(
-      { userId: testUser.id, email: testUser.email },
+      { sub: testUser.id, email: testUser.email },
       { secret: configService.get('JWT_SECRET'), expiresIn: '15m' },
     );
   });

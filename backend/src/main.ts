@@ -14,6 +14,7 @@ import rateLimit from 'express-rate-limit';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
     bufferLogs: true, // Buffer logs until logger is ready
+    rawBody: true, // Preserve raw body for Stripe webhook signature verification
   });
   const configService = app.get(ConfigService);
   const nodeEnv = configService.get<string>('NODE_ENV') || 'development';

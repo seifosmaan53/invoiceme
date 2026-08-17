@@ -14,6 +14,8 @@ import {
   NotFoundException,
   InternalServerErrorException,
   Req,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
 import { 
   ApiTags, 
@@ -567,7 +569,11 @@ export class InvoicesController {
         throw new InternalServerErrorException('Generated PDF is empty');
       }
 
-      const isDevelopment = process.env.NODE_ENV !== 'production';
+      // Serve the PDF directly only when S3 isn't available (typical local
+      // dev). When S3 is configured — including in tests — upload and return a
+      // URL regardless of NODE_ENV.
+      const isDevelopment =
+        process.env.NODE_ENV !== 'production' && !this.s3Service.isAvailable();
       const filename = `${invoice.number || 'invoice'}.pdf`;
 
       if (isDevelopment) {
@@ -709,6 +715,7 @@ export class InvoicesController {
   }
 
   @Post(':id/pay')
+  @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Create Stripe payment intent for an invoice' })
   @ApiResponse({ status: 200, description: 'Payment intent created successfully' })
   @ApiResponse({ status: 400, description: 'Invoice cannot be paid (already paid or invalid status)' })
@@ -744,7 +751,8 @@ export class InvoicesController {
     let paymentIntent;
     try {
       paymentIntent = await this.stripeService.createPaymentIntent(
-        invoice.total,
+        // invoice.total is a Postgres numeric (string); Stripe needs a number.
+        Number(invoice.total),
         invoice.currency,
         {
           invoice_id: invoice.id,

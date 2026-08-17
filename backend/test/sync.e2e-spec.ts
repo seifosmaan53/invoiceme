@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -63,6 +63,11 @@ describe('Sync E2E Tests', () => {
       .compile();
 
     app = moduleFixture.createNestApplication();
+    app.useGlobalPipes(
+
+      new ValidationPipe({ transform: true, transformOptions: { enableImplicitConversion: true } }),
+
+    );
     app.setGlobalPrefix('api');
     await app.init();
 

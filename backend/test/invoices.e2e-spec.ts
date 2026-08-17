@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -41,9 +41,12 @@ describe('Invoices E2E Tests', () => {
 
   const mockS3Service = {
     uploadFile: jest.fn(),
+    isAvailable: jest.fn().mockReturnValue(true),
+    getSignedUrl: jest.fn().mockReturnValue('https://s3.example.com/signed-url'),
   };
 
   const mockStripeService = {
+    isAvailable: jest.fn().mockReturnValue(true),
     createPaymentIntent: jest.fn(),
   };
 
@@ -84,6 +87,11 @@ describe('Invoices E2E Tests', () => {
       .compile();
 
     app = moduleFixture.createNestApplication();
+    app.useGlobalPipes(
+
+      new ValidationPipe({ transform: true, transformOptions: { enableImplicitConversion: true } }),
+
+    );
     app.setGlobalPrefix('api');
     await app.init();
 
@@ -495,7 +503,8 @@ describe('Invoices E2E Tests', () => {
         .expect(200);
 
       expect(response.body).toHaveProperty('data');
-      expect(response.body).toHaveProperty('total');
+      // Pagination metadata lives under `meta`.
+      expect(response.body.meta).toHaveProperty('total');
       expect(response.body.data.length).toBeLessThanOrEqual(3);
     });
 
@@ -675,8 +684,9 @@ describe('Invoices E2E Tests', () => {
 
       // Verify all returned invoices are within the range
       response.body.data.forEach((inv: Invoice) => {
-        expect(inv.total).toBeGreaterThanOrEqual(100);
-        expect(inv.total).toBeLessThanOrEqual(1000);
+        // Postgres numeric columns serialize as strings.
+        expect(Number(inv.total)).toBeGreaterThanOrEqual(100);
+        expect(Number(inv.total)).toBeLessThanOrEqual(1000);
       });
     });
 
@@ -718,7 +728,7 @@ describe('Invoices E2E Tests', () => {
         taxTotal: 20,
         discountTotal: 0,
         total: 220,
-        status: InvoiceStatus.UNPAID,
+        status: InvoiceStatus.SENT, // sent but not paid — excluded by status=paid
       });
       await invoiceRepository.save(unpaidInvoice);
 
@@ -781,8 +791,8 @@ describe('Invoices E2E Tests', () => {
       response.body.data.forEach((inv: Invoice) => {
         expect(inv.type).toBe(InvoiceType.INVOICE);
         expect(inv.status).toBe(InvoiceStatus.SENT);
-        expect(inv.total).toBeGreaterThanOrEqual(500);
-        expect(inv.total).toBeLessThanOrEqual(600);
+        expect(Number(inv.total)).toBeGreaterThanOrEqual(500);
+        expect(Number(inv.total)).toBeLessThanOrEqual(600);
         const issueDate = new Date(inv.issueDate);
         expect(issueDate.getMonth()).toBe(5); // June (0-indexed)
         expect(issueDate.getFullYear()).toBe(2025);
@@ -1126,8 +1136,10 @@ describe('Invoices E2E Tests', () => {
     });
 
     it('should return 404 if invoice not found', async () => {
+      // Use a well-formed but non-existent UUID so we exercise the not-found
+      // path (a non-UUID string would fail Postgres uuid parsing with a 500).
       await request(app.getHttpServer())
-        .get('/api/v1/invoices/non-existent-id/attachments')
+        .get('/api/v1/invoices/00000000-0000-0000-0000-000000000000/attachments')
         .set('Authorization', `Bearer ${authToken}`)
         .expect(404);
     });

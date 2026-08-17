@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -30,6 +30,7 @@ describe('Payments E2E Tests', () => {
 
   // Mock StripeService
   const mockStripeService = {
+    isAvailable: jest.fn().mockReturnValue(true),
     createPaymentIntent: jest.fn(),
     verifyWebhookSignature: jest.fn(),
   };
@@ -66,7 +67,12 @@ describe('Payments E2E Tests', () => {
       .useValue(mockStripeService)
       .compile();
 
-    app = moduleFixture.createNestApplication();
+    app = moduleFixture.createNestApplication({ rawBody: true });
+    app.useGlobalPipes(
+
+      new ValidationPipe({ transform: true, transformOptions: { enableImplicitConversion: true } }),
+
+    );
     app.setGlobalPrefix('api');
     await app.init();
 
@@ -156,7 +162,8 @@ describe('Payments E2E Tests', () => {
       expect(response.body).toHaveProperty('paymentIntentId');
       expect(response.body).toHaveProperty('amount');
       expect(response.body).toHaveProperty('currency');
-      expect(response.body.amount).toBe(110);
+      // invoice.total is a Postgres numeric, serialized as a string.
+      expect(Number(response.body.amount)).toBe(110);
       expect(response.body.currency).toBe('USD');
       expect(response.body.paymentIntentId).toBe('pi_test_123');
 

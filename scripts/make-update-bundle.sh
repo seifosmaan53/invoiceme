@@ -9,7 +9,7 @@
 # builder stage: only src/, tsconfig.json and nest-cli.json, so the entry
 # point is dist/main.js), package.json + package-lock.json, the SQL
 # migrations, env.example, the operations and security docs, VERSION.txt and
-# SHA256SUMS. It does NOT contain node_modules: bcrypt is a native module, so
+# SHA256SUMS, healthcheck.js and scripts/schema-review.sh. It does NOT contain node_modules: bcrypt is a native module, so
 # dependencies are installed on the target machine with
 #   PUPPETEER_SKIP_DOWNLOAD=true npm ci --omit=dev
 # See docs/operations/customer-update.md.
@@ -30,7 +30,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 # Only committed files.
-git archive "$commit" backend docs/operations docs/security docs/SYNC-CONTRACT.md | tar -x -C "$work"
+git archive "$commit" backend docs/operations docs/security docs/SYNC-CONTRACT.md scripts/schema-review.sh | tar -x -C "$work"
 
 # Builder stage (mirrors backend/Dockerfile).
 build="$work/build"
@@ -44,11 +44,12 @@ name="invoiceme-backend-$short"
 bundle="$work/$name"
 mkdir -p "$bundle/docs"
 cp -R "$build/dist" "$bundle/dist"
-cp "$work/backend/package.json" "$work/backend/package-lock.json" "$work/backend/env.example" "$bundle/"
+cp "$work/backend/package.json" "$work/backend/package-lock.json" "$work/backend/env.example" "$work/backend/healthcheck.js" "$bundle/"
 mkdir -p "$bundle/migrations"
 cp "$work"/backend/migrations/*.sql "$bundle/migrations/"
 cp -R "$work/docs/operations" "$work/docs/security" "$bundle/docs/"
 cp "$work/docs/SYNC-CONTRACT.md" "$bundle/docs/"
+mkdir -p "$bundle/scripts" && cp "$work/scripts/schema-review.sh" "$bundle/scripts/"
 {
   echo "commit: $commit"
   echo "built: $(date -u +%Y-%m-%dT%H:%M:%SZ)"

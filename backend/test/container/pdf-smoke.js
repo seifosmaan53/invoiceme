@@ -73,7 +73,7 @@ async function main() {
   // stdout is a pipe: wait for the write to flush before exiting.
   const line =
     JSON.stringify({
-      uid: process.getuid(),
+      uid: typeof process.getuid === 'function' ? process.getuid() : null, // not available on Windows
       node: process.version,
       puppeteer: require('puppeteer/package.json').version,
       executablePathEnv: process.env.PUPPETEER_EXECUTABLE_PATH || null,

@@ -1,0 +1,170 @@
+name: Update bundle
+
+# Builds the on-site update bundle on Node 20 and installs that exact bundle on
+# Linux and Windows: SQL migrations, production start, strict health check,
+# HTTPS enforcement, integrity report, backup/restore verification and a PDF
+# rendered with the operating system's own browser. The bundle is kept as a
+# workflow artifact; ship only a bundle built by this workflow from main.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: update-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build bundle on Node 20
+        run: scripts/make-update-bundle.sh "$RUNNER_TEMP/bundle"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: invoiceme-update-bundle
+          path: ${{ runner.temp }}/bundle/
+          retention-days: 30
+
+  install-test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      DB: invoiceme_bundle
+      API_PORT: '3456'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          name: invoiceme-update-bundle
+          path: dl
+
+      - name: Verify checksums and extract
+        run: |
+          cd dl
+          sha256sum -c ./*.tar.gz.sha256
+          mkdir -p ../site && tar -xzf ./*.tar.gz -C ../site
+          cd ../site/invoiceme-backend-*
+          sha256sum -c --quiet SHA256SUMS
+          cat VERSION.txt
+          echo "BUNDLE=$PWD" >> "$GITHUB_ENV"
+
+      - name: Start PostgreSQL (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres'"
+          echo "PGHOST=localhost" >> "$GITHUB_ENV"
+          echo "PGBINDIR=/usr/bin" >> "$GITHUB_ENV"
+          echo "BROWSER=$(command -v google-chrome || command -v chromium || command -v chromium-browser)" >> "$GITHUB_ENV"
+      - name: Start PostgreSQL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $svc = Get-Service -Name 'postgresql*' | Select-Object -First 1
+          Set-Service -Name $svc.Name -StartupType Manual
+          Start-Service -Name $svc.Name
+          & "$env:PGBIN\psql.exe" -U postgres -c "ALTER USER postgres PASSWORD 'postgres'"
+          "PGHOST=localhost" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "PGBINDIR=$($env:PGBIN -replace '\\','/')" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BROWSER=C:/Program Files/Google/Chrome/Application/chrome.exe" | Out-File -FilePath $env:GITHUB_ENV -Append
+        env:
+          PGPASSWORD: root
+
+      - name: Create the database from the bundle's SQL migrations
+        run: |
+          "$PGBINDIR/psql" -v ON_ERROR_STOP=1 -c "CREATE DATABASE $DB"
+          for f in "$BUNDLE"/migrations/[0-9][0-9][0-9]_*.sql; do
+            "$PGBINDIR/psql" -v ON_ERROR_STOP=1 -q --single-transaction -d "$DB" -f "$f" > /dev/null
+          done
+          "$PGBINDIR/psql" -At -d "$DB" -c "select count(*) from information_schema.tables where table_schema='public'"
+
+      - name: Install production dependencies (Node 20)
+        working-directory: ${{ env.BUNDLE }}
+        run: |
+          node --version
+          PUPPETEER_SKIP_DOWNLOAD=true npm ci --omit=dev --no-audit --no-fund
+
+      - name: Start dist/main.js in production mode
+        working-directory: ${{ env.BUNDLE }}
+        env:
+          NODE_ENV: production
+          DB_HOST: localhost
+          DB_PORT: '5432'
+          DB_USERNAME: postgres
+          DB_PASSWORD: postgres
+          DB_DATABASE: ${{ env.DB }}
+          JWT_SECRET: ci-only-not-a-secret-0000000000000000000000
+          JWT_REFRESH_SECRET: ci-only-not-a-secret-1111111111111111111111
+          CORS_ORIGIN: http://localhost
+          FRONTEND_URL: http://localhost
+        run: |
+          node dist/main.js > "$RUNNER_TEMP/backend.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/backend.pid"
+          for i in $(seq 1 60); do
+            if node healthcheck.js > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          node healthcheck.js || { cat "$RUNNER_TEMP/backend.log"; exit 1; }
+
+      - name: HTTPS enforcement (plain HTTP, no trusted proxy)
+        run: |
+          base="http://127.0.0.1:$API_PORT/api/v1"
+          get=$(curl -s -o /dev/null -w '%{http_code}' "$base/invoices")
+          post=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$base/auth/login")
+          spoof=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-Forwarded-Proto: https' -H 'Content-Type: application/json' -d '{}' "$base/auth/login")
+          echo "GET $get, POST $post, POST with spoofed X-Forwarded-Proto $spoof"
+          [ "$get" = 301 ] && [ "$post" = 403 ] && [ "$spoof" = 403 ]
+
+      - name: Integrity report (read-only)
+        working-directory: ${{ env.BUNDLE }}
+        run: INTEGRITY_DATABASE_URL="postgres://postgres:postgres@localhost:5432/$DB" node dist/integrity/integrity-report.js
+
+      - name: Backup and restore verification
+        working-directory: ${{ env.BUNDLE }}
+        run: |
+          "$PGBINDIR/pg_dump" -Fc -d "$DB" -f "$RUNNER_TEMP/bundle.dump"
+          "$PGBINDIR/psql" -v ON_ERROR_STOP=1 -c "CREATE DATABASE ${DB}_restore"
+          "$PGBINDIR/pg_restore" --no-owner -d "${DB}_restore" "$RUNNER_TEMP/bundle.dump"
+          export VERIFY_SOURCE_URL="postgres://postgres:postgres@localhost:5432/$DB"
+          export VERIFY_RESTORED_URL="postgres://postgres:postgres@localhost:5432/${DB}_restore"
+          # The backend is still connected to the source: the result must be NOT PROVEN (exit 1).
+          set +e; node dist/ops/verify-restore.js; busy=$?; set -e
+          [ "$busy" = 1 ] || { echo "expected NOT PROVEN while the backend runs, got exit $busy"; exit 1; }
+          kill "$(cat "$RUNNER_TEMP/backend.pid")"; sleep 3
+          node dist/ops/verify-restore.js
+
+      - name: Render PDFs with the system browser
+        working-directory: ${{ env.BUNDLE }}
+        env:
+          SMOKE_INVOICE_NUMBER: BUNDLE-INV-0001
+        run: |
+          echo "browser: $BROWSER"
+          cp "$GITHUB_WORKSPACE/backend/test/container/pdf-smoke.js" ./pdf-smoke.ci.js
+          PUPPETEER_EXECUTABLE_PATH="$BROWSER" SMOKE_DIST_DIR="$PWD/dist" node pdf-smoke.ci.js > "$RUNNER_TEMP/smoke.json"
+          node "$GITHUB_WORKSPACE/backend/test/bundle/validate-smoke.js" "$RUNNER_TEMP/smoke.json" BUNDLE-INV-0001
+
+      - name: Backend log
+        if: always()
+        run: cat "$RUNNER_TEMP/backend.log" 2>/dev/null | tail -50 || true

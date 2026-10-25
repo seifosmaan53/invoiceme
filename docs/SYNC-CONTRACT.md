@@ -116,8 +116,8 @@ the response. The server logs the reason.
   whenever it was made offline. A device that comes back online after a week
   overwrites newer edits made on another device or through the REST API with
   its older data.
-- This is *not* last-write-wins by client timestamp. The README sentence
-  claiming that is inaccurate (see [Known gaps](#known-gaps)).
+- This is *not* last-write-wins by client timestamp, and must not be
+  described as such.
 
 ### Clock skew
 
@@ -143,8 +143,15 @@ the response. The server logs the reason.
 
 ## Client behaviour (Flutter)
 
-- Pending changes are queued in local SQLite (`pending_changes`) and pushed
-  in `created_at` order.
+- Pending changes are queued in local SQLite (`pending_changes`, one row
+  per mutation with a local random `id`) and the **whole queue** is pushed in
+  one request, in `created_at` order. The local row `id` is not sent.
+- `updated_at` is the time the change was queued, from the device clock.
+- `deviceId` is a fresh random UUID per `SyncService` instance (that is, per
+  app start), not a stable device identity. Do not rely on it for anything
+  beyond the audit log.
+- `sync()` pushes, then pulls. A push error (network, 4xx/5xx) aborts the
+  sync. Nothing is marked synced, so the next sync resends the whole queue.
 - After a push, the client marks the **first `synced`** pending changes as
   synced (`pendingChanges.take(synced)`). The server returns counts only, so
   this is wrong whenever a failed change is not at the end of the batch (see
@@ -176,5 +183,4 @@ needs a product decision:
    tolerating duplicates) would close this.
 6. **No batch size limit** on `changes`.
 7. `docs/API.md` and the README described a different payload and
-   last-write-wins semantics. `docs/API.md` now points here. The README
-   sentence still needs rewording.
+   last-write-wins semantics. Both now point here.

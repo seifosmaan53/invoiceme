@@ -287,17 +287,22 @@ The released client (`mobile/lib/core/services/sync_service.dart` as of
 A backward-compatible client change is a separate commit on the
 `fix/sync-contract` branch and **needs a mobile release**. It sends
 `change_id` = the local row id, marks rows from `results`, and falls back to
-the old behaviour when `results` is absent. It must not ship before the
-server (see below).
+the old behaviour when `results` is absent. Against an older server, which
+rejects `change_id` with `400` and applies nothing, it resends once without
+`change_id`. That matters because self-hosted installations update at
+different times. Its Dart code and test were not compiled or run in the
+environment that wrote it. CI runs the test (`flutter test test/services/`).
 
 ## Compatibility and rollout
 
 | server \ client              | released client (no `change_id`) | client sending `change_id` |
 |------------------------------|----------------------------------|----------------------------|
-| before this change           | as before                        | **400 on every push** (`forbidNonWhitelisted`) |
+| before this change           | as before                        | `400` (`forbidNonWhitelisted`, nothing applied); the client on this branch resends without `change_id` = old behaviour |
 | with this change + migration 018 | works with the same counts, ignores the extra `results`, no replay protection | idempotent, exact acknowledgements |
 
-- Deploy order: **database migration 018 → server → mobile release.**
+- Deploy order: **database migration 018 → server → mobile release.** A
+  client release that sends `change_id` **without** the 400 fallback must
+  not ship before every server it talks to has been updated.
 - Migration 018 (`backend/migrations/018_add_device_change_change_id.sql`)
   adds the nullable `device_changes.change_id` column and the partial unique
   index `idx_device_changes_user_change_id (user_id, change_id) WHERE

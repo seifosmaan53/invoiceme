@@ -315,6 +315,14 @@ describe('Sync ownership enforcement (E2E)', () => {
       ]).expect(200);
       expect(res.body).toEqual({ synced: 0, failed: 1 });
       expect((await invoiceRepository.findOneBy({ id: invoiceA.id })).clientId).toBe(clientA.id);
+
+      // Positive control: re-pointing at another client of the same user works
+      const otherA = await clientRepository.save(clientRepository.create({ userId: userA.id, name: 'Second Attacker Client' }));
+      const own = await push(tokenA, [
+        change(ChangeObjectType.INVOICE, invoiceA.id, ChangeType.UPDATE, { clientId: otherA.id }),
+      ]).expect(200);
+      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect((await invoiceRepository.findOneBy({ id: invoiceA.id })).clientId).toBe(otherA.id);
     });
 
     it('rejects an invoice update that sets userId to another user', async () => {

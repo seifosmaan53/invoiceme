@@ -6,7 +6,17 @@ import { DeviceChange, ChangeType, ChangeObjectType } from '../entities/device-c
 import { Client } from '../entities/client.entity';
 import { Invoice } from '../entities/invoice.entity';
 import { InvoiceItem } from '../entities/invoice-item.entity';
-import { Attachment } from '../entities/attachment.entity';
+import { Attachment, AttachmentOwnerType } from '../entities/attachment.entity';
+
+/** Fields a device may never set: the primary key comes from object_id, the owner from the JWT. */
+const PROTECTED_FIELDS = ['id', 'userId'];
+
+/**
+ * A change that targets, or references, data the authenticated user does not
+ * own. It is not applied and is counted in `failed`, like any other rejected
+ * change, without telling the device whether the foreign record exists.
+ */
+export class SyncOwnershipError extends Error {}
 
 /**
  * Change object format for sync
@@ -75,6 +85,10 @@ export class SyncService {
   /**
    * Push changes from mobile device to server
    * Accepts array of changes in format: {object_type, object_id, change_type, data, device_id, updated_at}
+   *
+   * The owner of every created or modified record is always `userId` (the
+   * authenticated user). Changes that target or reference another user's data
+   * are not applied and are counted in `failed`.
    */
   async pushChanges(userId: string, syncPushDto: SyncPushDto): Promise<{ synced: number; failed: number }> {
     const deviceId = syncPushDto.deviceId;
@@ -97,7 +111,7 @@ export class SyncService {
         await this.deviceChangeRepository.save(change);
 
         // Process the change immediately
-        await this.processChange(change);
+        await this.processChange(change, userId);
         change.synced = true;
         await this.deviceChangeRepository.save(change);
         syncedCount++;
@@ -168,125 +182,191 @@ export class SyncService {
     };
   }
 
-  private async processChange(change: DeviceChange): Promise<void> {
+  private async processChange(change: DeviceChange, userId: string): Promise<void> {
     switch (change.objectType) {
       case ChangeObjectType.CLIENT:
-        await this.processClientChange(change);
+        await this.processClientChange(change, userId);
         break;
       case ChangeObjectType.INVOICE:
-        await this.processInvoiceChange(change);
+        await this.processInvoiceChange(change, userId);
         break;
       case ChangeObjectType.INVOICE_ITEM:
-        await this.processInvoiceItemChange(change);
+        await this.processInvoiceItemChange(change, userId);
         break;
       case ChangeObjectType.ATTACHMENT:
-        await this.processAttachmentChange(change);
+        await this.processAttachmentChange(change, userId);
         break;
     }
   }
 
-  private async processClientChange(change: DeviceChange): Promise<void> {
-    if (change.changeType === ChangeType.CREATE || change.changeType === ChangeType.UPDATE) {
-      const existing = await this.clientRepository.findOne({
-        where: { id: change.objectId },
-      });
+  /**
+   * Keep only real columns of the entity from client-supplied data, minus the
+   * primary key and owner. Relation objects (e.g. `client`, `invoice`) are
+   * dropped too, so foreign keys can only change through their id column,
+   * which the callers validate.
+   */
+  private writableFields<T>(repository: Repository<T>, data: Record<string, any>): Record<string, any> {
+    const columns = new Set(repository.metadata.columns.map((column) => column.propertyName));
+    return Object.fromEntries(
+      Object.entries(data || {}).filter(([key]) => columns.has(key) && !PROTECTED_FIELDS.includes(key)),
+    );
+  }
 
+  /**
+   * A record that is not visible to the user may still exist for another user.
+   * Deleting a record that does not exist anywhere stays a no-op (idempotent
+   * retries); touching someone else's record is rejected.
+   */
+  private async assertNotOwnedByOther<T>(repository: Repository<T>, id: string): Promise<void> {
+    if (await repository.exists({ where: { id } as any })) {
+      throw new SyncOwnershipError(`${repository.metadata.tableName} ${id} does not belong to the user`);
+    }
+  }
+
+  private async assertOwnedClient(clientId: string, userId: string): Promise<void> {
+    if (!clientId || !(await this.clientRepository.exists({ where: { id: clientId, userId } }))) {
+      throw new SyncOwnershipError(`client ${clientId} does not belong to the user`);
+    }
+  }
+
+  private async assertOwnedInvoice(invoiceId: string, userId: string): Promise<void> {
+    if (!invoiceId || !(await this.invoiceRepository.exists({ where: { id: invoiceId, userId } }))) {
+      throw new SyncOwnershipError(`invoice ${invoiceId} does not belong to the user`);
+    }
+  }
+
+  private async assertOwnedAttachmentOwner(ownerType: string, ownerId: string, userId: string): Promise<void> {
+    if (ownerType === AttachmentOwnerType.INVOICE) {
+      await this.assertOwnedInvoice(ownerId, userId);
+    } else if (ownerType === AttachmentOwnerType.CLIENT) {
+      await this.assertOwnedClient(ownerId, userId);
+    } else {
+      throw new SyncOwnershipError(`unsupported attachment owner type ${ownerType}`);
+    }
+  }
+
+  private async processClientChange(change: DeviceChange, userId: string): Promise<void> {
+    const existing = await this.clientRepository.findOne({
+      where: { id: change.objectId, userId },
+    });
+
+    if (change.changeType === ChangeType.DELETE) {
       if (existing) {
-        // Update existing client
-        Object.assign(existing, change.changeJson);
-        existing.updatedAt = new Date();
+        existing.deletedAt = new Date();
         await this.clientRepository.save(existing);
       } else {
-        // Create new client
-        const client = this.clientRepository.create({
-          id: change.objectId,
-          userId: change.userId,
-          ...change.changeJson,
-        });
-        await this.clientRepository.save(client);
+        await this.assertNotOwnedByOther(this.clientRepository, change.objectId);
       }
-    } else if (change.changeType === ChangeType.DELETE) {
-      const client = await this.clientRepository.findOne({
-        where: { id: change.objectId },
-      });
-      if (client) {
-        client.deletedAt = new Date();
-        await this.clientRepository.save(client);
-      }
+      return;
+    }
+
+    const data = this.writableFields(this.clientRepository, change.changeJson);
+    if (existing) {
+      // Update existing client
+      Object.assign(existing, data);
+      existing.updatedAt = new Date();
+      await this.clientRepository.save(existing);
+    } else {
+      // Create new client. insert() (not save()) so an id that already exists
+      // for another user fails instead of being treated as an update.
+      await this.clientRepository.insert({ ...data, id: change.objectId, userId });
     }
   }
 
-  private async processInvoiceChange(change: DeviceChange): Promise<void> {
-    if (change.changeType === ChangeType.CREATE || change.changeType === ChangeType.UPDATE) {
-      const existing = await this.invoiceRepository.findOne({
-        where: { id: change.objectId },
-      });
+  private async processInvoiceChange(change: DeviceChange, userId: string): Promise<void> {
+    const existing = await this.invoiceRepository.findOne({
+      where: { id: change.objectId, userId },
+    });
 
+    if (change.changeType === ChangeType.DELETE) {
       if (existing) {
-        // Update existing invoice
-        Object.assign(existing, change.changeJson);
-        existing.updatedAt = new Date();
+        existing.deletedAt = new Date();
         await this.invoiceRepository.save(existing);
       } else {
-        // Create new invoice
-        const invoice = this.invoiceRepository.create({
-          id: change.objectId,
-          userId: change.userId,
-          ...change.changeJson,
-        });
-        await this.invoiceRepository.save(invoice);
+        await this.assertNotOwnedByOther(this.invoiceRepository, change.objectId);
       }
-    } else if (change.changeType === ChangeType.DELETE) {
-      const invoice = await this.invoiceRepository.findOne({
-        where: { id: change.objectId },
-      });
-      if (invoice) {
-        invoice.deletedAt = new Date();
-        await this.invoiceRepository.save(invoice);
+      return;
+    }
+
+    const data = this.writableFields(this.invoiceRepository, change.changeJson);
+    if (!existing || 'clientId' in data) {
+      await this.assertOwnedClient(data.clientId, userId);
+    }
+
+    if (existing) {
+      // Update existing invoice. Drop the eagerly loaded client so a changed
+      // clientId is not overridden by the old relation on save.
+      Object.assign(existing, data);
+      if ('clientId' in data) {
+        existing.client = undefined;
       }
+      existing.updatedAt = new Date();
+      await this.invoiceRepository.save(existing);
+    } else {
+      // Create new invoice
+      await this.invoiceRepository.insert({ ...data, id: change.objectId, userId });
     }
   }
 
-  private async processInvoiceItemChange(change: DeviceChange): Promise<void> {
-    if (change.changeType === ChangeType.CREATE || change.changeType === ChangeType.UPDATE) {
-      const existing = await this.invoiceItemRepository.findOne({
-        where: { id: change.objectId },
-      });
+  private async processInvoiceItemChange(change: DeviceChange, userId: string): Promise<void> {
+    const existing = await this.invoiceItemRepository
+      .createQueryBuilder('item')
+      .innerJoin('item.invoice', 'invoice')
+      .where('item.id = :id', { id: change.objectId })
+      .andWhere('invoice.userId = :userId', { userId })
+      .getOne();
 
+    if (change.changeType === ChangeType.DELETE) {
       if (existing) {
-        Object.assign(existing, change.changeJson);
-        await this.invoiceItemRepository.save(existing);
+        await this.invoiceItemRepository.delete(existing.id);
       } else {
-        const item = this.invoiceItemRepository.create({
-          id: change.objectId,
-          ...change.changeJson,
-        });
-        await this.invoiceItemRepository.save(item);
+        await this.assertNotOwnedByOther(this.invoiceItemRepository, change.objectId);
       }
-    } else if (change.changeType === ChangeType.DELETE) {
-      await this.invoiceItemRepository.delete(change.objectId);
+      return;
+    }
+
+    const data = this.writableFields(this.invoiceItemRepository, change.changeJson);
+    if (!existing || 'invoiceId' in data) {
+      await this.assertOwnedInvoice(data.invoiceId, userId);
+    }
+
+    if (existing) {
+      Object.assign(existing, data);
+      await this.invoiceItemRepository.save(existing);
+    } else {
+      await this.invoiceItemRepository.insert({ ...data, id: change.objectId });
     }
   }
 
-  private async processAttachmentChange(change: DeviceChange): Promise<void> {
-    if (change.changeType === ChangeType.CREATE || change.changeType === ChangeType.UPDATE) {
-      const existing = await this.attachmentRepository.findOne({
-        where: { id: change.objectId },
-      });
+  private async processAttachmentChange(change: DeviceChange, userId: string): Promise<void> {
+    const existing = await this.attachmentRepository.findOne({
+      where: { id: change.objectId },
+    });
+    if (existing) {
+      await this.assertOwnedAttachmentOwner(existing.ownerType, existing.ownerId, userId);
+    }
 
+    if (change.changeType === ChangeType.DELETE) {
       if (existing) {
-        Object.assign(existing, change.changeJson);
-        await this.attachmentRepository.save(existing);
-      } else {
-        const attachment = this.attachmentRepository.create({
-          id: change.objectId,
-          ...change.changeJson,
-        });
-        await this.attachmentRepository.save(attachment);
+        await this.attachmentRepository.delete(existing.id);
       }
-    } else if (change.changeType === ChangeType.DELETE) {
-      await this.attachmentRepository.delete(change.objectId);
+      return;
+    }
+
+    const data = this.writableFields(this.attachmentRepository, change.changeJson);
+    if (!existing || 'ownerType' in data || 'ownerId' in data) {
+      await this.assertOwnedAttachmentOwner(
+        data.ownerType ?? existing?.ownerType,
+        data.ownerId ?? existing?.ownerId,
+        userId,
+      );
+    }
+
+    if (existing) {
+      Object.assign(existing, data);
+      await this.attachmentRepository.save(existing);
+    } else {
+      await this.attachmentRepository.insert({ ...data, id: change.objectId });
     }
   }
 }
-

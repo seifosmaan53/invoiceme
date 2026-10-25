@@ -313,18 +313,38 @@ inaccurate and has not been edited.
 2. Review commits 2 and 3 together. **Do not ship commit 3 (DTO
    validation) without commit 2.** Commit 3 makes push reachable under the
    production pipe.
-3. Run the audit queries (section 6.1) read-only against production.
-   Investigate any hits before deploying, and keep the results.
+3. Run `npm run integrity:report` (or `integrity:report:prod` inside the
+   image) read-only against production with a read-only database role,
+   as described in `2026-10-25-historical-cross-owner.md`. Investigate any
+   findings before deploying, and keep the output privately.
 4. Deploy the backend. No migration and no schema change. The response
    shape is unchanged, so no mobile release is needed.
 5. Smoke-test after deploy, with two test accounts: a push that creates a
    client returns `{synced:1, failed:0}`, and the same push from user A
    against B's client id returns `{synced:0, failed:1}` and leaves B's
    record unchanged.
-6. **Recovery / rollback:** redeploy the previous image. There's no data
-   migration to undo. Rolling back to the previous image restores the old
-   push-400 behaviour in a `main.ts` deployment, which is safe but not
-   functional. **Do not roll back to a build containing commit 3 without
-   commit 2.** If abuse is found, restore the affected rows from backups,
-   using the `device_changes` rows (actor, `change_json`, `created_at`) as
-   the audit trail.
+6. **Recovery: fix forward, do not roll back to a pre-fix image.** Every
+   image built before merge commit `6dd9ad2` is vulnerable: it lacks the
+   REST ownership checks (template takeover, cross-owner duplicate and
+   convert) and the fail-closed reads that stop legacy cross-owner rows
+   from disclosing another user's data, and its PDF generation had no
+   usable browser. It is therefore not a secure fallback. If the new
+   image misbehaves after deployment:
+   - **Contain first.** Keep the service on the fixed image and restrict
+     only the affected functionality: return 503 for the failing route
+     (for example sync push or PDF generation) at the ingress or reverse
+     proxy, or put the whole API in maintenance mode if the fault is
+     broad. Never re-enable a route by switching back to a pre-fix build.
+   - **Fix forward.** Correct the defect on `main`, let CI (unit, E2E,
+     migrations, build, Docker build, container PDF smoke test) pass, and
+     deploy the new image.
+   - **Fall back only to a verified secure image:** an earlier image built
+     from `6dd9ad2` or later that has passed the same CI and smoke test.
+     Record which image that is before deploying.
+   - **Never ship the DTO-validation change without the ownership
+     checks.** `main` contains both as one squash commit; do not
+     cherry-pick parts of it.
+   There is no data migration to undo. If abuse is found, do not repair
+   records automatically: preserve `device_changes` and `audit_logs` as
+   evidence, take a backup, and follow the operator-reviewed remediation
+   plan in `2026-10-25-historical-cross-owner.md`.

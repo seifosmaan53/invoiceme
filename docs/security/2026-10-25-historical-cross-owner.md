@@ -72,6 +72,11 @@ differs from the requesting user.
   - Rejected pushes are logged too (`synced = false`) and are deliberately
     ignored. Otherwise an attacker could hide a victim's records by pushing
     changes that fail. A test covers this.
+  - Sync **deletes** by another user are also ignored (review finding F1,
+    fix `d097b97`). Sync accepts a delete for an id that does not exist yet,
+    so counting deletes would let a user hide another user's later record
+    that happens to reuse that id. A delete never plants a record, so
+    ignoring it cannot hide a real cross-owner write. A test covers this.
   - Limits: records created over REST have no `device_changes` row. So if
     the old push moved a victim's REST-created item into the attacker's
     invoice, the database shows no trace, except an `update` that set

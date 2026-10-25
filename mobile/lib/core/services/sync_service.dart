@@ -2,6 +2,7 @@
 import 'dart:convert';
 
 // Package imports
+import 'package:dio/dio.dart' show DioException;
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
@@ -21,8 +22,11 @@ enum ChangeType { create, update, delete }
 
 enum ChangeObjectType { client, invoice, invoice_item, attachment }
 
-/// Change object format: {object_type, object_id, change_type, data, device_id, updated_at}
+/// Change object format: {change_id?, object_type, object_id, change_type, data, device_id, updated_at}
 class ChangeObject {
+  /// Idempotency key: the local pending_changes row id. Servers before the
+  /// sync contract change reject it (400); see SyncService._pushChanges.
+  final String? changeId;
   final ChangeObjectType objectType;
   final String objectId;
   final ChangeType changeType;
@@ -31,6 +35,7 @@ class ChangeObject {
   final String updatedAt;
 
   ChangeObject({
+    this.changeId,
     required this.objectType,
     required this.objectId,
     required this.changeType,
@@ -41,6 +46,7 @@ class ChangeObject {
 
   Map<String, dynamic> toJson() {
     return {
+      if (changeId != null) 'change_id': changeId,
       'object_type': objectType.name,
       'object_id': objectId,
       'change_type': changeType.name,
@@ -49,6 +55,33 @@ class ChangeObject {
       'updated_at': updatedAt,
     };
   }
+}
+
+/// Ids of the pending changes the server acknowledged in a push [result].
+///
+/// Uses the per-change `results` (status `applied` or `duplicate`) when the
+/// server sends them. Older servers return only counts; then the first
+/// `synced` changes are taken, which is wrong when a change in the middle
+/// failed, but is all such a server allows.
+List<String> acknowledgedChangeIds(List<Map<String, Object?>> pendingChanges, Map<String, dynamic> result) {
+  final results = result['results'];
+  if (results is List) {
+    final ids = <String>[];
+    for (final entry in results) {
+      if (entry is! Map) continue;
+      final index = entry['index'];
+      final status = entry['status'];
+      if (index is int &&
+          index >= 0 &&
+          index < pendingChanges.length &&
+          (status == 'applied' || status == 'duplicate')) {
+        ids.add(pendingChanges[index]['id'] as String);
+      }
+    }
+    return ids;
+  }
+  final synced = result['synced'] as int? ?? 0;
+  return pendingChanges.take(synced).map((c) => c['id'] as String).toList();
 }
 
 class SyncService {
@@ -87,8 +120,9 @@ class SyncService {
     if (pendingChanges.isEmpty) return;
 
     // Convert to ChangeObject format
-    final changes = pendingChanges.map((change) {
+    List<Map<String, dynamic>> toChanges({required bool withChangeId}) => pendingChanges.map((change) {
       return ChangeObject(
+        changeId: withChangeId ? change['id'] as String : null,
         objectType: ChangeObjectType.values.firstWhere(
           (e) => e.name == change['object_type'] as String,
         ),
@@ -102,21 +136,34 @@ class SyncService {
       ).toJson();
     }).toList();
 
-    try {
+    Future<Map<String, dynamic>> push({required bool withChangeId}) async {
       final response = await _apiClient.post('/sync/push', data: {
         'deviceId': _deviceId,
-        'changes': changes,
+        'changes': toChanges(withChangeId: withChangeId),
       });
+      return response.data as Map<String, dynamic>;
+    }
 
-      final result = response.data as Map<String, dynamic>;
+    try {
+      Map<String, dynamic> result;
+      try {
+        result = await push(withChangeId: true);
+      } on DioException catch (e) {
+        // A server older than the sync contract change rejects change_id
+        // with 400 and applied nothing; resend in the old format.
+        if (e.response?.statusCode != 400) rethrow;
+        debugPrint('Sync push: server rejected change_id, resending without it');
+        result = await push(withChangeId: false);
+      }
+
       final synced = result['synced'] as int? ?? 0;
       final failed = result['failed'] as int? ?? 0;
 
       debugPrint('Sync push: $synced synced, $failed failed');
 
-      // Mark successfully synced changes
-      if (synced > 0) {
-        final syncedIds = pendingChanges.take(synced).map((c) => c['id'] as String).toList();
+      // Mark acknowledged changes; failed ones stay pending and are resent.
+      final syncedIds = acknowledgedChangeIds(pendingChanges, result);
+      if (syncedIds.isNotEmpty) {
         for (final id in syncedIds) {
           await db.update(
             'pending_changes',

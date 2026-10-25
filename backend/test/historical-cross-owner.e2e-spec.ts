@@ -493,7 +493,7 @@ describe('Historical cross-owner rows (E2E)', () => {
         { object_type: 'invoice_item', object_id: itemId, change_type: 'delete', data: {} },
         { object_type: 'attachment', object_id: attachmentId, change_type: 'delete', data: {} },
       ]);
-      expect(del.body).toEqual({ synced: 2, failed: 0 });
+      expect(del.body).toMatchObject({ synced: 2, failed: 0 });
 
       // B later creates its own records with those ids
       const create = await push(tokenB, [
@@ -510,7 +510,7 @@ describe('Historical cross-owner rows (E2E)', () => {
           data: { ownerType: 'invoice', ownerId: invoiceB.id, url: 'https://files.example.test/b-later.pdf', filename: 'b-later.pdf' },
         },
       ]);
-      expect(create.body).toEqual({ synced: 2, failed: 0 });
+      expect(create.body).toMatchObject({ synced: 2, failed: 0 });
 
       const res = await api().get(`/api/v1/invoices/${invoiceB.id}`).set('Authorization', `Bearer ${tokenB}`).expect(200);
       expect(res.body.items.map((i: InvoiceItem) => i.id)).toContain(itemId);

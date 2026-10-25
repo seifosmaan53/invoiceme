@@ -289,6 +289,9 @@ Security-adjacent:
    longer embeds a client the user does not own (fixed in review), but the
    REST invoice endpoints, PDF generation and GDPR export still load
    `invoice.client` and would show it. Clean up those rows.
+   **Update:** handled in `2026-10-25-historical-cross-owner.md`. Every read
+   path now fails closed, and `npm run integrity:report` replaces the
+   queries above with a read-only report. No rows were cleaned up.
 4. The attachment `url` is free text from the device, the same as before.
    No URL validation was added.
 

@@ -353,6 +353,12 @@ Create a new invoice or estimate.
 
 Get a specific invoice.
 
+`client` is `null` when the invoice's `clientId` refers to a client of another
+user (possible only in rows written before ownership checks existed; see
+`docs/security/2026-10-25-historical-cross-owner.md`). The list behaves the
+same way, and `POST /invoices/:id/pdf` and `/send` return 400 for such an
+invoice until it is re-pointed to one of the user's own clients.
+
 **Response (200 OK):**
 ```json
 {

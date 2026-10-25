@@ -26,7 +26,9 @@
     "setup:email:quick": "bash scripts/setup-email-quick.sh",
     "migration:generate": "typeorm-ts-node-commonjs migration:generate",
     "migration:run": "typeorm-ts-node-commonjs migration:run",
-    "migration:revert": "typeorm-ts-node-commonjs migration:revert"
+    "migration:revert": "typeorm-ts-node-commonjs migration:revert",
+    "integrity:report": "ts-node --transpile-only src/integrity/integrity-report.ts",
+    "integrity:report:prod": "node dist/integrity/integrity-report.js"
   },
   "dependencies": {
     "@nestjs/cache-manager": "^3.0.1",

@@ -221,7 +221,7 @@ CORS_ORIGIN=https://app.yourdomain.com,https://mobile.yourdomain.com
 
 6. **Trust proxy for correct IP detection**
    ```bash
-   TRUST_PROXY=true  # When behind load balancer
+   TRUST_PROXY=10.0.0.0/24  # the load balancer's address/subnet; 'true' = same-machine proxy only
    ```
 
 ## Security Checklist

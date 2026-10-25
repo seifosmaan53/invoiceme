@@ -44,14 +44,18 @@ spec:
             memory: "1Gi"
             cpu: "1000m"
         livenessProbe:
-          httpGet:
-            path: /api/health
-            port: 3000
+          # httpGet counts any 2xx/3xx as success, so an HTTPS redirect would
+          # pass; the script requires HTTP 200 and the expected body.
+          exec:
+            command: ["node", "healthcheck.js"]
+          timeoutSeconds: 5
           initialDelaySeconds: 40
           periodSeconds: 30
         readinessProbe:
-          httpGet:
-            path: /api/health
-            port: 3000
+          # httpGet counts any 2xx/3xx as success, so an HTTPS redirect would
+          # pass; the script requires HTTP 200 and the expected body.
+          exec:
+            command: ["node", "healthcheck.js"]
+          timeoutSeconds: 5
           initialDelaySeconds: 10
           periodSeconds: 10

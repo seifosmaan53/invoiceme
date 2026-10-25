@@ -287,7 +287,7 @@ See `scripts/backup-database.sh` for backup script.
 - [ ] Production database credentials
 - [ ] S3/CDN configuration
 - [ ] Email SMTP configuration
-- [ ] `TRUST_PROXY=true` if behind load balancer
+- [ ] `TRUST_PROXY` set to the load balancer's address/subnet (or `true` for a proxy on the same machine); the proxy must overwrite `X-Forwarded-Proto`/`X-Forwarded-For`
 
 ### Security Settings
 
@@ -313,7 +313,7 @@ ENABLE_SWAGGER=false
 ### Health Check
 
 ```bash
-curl https://api.yourdomain.com/api/health
+curl https://api.yourdomain.com/api/v1/health
 ```
 
 ### Verify Services
@@ -386,7 +386,7 @@ Automated backups via `scripts/backup-database.sh` and `scripts/setup-cron-backu
 
 Manifests in `/k8s` split by resource:
 
-- `k8s/deployment.yaml` — Deployment (3 replicas, liveness/readiness probes on `/api/health`)
+- `k8s/deployment.yaml` — Deployment (3 replicas, liveness/readiness probes on `/api/v1/health`)
 - `k8s/service.yaml` — LoadBalancer Service exposing port 80 → container port 3000
 - `k8s/hpa.yaml` — HorizontalPodAutoscaler (2–10 replicas, scales on CPU/memory utilization)
 

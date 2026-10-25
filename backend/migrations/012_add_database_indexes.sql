@@ -24,7 +24,11 @@ CREATE INDEX IF NOT EXISTS idx_invoice_items_invoice_id ON invoice_items(invoice
 
 -- Composite indexes for common queries
 CREATE INDEX IF NOT EXISTS idx_invoices_user_status ON invoices(user_id, status) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_invoices_user_due_date ON invoices(user_id, due_date) WHERE deleted_at IS NULL AND status = 'unpaid';
+-- 'unpaid' is not an invoice_status value (003 defines draft, sent, paid,
+-- overdue, cancelled), so the original predicate failed on every fresh
+-- database and stopped the migration chain here. Unpaid issued invoices are
+-- the sent and overdue ones.
+CREATE INDEX IF NOT EXISTS idx_invoices_user_due_date ON invoices(user_id, due_date) WHERE deleted_at IS NULL AND status IN ('sent', 'overdue');
 
 -- Comments
 COMMENT ON INDEX idx_invoices_user_status IS 'Optimizes queries filtering by user and status';

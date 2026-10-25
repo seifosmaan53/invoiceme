@@ -346,6 +346,13 @@ Before deploying to production:
 
 ### ✅ Information Disclosure
 - **Protection:** Generic error messages in production
+- **Record existence:** per-record routes for clients, invoices, invoice
+  templates and API keys look the record up scoped to the caller, so another
+  user's id gets the same `404` and body (`"X not found"`,
+  `NOT_FOUND_ERROR`) as an id that does not exist
+  (`backend/test/non-disclosure.e2e-spec.ts`). `403` remains for callers
+  who may know the resource exists but lack a permission (e.g. an API key
+  without the required scope). Response timing is not equalised.
 - **Status:** Protected
 
 ### ✅ Unauthorized File Access

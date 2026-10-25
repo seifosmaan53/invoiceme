@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
 import { Invoice, InvoiceType, InvoiceStatus } from '../entities/invoice.entity';
@@ -184,8 +184,10 @@ export class InvoicesService {
   }
 
   private async findOwned(id: string, userId: string): Promise<Invoice> {
+    // Scoped to the owner: another user's invoice is answered exactly like a
+    // missing one, so the response does not reveal that the id exists.
     const invoice = await this.invoiceRepository.findOne({
-      where: { id, deletedAt: null },
+      where: { id, userId, deletedAt: null },
       relations: ['client', 'items'],
     });
 
@@ -193,17 +195,12 @@ export class InvoicesService {
       throw new NotFoundException('Invoice not found');
     }
 
-    // Role check: only owner can view invoices
-    if (invoice.userId !== userId) {
-      throw new ForbiddenException('Access denied');
-    }
-
     // Automatically calculate and update status based on payments
     await this.calculateInvoiceStatus(invoice);
 
     // Reload invoice to get updated status
     return this.invoiceRepository.findOne({
-      where: { id, deletedAt: null },
+      where: { id, userId, deletedAt: null },
       relations: ['client', 'items'],
     }) as Promise<Invoice>;
   }

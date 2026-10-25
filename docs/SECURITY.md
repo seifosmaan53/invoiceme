@@ -51,7 +51,11 @@ InvoiceMe implements comprehensive security measures to protect against common a
 ✅ **General API Rate Limiting**
 - Configurable via `RATE_LIMIT_TTL` and `RATE_LIMIT_MAX`
 - Default: 100 requests per 60 seconds
-- Per-IP address tracking
+- Per-IP address tracking: the key is the client address from the
+  trusted-proxy policy (below), the same value as `req.ip`; a client cannot
+  pick a new key by sending its own `X-Forwarded-For`
+- Counters are in memory, per process (not shared between instances); every
+  IPv6 address is its own key
 - Standard rate limit headers
 
 ✅ **Authentication Rate Limiting**
@@ -224,6 +228,75 @@ CORS_ORIGIN=https://app.yourdomain.com,https://mobile.yourdomain.com
    TRUST_PROXY=10.0.0.0/24  # the load balancer's address/subnet; 'true' = same-machine proxy only
    ```
 
+7. **Redirect target for plain HTTP**
+   ```bash
+   PUBLIC_ORIGIN=https://invoices.example.com   # or TRUSTED_HOSTS=..., or neither (403, no redirect)
+   ```
+
+### Trusted-proxy policy and HTTPS enforcement
+
+One function (`forwardedHops` in `backend/src/core/https-enforcement.ts`)
+decides both the client address and the scheme; `req.ip`, `req.protocol`
+and `req.secure` are overridden to return its result, and HTTPS enforcement,
+rate-limit keys, access logs, audit records and error logs all use it.
+
+- **Trust.** `TRUST_PROXY` is compiled by Express into a trust function.
+  unset/`false`: nothing is trusted and every `X-Forwarded-*` header is
+  ignored. `true`: the loopback range (127.0.0.0/8, ::1). Otherwise the named
+  addresses/subnets. Hop counts are refused.
+- **Client address.** The chain is the socket peer followed by the
+  `X-Forwarded-For` values from right to left. Hops are skipped while they
+  are trusted proxies; the first untrusted hop is the client (the same result
+  as Express/proxy-addr). A client can prepend any values it likes; they are
+  never reached, because the proxy that appended the client's real address is
+  the last trusted hop.
+- **Scheme.** A TLS socket is `https`. Otherwise `X-Forwarded-Proto` is
+  read only when the socket peer is trusted, and then at the position of the
+  outermost trusted proxy counted from the right (each proxy appends the
+  scheme it received), clamped to the values present, so a proxy that
+  overwrites the header (one value) is read correctly. Values further left
+  came from untrusted parties and are never read. Only exactly
+  `http`/`https` (case-insensitive) is accepted; anything else is `http`.
+  Before this change Express's own `req.secure`/`req.protocol` took the
+  FIRST value while enforcement took the last, so for
+  `X-Forwarded-Proto: https, http` they disagreed.
+- **Requirements on the proxy.** It must overwrite or append to both
+  headers, never pass a client's value through unchanged as its own.
+  `X-Forwarded-Host` and RFC 7239 `Forwarded` are not used.
+- **Enforcement (`NODE_ENV=production`).** Plain-HTTP requests get
+  `403 {"error":"HTTPS required",...}`. A plain-HTTP GET is redirected (301)
+  only to a validated destination: `PUBLIC_ORIGIN` if set, else
+  `https://<Host>` when the Host header is listed in `TRUSTED_HOSTS`. With
+  neither, there is no redirect. A Location is never built from an
+  unvalidated Host header, and absolute-form request targets are never
+  echoed. `PUBLIC_ORIGIN`/`TRUSTED_HOSTS` are validated at startup whenever
+  they are set (a malformed value stops the backend); leaving them unset is
+  valid.
+- **Health probe.** `GET /api/v1/health` over plain HTTP is served only to a
+  loopback peer that sends no `X-Forwarded-For`, `X-Forwarded-Proto` or
+  `Forwarded` header (`backend/healthcheck.js` inside the container or on the
+  same machine). The probe still requires a real 200 with `status: "ok"` and
+  `database: "connected"`; redirects count as failure.
+- **Development.** With `NODE_ENV` other than `production` nothing is
+  enforced or redirected, so plain HTTP on localhost/LAN works as before.
+
+**Limitation: loopback trust on a shared machine.** `TRUST_PROXY=true`
+trusts every process that connects from the same machine, not only the
+proxy. A local user (or any local program, e.g. a compromised service) who
+connects to the backend port directly can claim any client address, which
+defeats IP-based rate limits and corrupts logs and audit records, and can
+claim HTTPS. `API_HOST=127.0.0.1` does not help against local users. On a
+machine shared with untrusted users, or running untrusted software, put the
+proxy on a dedicated address and name only that address
+(`TRUST_PROXY=10.0.0.5`), with the backend port reachable only from it.
+This is not tested here and remains the operator's responsibility.
+
+**Compatibility.** Installations that relied on the old redirect of plain
+HTTP GETs (to `https://<whatever Host was sent>`) now get 403 instead,
+unless `PUBLIC_ORIGIN` or `TRUSTED_HOSTS` is set. API clients that already
+use HTTPS, requests through a TLS proxy marked `https`, and the local health
+check are unaffected. Nothing new is required for the backend to start.
+
 ## Security Checklist
 
 Before deploying to production:
@@ -240,6 +313,7 @@ Before deploying to production:
 - [ ] Error messages don't leak information
 - [ ] S3 files are private (not public)
 - [ ] HTTPS enabled (via reverse proxy)
+- [ ] `TRUST_PROXY` names only the proxy; `PUBLIC_ORIGIN` (or `TRUSTED_HOSTS`) set if plain-HTTP GETs should be redirected
 - [ ] Security headers enabled (Helmet)
 - [ ] Input validation on all endpoints
 - [ ] Authentication required for protected routes
@@ -272,6 +346,13 @@ Before deploying to production:
 
 ### ✅ Information Disclosure
 - **Protection:** Generic error messages in production
+- **Record existence:** per-record routes for clients, invoices, invoice
+  templates and API keys look the record up scoped to the caller, so another
+  user's id gets the same `404` and body (`"X not found"`,
+  `NOT_FOUND_ERROR`) as an id that does not exist
+  (`backend/test/non-disclosure.e2e-spec.ts`). `403` remains for callers
+  who may know the resource exists but lack a permission (e.g. an API key
+  without the required scope). Response timing is not equalised.
 - **Status:** Protected
 
 ### ✅ Unauthorized File Access

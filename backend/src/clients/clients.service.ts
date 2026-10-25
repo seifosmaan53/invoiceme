@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Client } from '../entities/client.entity';
@@ -91,17 +91,14 @@ export class ClientsService {
   }
 
   async findOne(id: string, userId: string): Promise<Client> {
+    // Scoped to the owner: another user's client is answered exactly like a
+    // missing one, so the response does not reveal that the id exists.
     const client = await this.clientRepository.findOne({
-      where: { id, deletedAt: null },
+      where: { id, userId, deletedAt: null },
     });
 
     if (!client) {
       throw new NotFoundException('Client not found');
-    }
-
-    // Role check: only owner can view
-    if (client.userId !== userId) {
-      throw new ForbiddenException('Access denied');
     }
 
     return client;

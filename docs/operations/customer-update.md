@@ -49,7 +49,7 @@ tell you where to look for the rest.
 | 5 | Installed version | `VERSION.txt` (update bundles), `git log -1` (checkouts), the image tag (Docker), otherwise file dates. `package.json` says `1.0.0` in every version and identifies nothing |
 | 6 | Node.js | `node --version` (the release needs Node 20) |
 | 7 | Database | PostgreSQL version (`psql --version`, or `SELECT version();`), whether it runs on the same machine, and the database name from `.env` (`DB_DATABASE`). Do not copy the password |
-| 8 | Configuration | Where `.env` lives; whether it sets `NODE_ENV`, `TRUST_PROXY`, `API_PORT`, `API_HOST`, `DB_SYNCHRONIZE`, `ENCRYPTION_KEY`, `S3_BUCKET` (yes/no and non-secret values only) |
+| 8 | Configuration | Where `.env` lives; whether it sets `NODE_ENV`, `TRUST_PROXY`, `PUBLIC_ORIGIN`, `TRUSTED_HOSTS`, `API_PORT`, `API_HOST`, `DB_SYNCHRONIZE`, `ENCRYPTION_KEY`, `S3_BUCKET` (yes/no and non-secret values only) |
 | 9 | How clients reach it | Plain HTTP on the LAN, HTTPS directly, or through a TLS proxy (which product, on which machine, and whether the backend's port is also reachable directly from the LAN). With `NODE_ENV=production` the backend refuses plain HTTP except for a local health check |
 | 10 | Existing backups | Tool or scheduled task, schedule, destination, newest backup's name/date/size. Do not move or rotate anything |
 | 11 | Uploaded files | Only if `S3_BUCKET`/an S3 or MinIO endpoint is configured; attachments are stored there, not on disk |
@@ -188,7 +188,22 @@ timings, and an encrypted backup medium separate from the existing backups.
         `proxy_set_header X-Forwarded-Proto $scheme;`,
         `proxy_set_header X-Forwarded-For $remote_addr;`). Earlier releases
         accepted `X-Forwarded-Proto` from any client, which let anyone bypass
-        HTTPS enforcement;
+        HTTPS enforcement. `TRUST_PROXY=true` trusts every program on that
+        machine, so if staff or other software on it are not trusted, give
+        the proxy its own address and name that instead (docs/SECURITY.md);
+      - redirect of plain HTTP (behaviour change in this release): with
+        `NODE_ENV=production`, a plain-HTTP GET used to be redirected to
+        `https://<Host header>`; it is now redirected only to `PUBLIC_ORIGIN`
+        (e.g. `PUBLIC_ORIGIN=https://invoices.<customer domain>`; https,
+        no path) or to a Host listed in `TRUSTED_HOSTS`, and otherwise
+        refused with 403 "HTTPS required". Nothing new is required to start.
+        Find out in section 1 (row 9) whether any browser bookmark, shortcut
+        or device opens the backend over `http://` and relies on that
+        redirect; if so, set `PUBLIC_ORIGIN` to the address they should end
+        up at, or point them at `https://` directly. A malformed
+        `PUBLIC_ORIGIN` or `TRUSTED_HOSTS` stops the backend at startup, so
+        check it before starting. The local health check (`healthcheck.js`)
+        is unaffected;
    4. install dependencies with Node 20: `PUPPETEER_SKIP_DOWNLOAD=true npm ci --omit=dev`
       (PowerShell: `$env:PUPPETEER_SKIP_DOWNLOAD='true'; npm ci --omit=dev`).
       Needs the npm registry, or a prepared offline cache.

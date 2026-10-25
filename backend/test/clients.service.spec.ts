@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { NotFoundException, ForbiddenException } from '@nestjs/common';
+import { NotFoundException } from '@nestjs/common';
 import { ClientsService } from '../src/clients/clients.service';
 import { Client } from '../src/entities/client.entity';
 import { CreateClientDto, UpdateClientDto } from '../src/clients/dto/client.dto';
@@ -209,7 +209,7 @@ describe('ClientsService', () => {
       const result = await service.findOne(id, userId);
 
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({
-        where: { id, deletedAt: null },
+        where: { id, userId, deletedAt: null },
       });
       expect(result).toEqual(client);
     });
@@ -228,7 +228,7 @@ describe('ClientsService', () => {
       );
     });
 
-    it('should throw ForbiddenException when userId does not match', async () => {
+    it('should throw NotFoundException (not 403) when userId does not match', async () => {
       const id = 'client-id';
       const userId = 'user-id';
       const differentUserId = 'different-user-id';
@@ -239,13 +239,14 @@ describe('ClientsService', () => {
         deletedAt: null,
       };
 
-      mockClientRepository.findOne.mockResolvedValue(client);
+      // the repository filters by owner, like the database query does
+      mockClientRepository.findOne.mockImplementation(async ({ where }) => (where.userId === client.userId ? client : null));
 
       await expect(service.findOne(id, userId)).rejects.toThrow(
-        ForbiddenException,
+        NotFoundException,
       );
       await expect(service.findOne(id, userId)).rejects.toThrow(
-        'Access denied',
+        'Client not found',
       );
     });
 
@@ -262,7 +263,7 @@ describe('ClientsService', () => {
       }
 
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({
-        where: { id, deletedAt: null },
+        where: { id, userId, deletedAt: null },
       });
     });
   });
@@ -383,7 +384,7 @@ describe('ClientsService', () => {
       const result = await service.update(id, updateClientDto, userId);
 
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({
-        where: { id, deletedAt: null },
+        where: { id, userId, deletedAt: null },
       });
       expect(mockClientRepository.save).toHaveBeenCalledWith(updatedClient);
       expect(result).toEqual(updatedClient);
@@ -404,7 +405,7 @@ describe('ClientsService', () => {
       expect(mockClientRepository.save).not.toHaveBeenCalled();
     });
 
-    it('should throw ForbiddenException when userId does not match', async () => {
+    it('should throw NotFoundException (not 403) when userId does not match', async () => {
       const id = 'client-id';
       const userId = 'user-id';
       const differentUserId = 'different-user-id';
@@ -419,10 +420,11 @@ describe('ClientsService', () => {
         deletedAt: null,
       };
 
-      mockClientRepository.findOne.mockResolvedValue(client);
+      // the repository filters by owner, like the database query does
+      mockClientRepository.findOne.mockImplementation(async ({ where }) => (where.userId === client.userId ? client : null));
 
       await expect(service.update(id, updateClientDto, userId)).rejects.toThrow(
-        ForbiddenException,
+        NotFoundException,
       );
       expect(mockClientRepository.save).not.toHaveBeenCalled();
     });
@@ -509,7 +511,7 @@ describe('ClientsService', () => {
       await service.archive(id, userId);
 
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({
-        where: { id, deletedAt: null },
+        where: { id, userId, deletedAt: null },
       });
       expect(mockClientRepository.save).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -531,7 +533,7 @@ describe('ClientsService', () => {
       expect(mockClientRepository.save).not.toHaveBeenCalled();
     });
 
-    it('should throw ForbiddenException when userId does not match', async () => {
+    it('should throw NotFoundException (not 403) when userId does not match', async () => {
       const id = 'client-id';
       const userId = 'user-id';
       const differentUserId = 'different-user-id';
@@ -542,10 +544,11 @@ describe('ClientsService', () => {
         deletedAt: null,
       };
 
-      mockClientRepository.findOne.mockResolvedValue(client);
+      // the repository filters by owner, like the database query does
+      mockClientRepository.findOne.mockImplementation(async ({ where }) => (where.userId === client.userId ? client : null));
 
       await expect(service.archive(id, userId)).rejects.toThrow(
-        ForbiddenException,
+        NotFoundException,
       );
       expect(mockClientRepository.save).not.toHaveBeenCalled();
     });

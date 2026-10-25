@@ -137,12 +137,13 @@ jobs:
         run: |
           sudo systemctl start postgresql.service
           sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres'"
+          sudo -u postgres psql -c 'CREATE DATABASE invoiceme_test'
           # Ubuntu's default for the local socket is peer authentication (OS
           # user must be postgres); use the password instead, like over TCP.
+          # (Done last: after the reload, socket connections need the password.)
           hba=$(sudo -u postgres psql -Atc 'show hba_file')
           sudo sed -i '1i local all postgres scram-sha-256' "$hba"
           sudo -u postgres psql -c 'select pg_reload_conf()'
-          sudo -u postgres psql -c 'CREATE DATABASE invoiceme_test'
           ls -la /var/run/postgresql/
           PGPASSWORD=postgres psql -h /var/run/postgresql -U postgres -d invoiceme_test -Atc 'select 1'
 

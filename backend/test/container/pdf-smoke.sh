@@ -67,7 +67,14 @@ for name in service cache; do
   if command -v qpdf >/dev/null; then
     qpdf --check "$pdf" > /dev/null || fail "qpdf --check failed for $name.pdf"
   fi
-  pdftotext "$pdf" - | grep -qF "$INVOICE_NUMBER" || fail "$name.pdf does not contain $INVOICE_NUMBER"
+  if ! pdftotext "$pdf" - | grep -qF "$INVOICE_NUMBER"; then
+    echo "--- text of $name.pdf (first 60 lines) ---" >&2
+    pdftotext "$pdf" - | head -60 >&2
+    pdffonts "$pdf" >&2 || true
+    echo "--- container stderr (last 40 lines) ---" >&2
+    tail -40 "$WORK/stderr.log" >&2
+    fail "$name.pdf does not contain $INVOICE_NUMBER"
+  fi
   echo "OK $name.pdf: $size bytes, $pages page(s), producer: $(awk -F': *' '/^Producer:/ {print $2}' "$WORK/$name.info"), contains $INVOICE_NUMBER"
 done
 

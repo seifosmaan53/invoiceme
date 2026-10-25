@@ -7,8 +7,12 @@
  * - Two directories (e.g. an uploads bucket mirror, a configuration folder):
  *   every file's relative path, size and SHA-256 must match. Prints paths only.
  * - Two .env files (both named .env or *.env, or VERIFY_FILES_MODE=env): the
- *   set of keys must match and every value must be identical. Values are
- *   compared by hash and NEVER printed; only key names appear in the output.
+ *   files are first compared whole (SHA-256). If they differ, the entries are
+ *   compared: multi-line quoted values (e.g. PEM keys) are one value; values
+ *   are hashed immediately and NEVER printed. Only conventional key names
+ *   (UPPER_SNAKE_CASE) are printed; any other difference is counted, not named,
+ *   so a fragment of key material can never appear in the output.
+ * - Symbolic links inside a directory are reported and count as not verified.
  *
  * Read-only. Exit code: 0 = identical, 1 = differences, 2 = could not run.
  */
@@ -18,17 +22,20 @@ import { createHash } from 'crypto';
 
 export interface FileDifference {
   path: string;
-  issue: 'missing_in_restore' | 'extra_in_restore' | 'content_differs';
+  issue: 'missing_in_restore' | 'extra_in_restore' | 'content_differs' | 'symlink_not_verified';
 }
 
 const sha256 = (data: Buffer | string) => createHash('sha256').update(data).digest('hex');
+
+export const SYMLINK = 'symlink';
 
 export function manifest(root: string): Map<string, string> {
   const out = new Map<string, string>();
   const walk = (dir: string) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) walk(full);
+      if (entry.isSymbolicLink()) out.set(path.relative(root, full).split(path.sep).join('/'), SYMLINK);
+      else if (entry.isDirectory()) walk(full);
       else if (entry.isFile()) {
         const data = fs.readFileSync(full);
         out.set(path.relative(root, full).split(path.sep).join('/'), `${data.length}:${sha256(data)}`);
@@ -42,33 +49,69 @@ export function manifest(root: string): Map<string, string> {
 export function compareManifests(a: Map<string, string>, b: Map<string, string>): FileDifference[] {
   const diffs: FileDifference[] = [];
   for (const [p, h] of a) {
-    if (!b.has(p)) diffs.push({ path: p, issue: 'missing_in_restore' });
+    if (h === SYMLINK || b.get(p) === SYMLINK) diffs.push({ path: p, issue: 'symlink_not_verified' });
+    else if (!b.has(p)) diffs.push({ path: p, issue: 'missing_in_restore' });
     else if (b.get(p) !== h) diffs.push({ path: p, issue: 'content_differs' });
   }
-  for (const p of b.keys()) if (!a.has(p)) diffs.push({ path: p, issue: 'extra_in_restore' });
+  for (const [p, h] of b) {
+    if (a.has(p)) continue;
+    diffs.push({ path: p, issue: h === SYMLINK ? 'symlink_not_verified' : 'extra_in_restore' });
+  }
   return diffs.sort((x, y) => x.path.localeCompare(y.path));
 }
 
-/** Parses KEY=VALUE lines (comments and blank lines ignored, optional quotes stripped). Values are hashed immediately. */
-export function envDigest(text: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-    const m = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
-    if (!m) continue;
-    let value = m[2];
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1);
-    }
-    out.set(m[1], sha256(value));
-  }
-  return out;
+const KEY_LINE = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s?(.*)$/;
+/** Key names that are safe to print: conventional environment variable names. */
+export const PRINTABLE_KEY = /^[A-Z][A-Z0-9_]*$/;
+
+export interface EnvDigest {
+  /** key -> SHA-256 of the value (values are never kept). */
+  entries: Map<string, string>;
+  /** SHA-256 of lines that are neither comments nor KEY=VALUE entries. */
+  other: string;
 }
 
-export function compareEnv(a: Map<string, string>, b: Map<string, string>): FileDifference[] {
-  // For env files the "path" is the key name; values never leave this function.
-  return compareManifests(a, b);
+/**
+ * Parses a .env file the way dotenv does for the cases that matter here:
+ * KEY=VALUE lines, comments, optional `export`, and quoted values that may span
+ * several lines (PEM keys). Values are hashed as soon as they are read.
+ */
+export function envDigest(text: string): EnvDigest {
+  const lines = text.split(/\r?\n/);
+  const entries = new Map<string, string>();
+  const other: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith('#')) continue;
+    const m = KEY_LINE.exec(line);
+    if (!m) {
+      other.push(line);
+      continue;
+    }
+    let value = m[2];
+    const q = value[0];
+    if (q === '"' || q === "'" || q === '`') {
+      const closes = (v: string) => v.length > 1 && v.endsWith(q) && !v.endsWith(`\\${q}`);
+      while (!closes(value) && i + 1 < lines.length) value += '\n' + lines[++i];
+      if (closes(value)) value = value.slice(1, -1);
+    }
+    entries.set(m[1], sha256(value));
+  }
+  return { entries, other: sha256(other.join('\n')) };
+}
+
+export interface EnvComparison {
+  /** Differences whose key name is safe to print. */
+  named: FileDifference[];
+  /** Differences in entries with unusual names, or in unparsed lines: counted, never named. */
+  unnamed: number;
+}
+
+export function compareEnv(a: EnvDigest, b: EnvDigest): EnvComparison {
+  const all = compareManifests(a.entries, b.entries);
+  const named = all.filter((d) => PRINTABLE_KEY.test(d.path));
+  const unnamed = all.length - named.length + (a.other === b.other ? 0 : 1);
+  return { named, unnamed };
 }
 
 const isEnvFile = (p: string) => /(^|[\\/])\.env$|\.env$/.test(p) || process.env.VERIFY_FILES_MODE === 'env';
@@ -89,9 +132,24 @@ function main(argv: string[]): number {
       diffs = compareManifests(ma, manifest(restored));
       label = `${ma.size} file(s)`;
     } else if (a.isFile() && b.isFile() && isEnvFile(original) && isEnvFile(restored)) {
-      const ea = envDigest(fs.readFileSync(original, 'utf8'));
-      diffs = compareEnv(ea, envDigest(fs.readFileSync(restored, 'utf8')));
-      label = `${ea.size} key(s); values compared by hash, not printed`;
+      const ta = fs.readFileSync(original, 'utf8');
+      const tb = fs.readFileSync(restored, 'utf8');
+      const ea = envDigest(ta);
+      label = `${ea.entries.size} key(s); values compared by hash, never printed`;
+      if (sha256(ta) === sha256(tb)) {
+        diffs = [];
+      } else {
+        const c = compareEnv(ea, envDigest(tb));
+        diffs = c.named;
+        if (c.unnamed > 0) {
+          console.log(`[DIFFERS] ${c.unnamed} other difference(s) (unusual key names or unparsed lines; not printed)`);
+          diffs = [...diffs, ...Array.from({ length: c.unnamed }, () => ({ path: '', issue: 'content_differs' as const }))];
+        }
+        if (diffs.length === 0) {
+          console.log('[DIFFERS] the files differ only in formatting or comments');
+          diffs = [{ path: '', issue: 'content_differs' }];
+        }
+      }
     } else if (a.isFile() && b.isFile()) {
       diffs = sha256(fs.readFileSync(original)) === sha256(fs.readFileSync(restored))
         ? []
@@ -101,7 +159,7 @@ function main(argv: string[]): number {
       console.error('Both arguments must be directories, or both files.');
       return 2;
     }
-    for (const d of diffs) console.log(`[${d.issue.toUpperCase()}] ${d.path}`);
+    for (const d of diffs) if (d.path) console.log(`[${d.issue.toUpperCase()}] ${d.path}`);
     console.log(diffs.length === 0 ? `OK: identical (${label}).` : `FAILED: ${diffs.length} difference(s) (${label}).`);
     return diffs.length === 0 ? 0 : 1;
   } catch (error) {

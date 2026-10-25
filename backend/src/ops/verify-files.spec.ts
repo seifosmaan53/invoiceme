@@ -12,6 +12,8 @@ describe('verify-files', () => {
     fs.writeFileSync(p, data);
     return p;
   };
+  const run = (x: string, y: string) =>
+    spawnSync(process.execPath, ['-r', 'ts-node/register/transpile-only', path.join(__dirname, 'verify-files.ts'), x, y], { encoding: 'utf8' });
 
   beforeEach(() => {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-files-'));
@@ -36,29 +38,52 @@ describe('verify-files', () => {
     ]);
   });
 
-  it('env files: compares key sets and values without exposing values', () => {
-    const a = envDigest('# config\nDB_PASSWORD=s3cret\nJWT_SECRET="abc"\nexport ENCRYPTION_KEY=k1\n');
-    expect([...a.keys()].sort()).toEqual(['DB_PASSWORD', 'ENCRYPTION_KEY', 'JWT_SECRET']);
-    expect([...a.values()].join()).not.toMatch(/s3cret|abc|k1/);
-    expect(compareEnv(a, envDigest('DB_PASSWORD=s3cret\nJWT_SECRET=abc\nENCRYPTION_KEY=k1'))).toEqual([]);
-    expect(compareEnv(a, envDigest('DB_PASSWORD=s3cret\nJWT_SECRET=changed\n'))).toEqual([
-      { path: 'ENCRYPTION_KEY', issue: 'missing_in_restore' },
-      { path: 'JWT_SECRET', issue: 'content_differs' },
+  it('directories: a symbolic link is reported as not verified instead of being skipped', () => {
+    write('orig/a.txt', 'A');
+    write('copy/a.txt', 'A');
+    fs.symlinkSync(path.join(tmp, 'orig/a.txt'), path.join(tmp, 'orig/link.txt'));
+    fs.symlinkSync(path.join(tmp, 'copy/a.txt'), path.join(tmp, 'copy/link.txt'));
+    expect(compareManifests(manifest(path.join(tmp, 'orig')), manifest(path.join(tmp, 'copy')))).toEqual([
+      { path: 'link.txt', issue: 'symlink_not_verified' },
     ]);
   });
 
-  it('CLI never prints env values and exits 1 on differences, 0 when identical', () => {
-    const orig = write('a/.env', 'JWT_SECRET=very-secret-value\nENCRYPTION_KEY=another-secret\n');
-    const same = write('b/.env', 'JWT_SECRET=very-secret-value\nENCRYPTION_KEY=another-secret\n');
-    const diff = write('c/.env', 'JWT_SECRET=other\n');
-    const run = (x: string, y: string) =>
-      spawnSync(process.execPath, ['-r', 'ts-node/register/transpile-only', path.join(__dirname, 'verify-files.ts'), x, y], { encoding: 'utf8' });
-    const ok = run(orig, same);
-    expect(ok.status).toBe(0);
-    const bad = run(orig, diff);
+  it('env files: compares key sets and values without keeping values', () => {
+    const a = envDigest('# config\nDB_PASSWORD=s3cret\nJWT_SECRET="abc"\nexport ENCRYPTION_KEY=k1\n');
+    expect([...a.entries.keys()].sort()).toEqual(['DB_PASSWORD', 'ENCRYPTION_KEY', 'JWT_SECRET']);
+    expect([...a.entries.values()].join()).not.toMatch(/s3cret|abc|k1/);
+    expect(compareEnv(a, envDigest('DB_PASSWORD=s3cret\nJWT_SECRET=abc\nENCRYPTION_KEY=k1'))).toEqual({ named: [], unnamed: 0 });
+    expect(compareEnv(a, envDigest('DB_PASSWORD=s3cret\nJWT_SECRET=changed\n'))).toEqual({
+      named: [
+        { path: 'ENCRYPTION_KEY', issue: 'missing_in_restore' },
+        { path: 'JWT_SECRET', issue: 'content_differs' },
+      ],
+      unnamed: 0,
+    });
+  });
+
+  it('env files: a multi-line quoted value (PEM key) is one value, so a changed key body is detected', () => {
+    const pem = (body: string) => `JWT_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n${body}\n-----END PRIVATE KEY-----"\nPORT=3000\n`;
+    const a = envDigest(pem('MIIEvQIBADANBgkqhkiG9w0BAQEFAASC'));
+    const b = envDigest(pem('MIIEvQIBADANBgkqhkiG9w0BAQEFAASD'));
+    expect([...a.entries.keys()].sort()).toEqual(['JWT_PRIVATE_KEY', 'PORT']);
+    expect(compareEnv(a, b).named).toEqual([{ path: 'JWT_PRIVATE_KEY', issue: 'content_differs' }]);
+    const r = run(write('a/.env', pem('MIIEvQIBADANBgkqhkiG9w0BAQEFAASC')), write('b/.env', pem('MIIEvQIBADANBgkqhkiG9w0BAQEFAASD')));
+    expect(r.status).toBe(1);
+    expect(r.stdout + r.stderr).not.toMatch(/MIIEvQ/);
+  });
+
+  it('CLI never prints values or key material, even a fragment shaped like KEY=VALUE', () => {
+    // An unquoted multi-line key: its last line looks like an assignment.
+    const orig = write('a/.env', 'JWT_SECRET=very-secret-value\nSIGNING_KEY=-----BEGIN-----\nSecretTail0KeyMaterial==\n');
+    const changed = write('c/.env', 'JWT_SECRET=other\nSIGNING_KEY=-----BEGIN-----\nDifferentTailMaterial==\n');
+    const same = write('b/.env', 'JWT_SECRET=very-secret-value\nSIGNING_KEY=-----BEGIN-----\nSecretTail0KeyMaterial==\n');
+    expect(run(orig, same).status).toBe(0);
+    const bad = run(orig, changed);
     expect(bad.status).toBe(1);
     const out = bad.stdout + bad.stderr;
     expect(out).toMatch(/JWT_SECRET/);
-    expect(out).not.toMatch(/very-secret-value|another-secret|other\b/);
+    expect(out).toMatch(/other difference\(s\)/);
+    expect(out).not.toMatch(/very-secret-value|other\b(?! difference)|SecretTail|DifferentTail|Material/);
   });
 });

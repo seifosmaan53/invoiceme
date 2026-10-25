@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BadRequestException } from '@nestjs/common';
 import { WebhooksController } from '../src/payments/webhooks.controller';
-import { PaymentsService } from '../src/payments/payments.service';
+import { PaymentsService, PaymentEventResult } from '../src/payments/payments.service';
 import { StripeService } from '../src/core/services/stripe.service';
 import { PaymentStatus } from '../src/entities/payment.entity';
 
@@ -513,6 +513,32 @@ describe('WebhooksController', () => {
   });
 
   describe('error handling', () => {
+    it('should not report a processing error as a signature failure (5xx lets Stripe redeliver)', async () => {
+      stripeService.verifyWebhookSignature.mockReturnValue({
+        type: 'payment_intent.succeeded',
+        data: { object: { id: 'pi_1', metadata: {} } },
+      } as any);
+      paymentsService.updatePaymentStatus.mockRejectedValue(new Error('connection terminated'));
+      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
+
+      const call = controller.handleStripeWebhook({ rawBody: Buffer.from('{}') } as any, 'sig');
+      await expect(call).rejects.toThrow('connection terminated');
+      await expect(call).rejects.not.toBeInstanceOf(BadRequestException);
+      consoleLogSpy.mockRestore();
+    });
+
+    it('should acknowledge an event the service did not apply', async () => {
+      stripeService.verifyWebhookSignature.mockReturnValue({
+        type: 'payment_intent.succeeded',
+        data: { object: { id: 'pi_unknown', metadata: {} } },
+      } as any);
+      paymentsService.updatePaymentStatus.mockResolvedValue(PaymentEventResult.UNKNOWN_PAYMENT);
+      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
+
+      await expect(controller.handleStripeWebhook({ rawBody: Buffer.from('{}') } as any, 'sig')).resolves.toEqual({ received: true });
+      consoleLogSpy.mockRestore();
+    });
+
     it('should catch errors from verifyWebhookSignature and throw BadRequestException with error message', async () => {
       const rawBody = Buffer.from('test body');
       const signature = 'stripe-signature-header';

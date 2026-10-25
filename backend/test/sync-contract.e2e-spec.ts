@@ -228,6 +228,22 @@ describe('Sync push contract (E2E)', () => {
       expect((await clientRepository.findOneByOrFail({ id: clientId })).name).toBe('Changed');
     });
 
+    it('reusing a change_id for the same object and type with different data fails and applies nothing', async () => {
+      const changeId = uuidv4();
+      const clientId = uuidv4();
+      await push(tokenA, [change(ChangeObjectType.CLIENT, clientId, ChangeType.CREATE, { name: 'Acme' }, uuidv4())]);
+      const first = await push(tokenA, [change(ChangeObjectType.CLIENT, clientId, ChangeType.UPDATE, { name: 'First' }, changeId)]);
+      expect(first.body.results[0].status).toBe('applied');
+
+      const reuse = await push(tokenA, [change(ChangeObjectType.CLIENT, clientId, ChangeType.UPDATE, { name: 'Second' }, changeId)]);
+      expect(reuse.body.results[0].status).toBe('failed');
+      expect((await clientRepository.findOneByOrFail({ id: clientId })).name).toBe('First');
+
+      // Positive control: the identical change is a duplicate, not a failure
+      const replay = await push(tokenA, [change(ChangeObjectType.CLIENT, clientId, ChangeType.UPDATE, { name: 'First' }, changeId)]);
+      expect(replay.body.results[0].status).toBe('duplicate');
+    });
+
     it('change_ids are scoped per user: another user’s identical change_id is a separate change', async () => {
       const changeId = uuidv4();
       const clientA = uuidv4();

@@ -69,7 +69,7 @@ describe('WebhooksController', () => {
       const result = await controller.handleStripeWebhook(mockRequest as any, signature);
 
       expect(stripeService.verifyWebhookSignature).toHaveBeenCalledWith(
-        rawBody.toString(),
+        rawBody,
         signature,
       );
       expect(result).toEqual({ received: true });
@@ -94,6 +94,24 @@ describe('WebhooksController', () => {
 
       await expect(controller.handleStripeWebhook(mockRequest as any, signature)).rejects.toThrow(BadRequestException);
       await expect(controller.handleStripeWebhook(mockRequest as any, signature)).rejects.toThrow('Missing request body');
+    });
+
+    it('should verify the bytes express.raw() left in req.body when req.rawBody is unset (main.ts order)', async () => {
+      const body = Buffer.from('{"id":"evt_1"}');
+      stripeService.verifyWebhookSignature.mockReturnValue({ type: 'charge.succeeded', data: { object: {} } } as any);
+      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
+
+      await controller.handleStripeWebhook({ rawBody: undefined, body } as any, 'sig');
+
+      expect(stripeService.verifyWebhookSignature).toHaveBeenCalledWith(body, 'sig');
+      consoleLogSpy.mockRestore();
+    });
+
+    it('should never verify a parsed (re-serializable) JSON body', async () => {
+      const mockRequest = { rawBody: undefined, body: { id: 'evt_1' } };
+
+      await expect(controller.handleStripeWebhook(mockRequest as any, 'sig')).rejects.toThrow('Missing request body');
+      expect(stripeService.verifyWebhookSignature).not.toHaveBeenCalled();
     });
 
     it('should throw BadRequestException when signature verification fails', async () => {
@@ -561,7 +579,7 @@ describe('WebhooksController', () => {
   });
 
   describe('Assertions', () => {
-    it('should verify stripeService.verifyWebhookSignature called with rawBody.toString() and signature', async () => {
+    it('should verify stripeService.verifyWebhookSignature called with the raw body bytes and signature', async () => {
       const rawBody = Buffer.from('test body');
       const signature = 'stripe-signature-header';
       const mockEvent = {
@@ -588,7 +606,7 @@ describe('WebhooksController', () => {
       await controller.handleStripeWebhook(mockRequest as any, signature);
 
       expect(stripeService.verifyWebhookSignature).toHaveBeenCalledWith(
-        rawBody.toString(),
+        rawBody,
         signature,
       );
 

@@ -30,17 +30,17 @@ export class WebhooksController {
       throw new BadRequestException('Missing stripe-signature header');
     }
 
-    const rawBody = req.rawBody;
-    if (!rawBody) {
+    // NestFactory's rawBody option fills req.rawBody, but main.ts mounts
+    // express.raw() on this route first, which leaves req.rawBody unset and
+    // the untouched bytes in req.body. Never use a re-serialized JSON body.
+    const rawBody = req.rawBody ?? ((req as any).body instanceof Buffer ? ((req as any).body as Buffer) : undefined);
+    if (!rawBody || rawBody.length === 0) {
       throw new BadRequestException('Missing request body');
     }
 
     try {
       // Verify webhook signature
-      const event = this.stripeService.verifyWebhookSignature(
-        rawBody.toString(),
-        signature,
-      );
+      const event = this.stripeService.verifyWebhookSignature(rawBody, signature);
 
       // Handle payment intent events
       if (event.type === 'payment_intent.succeeded') {

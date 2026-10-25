@@ -5,7 +5,7 @@
  * These unit tests focus on service interaction and error propagation.
  */
 import { Test, TestingModule } from '@nestjs/testing';
-import { NotFoundException, ForbiddenException } from '@nestjs/common';
+import { NotFoundException } from '@nestjs/common';
 import { ClientsController } from '../src/clients/clients.controller';
 import { ClientsService } from '../src/clients/clients.service';
 import { CreateClientDto, UpdateClientDto } from '../src/clients/dto/client.dto';
@@ -292,12 +292,12 @@ describe('ClientsController', () => {
       expect(clientsService.findOne).toHaveBeenCalledWith(id, mockUser.userId);
     });
 
-    it('should propagate ForbiddenException when client belongs to different user', async () => {
+    it('should propagate NotFoundException when client belongs to different user', async () => {
       const id = 'client-id';
 
-      clientsService.findOne.mockRejectedValue(new ForbiddenException('Access denied'));
+      clientsService.findOne.mockRejectedValue(new NotFoundException('Client not found'));
 
-      await expect(controller.findOne(id, mockUser)).rejects.toThrow(ForbiddenException);
+      await expect(controller.findOne(id, mockUser)).rejects.toThrow(NotFoundException);
       expect(clientsService.findOne).toHaveBeenCalledWith(id, mockUser.userId);
     });
   });
@@ -480,15 +480,15 @@ describe('ClientsController', () => {
       expect(clientsService.update).toHaveBeenCalledWith(id, updateClientDto, mockUser.userId);
     });
 
-    it('should propagate ForbiddenException for ownership violation', async () => {
+    it('should propagate NotFoundException for ownership violation', async () => {
       const id = 'client-id';
       const updateClientDto: UpdateClientDto = {
         name: 'Updated Client',
       };
 
-      clientsService.update.mockRejectedValue(new ForbiddenException('Access denied'));
+      clientsService.update.mockRejectedValue(new NotFoundException('Client not found'));
 
-      await expect(controller.update(id, updateClientDto, mockUser)).rejects.toThrow(ForbiddenException);
+      await expect(controller.update(id, updateClientDto, mockUser)).rejects.toThrow(NotFoundException);
       expect(clientsService.update).toHaveBeenCalledWith(id, updateClientDto, mockUser.userId);
     });
   });
@@ -525,12 +525,12 @@ describe('ClientsController', () => {
       expect(clientsService.archive).toHaveBeenCalledWith(id, mockUser.userId);
     });
 
-    it('should propagate ForbiddenException for ownership violation', async () => {
+    it('should propagate NotFoundException for ownership violation', async () => {
       const id = 'client-id';
 
-      clientsService.archive.mockRejectedValue(new ForbiddenException('Access denied'));
+      clientsService.archive.mockRejectedValue(new NotFoundException('Client not found'));
 
-      await expect(controller.archive(id, mockUser)).rejects.toThrow(ForbiddenException);
+      await expect(controller.archive(id, mockUser)).rejects.toThrow(NotFoundException);
       expect(clientsService.archive).toHaveBeenCalledWith(id, mockUser.userId);
     });
   });

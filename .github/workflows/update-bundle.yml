@@ -145,8 +145,12 @@ jobs:
           get=$(curl -s -o /dev/null -w '%{http_code}' "$base/invoices")
           post=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$base/auth/login")
           spoof=$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-Forwarded-Proto: https' -H 'Content-Type: application/json' -d '{}' "$base/auth/login")
-          echo "GET $get, POST $post, POST with spoofed X-Forwarded-Proto $spoof"
-          [ "$get" = 301 ] && [ "$post" = 403 ] && [ "$spoof" = 403 ]
+          # Without PUBLIC_ORIGIN/TRUSTED_HOSTS a plain-HTTP GET is refused, never
+          # redirected to a destination taken from the Host header.
+          evil=$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' -H 'Host: evil.example' "$base/invoices")
+          loc=$(curl -s -D - -o /dev/null "$base/invoices" | grep -ci '^location:' || true)
+          echo "GET $get, POST $post, POST with spoofed X-Forwarded-Proto $spoof, GET with Host evil.example: '$evil', Location headers: $loc"
+          [ "$get" = 403 ] && [ "$post" = 403 ] && [ "$spoof" = 403 ] && [ "$evil" = "403 " ] && [ "$loc" = 0 ]
 
       - name: Integrity report (read-only)
         working-directory: ${{ env.BUNDLE }}

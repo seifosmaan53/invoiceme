@@ -135,10 +135,10 @@ the response. The server logs the reason.
   `updatedAt > since` (all of them if `since` is omitted). It also returns the
   invoice items of those invoices, and the attachments of those invoices and
   clients.
-- Invoices include their `client` relation. Since push and REST both require
-  the client to be the user's, this embeds only the user's own clients.
-  Cross-owner rows created **before** this fix would still be embedded (see
-  the audit query in `docs/security/2026-10-25-sync-ownership.md`).
+- Invoices include their `client` relation, but only when that client is
+  the user's. Push and REST both require it; for cross-owner rows created
+  **before** the fix, `client` is `null` (see the audit query in
+  `docs/security/2026-10-25-sync-ownership.md`).
 - `lastSyncTimestamp` is the server time **after** the queries ran.
 
 ## Client behaviour (Flutter)

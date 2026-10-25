@@ -16,7 +16,8 @@ const PROTECTED_FIELDS = ['id', 'userId'];
 /**
  * A change that targets, or references, data the authenticated user does not
  * own. It is not applied and is counted in `failed`, like any other rejected
- * change, without telling the device whether the foreign record exists.
+ * change. (A failure on an id that would otherwise be a fresh create or a
+ * no-op delete still shows the id exists; ids are random UUIDs.)
  */
 export class SyncOwnershipError extends Error {}
 

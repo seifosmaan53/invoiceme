@@ -75,9 +75,8 @@ Consequences:
 
 Commits on top of `main` (`cc9912e`):
 
-1. `chore: session push probe`: empty commit from step 0.
-2. `test(sync): add cross-account ownership regression tests`: tests only.
-3. `fix(sync): enforce per-user ownership on pushed changes`
+1. `test(sync): add cross-account ownership regression tests`: tests only.
+2. `fix(sync): enforce per-user ownership on pushed changes`
    - All lookups are scoped to the authenticated user: `{ id, userId }` for
      clients and invoices, a join through `invoice.userId` for items, and an
      owner check (invoice or client of the user) for attachments.
@@ -97,20 +96,29 @@ Commits on top of `main` (`cc9912e`):
    - Unit spec mocks were updated (`insert`, `exists`, `metadata`). I added
      two unit tests: the owner is never taken from `data`, and a foreign
      delete counts as failed.
-4. `fix(sync): add validation decorators to sync push DTOs`: a separate,
+3. `fix(sync): add validation decorators to sync push DTOs`: a separate,
    clearly established defect (push returned 400 under the production pipe).
    It declares exactly the fields the mobile client already sends. `data`
    stays a free-form object.
-5. `docs: ...`: this report, `docs/SYNC-CONTRACT.md`, and a corrected sync
+4. `docs: ...`: this report, `docs/SYNC-CONTRACT.md`, and a corrected sync
    section in `docs/API.md`.
+
+Added in review:
+
+5. `test(sync): cover reused ids and relation objects in ownership tests`:
+   closes two gaps found by mutation testing (invoice create via `save()`,
+   and relation objects such as `data.client` bypassing the column filter).
+6. `fix(sync): never embed another user's client in pull`: pull nulls an
+   embedded `invoice.client` that is not the user's, so pre-existing
+   cross-owner rows no longer leak the client record.
 
 ### How rejections are reported
 
 The existing response is `{ synced, failed }` with no per-change detail.
 Unauthorized changes are **not applied** and are **counted in `failed`**,
 the same as any other change that cannot be applied. The response doesn't
-say why, so it doesn't reveal whether a foreign id exists. The reason is
-logged server-side. Deleting an id that does not exist anywhere remains a
+say why; the reason is logged server-side. It does still reveal whether a
+foreign id exists (see section 6, item 2). Deleting an id that does not exist anywhere remains a
 no-op success, as before, so retries stay idempotent. Deleting another
 user's id fails. The response shape is unchanged.
 
@@ -274,13 +282,13 @@ Security-adjacent:
 
    If the production pipe has always been in place, these should return
    nothing, because push could not succeed there.
-2. **Id existence oracle (minor):** a create that reuses a foreign id fails,
-   while one with a fresh id succeeds. Ids are random UUIDs, so this isn't
+2. **Id existence oracle (minor):** a create or delete that uses a foreign
+   id fails, while one with a fresh id succeeds (delete is a no-op success). Ids are random UUIDs, so this isn't
    practical to exploit. Documented, not changed.
-3. **Pull still embeds `invoice.client` without an owner check.** That's
-   safe once no cross-owner links exist (push and REST both prevent new
-   ones), but any pre-existing link (query 1) would still leak. Clean up
-   those rows, or add a defensive filter.
+3. **Pre-existing cross-owner invoice→client links (query 1).** Pull no
+   longer embeds a client the user does not own (fixed in review), but the
+   REST invoice endpoints, PDF generation and GDPR export still load
+   `invoice.client` and would show it. Clean up those rows.
 4. The attachment `url` is free text from the device, the same as before.
    No URL validation was added.
 
@@ -295,13 +303,12 @@ inaccurate and has not been edited.
 
 ## 7. Proposed merge / deploy steps and recovery
 
-1. Apply the branch from `docs/security/sync-ownership.mbox` onto `main`
-   with `git am docs/security/sync-ownership.mbox`. It stops at the empty
-   probe commit: run `git am --allow-empty`, or `git am --skip` to drop that
-   commit. Then push and open a **draft** PR. CI must be green (unit,
+1. Apply the branch from the reviewed mbox
+   (`drafts/review/sync-ownership-reviewed.mbox`) onto `main` with
+   `git am`. Then push and open a **draft** PR. CI must be green (unit,
    migrations, E2E, build, Docker build).
-2. Review commits 3 and 4 together. **Do not ship commit 4 (DTO
-   validation) without commit 3.** Commit 4 makes push reachable under the
+2. Review commits 2 and 3 together. **Do not ship commit 3 (DTO
+   validation) without commit 2.** Commit 3 makes push reachable under the
    production pipe.
 3. Run the audit queries (section 6.1) read-only against production.
    Investigate any hits before deploying, and keep the results.
@@ -314,7 +321,7 @@ inaccurate and has not been edited.
 6. **Recovery / rollback:** redeploy the previous image. There's no data
    migration to undo. Rolling back to the previous image restores the old
    push-400 behaviour in a `main.ts` deployment, which is safe but not
-   functional. **Do not roll back to a build containing commit 4 without
-   commit 3.** If abuse is found, restore the affected rows from backups,
+   functional. **Do not roll back to a build containing commit 3 without
+   commit 2.** If abuse is found, restore the affected rows from backups,
    using the `device_changes` rows (actor, `change_json`, `created_at`) as
    the audit trail.

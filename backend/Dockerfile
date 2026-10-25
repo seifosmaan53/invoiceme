@@ -56,6 +56,9 @@ COPY --from=builder --chown=nodejs:nodejs /app/dist ./dist
 # Copy package.json for metadata
 COPY --chown=nodejs:nodejs package.json ./
 
+# Strict health check: HTTP 200 + status ok + database connected; redirects fail
+COPY --chown=nodejs:nodejs healthcheck.js ./
+
 # Set environment variables
 # Both PdfService and PdfCacheService launch the browser at this path.
 ENV NODE_ENV=production \
@@ -70,7 +73,7 @@ EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-  CMD curl -fsS -H 'X-Forwarded-Proto: https' http://localhost:3000/api/v1/health || exit 1
+  CMD ["node", "healthcheck.js"]
 
 # Labels for metadata
 LABEL version="1.0.0" \

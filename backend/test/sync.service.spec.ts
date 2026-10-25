@@ -14,16 +14,27 @@ describe('SyncService', () => {
   let mockInvoiceRepository: any;
   let mockInvoiceItemRepository: any;
   let mockAttachmentRepository: any;
+  let mockTransactionManager: any;
 
   // SyncService only applies fields that are real entity columns
   const metadata = (...columns: string[]) => ({ columns: columns.map((propertyName) => ({ propertyName })) });
 
   beforeEach(async () => {
+    // Each pushed change runs in a transaction whose manager hands out the
+    // same repository mocks.
+    mockTransactionManager = {
+      query: jest.fn().mockResolvedValue([]),
+      update: jest.fn(),
+      getRepository: jest.fn(),
+    };
     mockDeviceChangeRepository = {
       create: jest.fn(),
       save: jest.fn(),
       // device_changes lookup for records another user changed (none here)
-      manager: { query: jest.fn().mockResolvedValue([]) },
+      manager: {
+        query: jest.fn().mockResolvedValue([]),
+        transaction: jest.fn((work: (manager: any) => Promise<any>) => work(mockTransactionManager)),
+      },
     };
 
     mockClientRepository = {
@@ -86,6 +97,15 @@ describe('SyncService', () => {
     }).compile();
 
     service = module.get<SyncService>(SyncService);
+
+    const repositories = new Map<any, any>([
+      [DeviceChange, mockDeviceChangeRepository],
+      [Client, mockClientRepository],
+      [Invoice, mockInvoiceRepository],
+      [InvoiceItem, mockInvoiceItemRepository],
+      [Attachment, mockAttachmentRepository],
+    ]);
+    mockTransactionManager.getRepository.mockImplementation((entity: any) => repositories.get(entity));
   });
 
   describe('pushChanges', () => {
@@ -128,7 +148,8 @@ describe('SyncService', () => {
       expect(result.synced).toBe(1);
       expect(result.failed).toBe(0);
       expect(mockDeviceChangeRepository.create).toHaveBeenCalled();
-      expect(mockDeviceChangeRepository.save).toHaveBeenCalledTimes(2); // Create and update synced status
+      expect(mockDeviceChangeRepository.save).toHaveBeenCalledTimes(1);
+      expect(mockTransactionManager.update).toHaveBeenCalledWith(DeviceChange, 'change-id', { synced: true });
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({ where: { id: 'client-id', userId: 'user-id' } });
       expect(mockClientRepository.insert).toHaveBeenCalledWith({
         name: 'Test Client',
@@ -161,7 +182,7 @@ describe('SyncService', () => {
 
       const result = await service.pushChanges('user-id', { deviceId: 'device-id', changes });
 
-      expect(result).toEqual({ synced: 1, failed: 0 });
+      expect(result).toMatchObject({ synced: 1, failed: 0 });
       expect(mockClientRepository.insert).toHaveBeenCalledWith({ name: 'Test Client', id: 'client-id', userId: 'user-id' });
     });
 
@@ -190,7 +211,7 @@ describe('SyncService', () => {
 
       const result = await service.pushChanges('user-id', { deviceId: 'device-id', changes });
 
-      expect(result).toEqual({ synced: 0, failed: 1 });
+      expect(result).toMatchObject({ synced: 0, failed: 1 });
       expect(mockClientRepository.save).not.toHaveBeenCalled();
     });
 

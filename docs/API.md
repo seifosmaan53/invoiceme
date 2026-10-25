@@ -495,6 +495,7 @@ retries, deletes, conflicts): [SYNC-CONTRACT.md](SYNC-CONTRACT.md).
   "deviceId": "device-uuid-here",
   "changes": [
     {
+      "change_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
       "object_type": "invoice",
       "object_id": "123e4567-e89b-12d3-a456-426614174000",
       "change_type": "update",
@@ -508,16 +509,33 @@ retries, deletes, conflicts): [SYNC-CONTRACT.md](SYNC-CONTRACT.md).
 }
 ```
 
+`change_id` is optional (UUID, unique per change on the device). A change_id
+is applied at most once per user; resending it returns `"duplicate"`. Without
+it there is no replay protection.
+
 **Response (200 OK):**
 ```json
 {
   "synced": 1,
-  "failed": 0
+  "failed": 0,
+  "results": [
+    {
+      "index": 0,
+      "change_id": "0f8fad5b-d9cb-469f-a165-70867728950e",
+      "object_type": "invoice",
+      "object_id": "123e4567-e89b-12d3-a456-426614174000",
+      "status": "applied"
+    }
+  ]
 }
 ```
 
+`status` is `applied`, `duplicate` (already applied earlier, nothing written)
+or `failed` (not applied; resend to retry). `synced` = applied + duplicate.
+Acknowledge changes by `results[].index` or `change_id`, not by count.
 Changes that target or reference another user's data are not applied and are
-counted in `failed`.
+reported `failed`. Device timestamps (`updated_at`) are ignored: changes are
+applied in arrival order, with no conflict detection.
 
 #### GET /sync/pull
 

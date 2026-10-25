@@ -39,7 +39,7 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 │                                                                 │
 │  Auth ──► JWT / TOTP / Refresh Tokens                          │
 │  Invoices ──► PDF (Puppeteer) ──► MinIO / S3                   │
-│  Sync ──► Device-change log ──► Conflict resolution            │
+│  Sync ──► Device-change log ──► Applied in arrival order       │
 │  Stripe ──► Webhooks ──► Invoice status automation             │
 │  Rate limiting (in-memory, per-IP) ──► PostgreSQL              │
 └──────────────────┬──────────────────────┬───────────────────────┘
@@ -73,7 +73,7 @@ Built after getting tired of paying $30/month for basic invoicing software that 
 |---|---|
 | flutter_riverpod 3 | Provider-scoped state without requiring `BuildContext`. Cleaner than BLoC for this data flow. |
 | dio 5 | Interceptors for JWT refresh, timeout handling, and error normalization in one place. |
-| sqflite 2 | Local SQLite cache for offline support. Sync service writes mutations to `device_changes` table on reconnect. |
+| sqflite 2 | Local SQLite cache for offline support. Mutations are queued in a local `pending_changes` table and pushed on reconnect. |
 | flutter_stripe 11 | Stripe payment sheet integration for in-app payment collection. |
 | fl_chart 1 | Revenue trend and invoice status charts on the dashboard. |
 | sentry_flutter 9 | Client-side error tracking to pair with the backend Sentry integration. |
@@ -198,7 +198,7 @@ kubectl apply -f k8s/
 
 **Offline sync is more about conflict resolution than data transfer**
 
-The naive approach to offline sync is: store locally, upload on reconnect, done. The real problem is what happens when the same invoice is edited on two devices while offline. We solved this with a `device_changes` table that acts as an operation log — each mutation is recorded with a timestamp and device ID. On sync, the server applies changes ordered by timestamp (last-write-wins). The key insight was that you can't derive sync state by diffing the main tables; you need the operation log to know *what changed*, not just *what exists*.
+The naive approach to offline sync is: store locally, upload on reconnect, done. The real problem is what happens when the same invoice is edited on two devices while offline. The device queues each mutation in a local operation log and the server records every pushed change in a `device_changes` table. The server applies changes **in the order they arrive** and does not detect conflicts: it is *not* last-write-wins by timestamp (device timestamps are ignored), so an older offline edit that arrives later overwrites a newer one. What sync does and does not guarantee is written down in [docs/SYNC-CONTRACT.md](docs/SYNC-CONTRACT.md); conflict handling is an open design question ([docs/proposals/sync-conflicts.md](docs/proposals/sync-conflicts.md)). The key insight was that you can't derive sync state by diffing the main tables; you need the operation log to know *what changed*, not just *what exists*.
 
 **Puppeteer in Docker fails silently without `--no-sandbox`**
 

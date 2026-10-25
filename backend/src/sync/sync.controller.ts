@@ -26,8 +26,9 @@ export class SyncController {
           deviceId: 'mobile-device-abc123',
           changes: [
             {
+              change_id: '0f8fad5b-d9cb-469f-a165-70867728950e',
               object_type: 'client',
-              object_id: 'temp-id-123',
+              object_id: '123e4567-e89b-12d3-a456-426614174000',
               change_type: 'create',
               data: { name: 'Acme Corp', email: 'contact@acme.com' },
               device_id: 'mobile-device-abc123',
@@ -41,14 +42,27 @@ export class SyncController {
   @ApiResponse({ 
     status: 200, 
     description: 'Changes pushed successfully', 
-    schema: { 
-      type: 'object', 
-      properties: { 
-        success: { type: 'boolean', example: true }, 
-        synced: { type: 'number', example: 5 },
-        conflicts: { type: 'number', example: 0 }
-      } 
-    } 
+    schema: {
+      type: 'object',
+      properties: {
+        synced: { type: 'number', example: 2, description: 'applied + duplicate' },
+        failed: { type: 'number', example: 1 },
+        results: {
+          type: 'array',
+          description: 'One entry per change, in request order. See docs/SYNC-CONTRACT.md.',
+          items: {
+            type: 'object',
+            properties: {
+              index: { type: 'number', example: 0 },
+              change_id: { type: 'string', nullable: true, example: '0f8fad5b-d9cb-469f-a165-70867728950e' },
+              object_type: { type: 'string', example: 'client' },
+              object_id: { type: 'string', example: '123e4567-e89b-12d3-a456-426614174000' },
+              status: { type: 'string', enum: ['applied', 'duplicate', 'failed'] },
+            },
+          },
+        },
+      },
+    },
   })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
   async push(@Body() syncPushDto: SyncPushDto, @CurrentUser() user: any) {

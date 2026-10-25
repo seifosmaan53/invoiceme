@@ -101,8 +101,13 @@ Store the output with the private runbook; it contains record ids.
 
 ### 5. Schema compatibility review and rehearsal
 
-The security fixes need no schema change. Other migrations may be needed,
-depending on how this installation's schema was created (some SQL files run
+The security fixes need no schema change. The sync contract fix needs
+migration `018_add_device_change_change_id.sql` (additive, idempotent, no
+data change) **before** the new server starts; if it stops with
+`migration 018: device_changes has N duplicate (user_id, change_id)
+group(s)`, do not edit data on your own: record the output and ask the owner
+(see `docs/SYNC-CONTRACT.md`, "Compatibility and rollout"). Other migrations
+may be needed, depending on how this installation's schema was created (some SQL files run
 by hand, TypeORM synchronize, or later edits). Decide from the actual schema:
 
 1. On the operator's machine:

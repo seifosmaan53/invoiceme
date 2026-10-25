@@ -65,6 +65,7 @@ describe('SyncController', () => {
       const syncResult = {
         synced: 1,
         failed: 0,
+        results: [],
       };
 
       syncService.pushChanges.mockResolvedValue(syncResult);
@@ -84,6 +85,7 @@ describe('SyncController', () => {
       const syncResult = {
         synced: 0,
         failed: 0,
+        results: [],
       };
 
       syncService.pushChanges.mockResolvedValue(syncResult);
@@ -111,6 +113,7 @@ describe('SyncController', () => {
       const syncResult = {
         synced: 1,
         failed: 0,
+        results: [],
         errors: [],
       };
 
@@ -132,6 +135,7 @@ describe('SyncController', () => {
       const syncResult = {
         synced: 0,
         failed: 0,
+        results: [],
       };
 
       syncService.pushChanges.mockResolvedValue(syncResult);
@@ -158,6 +162,7 @@ describe('SyncController', () => {
       const syncResult = {
         synced: 100,
         failed: 0,
+        results: [],
       };
 
       syncService.pushChanges.mockResolvedValue(syncResult);
@@ -317,6 +322,7 @@ describe('SyncController', () => {
       const syncResult = {
         synced: 0,
         failed: 0,
+        results: [],
       };
 
       syncService.pushChanges.mockResolvedValue(syncResult);
@@ -343,6 +349,7 @@ describe('SyncController', () => {
       const syncResult = {
         synced: 0,
         failed: 0,
+        results: [],
       };
 
       syncService.pushChanges.mockResolvedValue(syncResult);
@@ -381,6 +388,7 @@ describe('SyncController', () => {
       const syncResult = {
         synced: 0,
         failed: 0,
+        results: [],
         errors: [],
       };
 

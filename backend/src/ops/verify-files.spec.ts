@@ -53,12 +53,10 @@ describe('verify-files', () => {
     expect([...a.entries.keys()].sort()).toEqual(['DB_PASSWORD', 'ENCRYPTION_KEY', 'JWT_SECRET']);
     expect([...a.entries.values()].join()).not.toMatch(/s3cret|abc|k1/);
     expect(compareEnv(a, envDigest('DB_PASSWORD=s3cret\nJWT_SECRET=abc\nENCRYPTION_KEY=k1'))).toEqual({ named: [], unnamed: 0 });
+    // A changed key present in both files is named; a missing key is counted, not named.
     expect(compareEnv(a, envDigest('DB_PASSWORD=s3cret\nJWT_SECRET=changed\n'))).toEqual({
-      named: [
-        { path: 'ENCRYPTION_KEY', issue: 'missing_in_restore' },
-        { path: 'JWT_SECRET', issue: 'content_differs' },
-      ],
-      unnamed: 0,
+      named: [{ path: 'JWT_SECRET', issue: 'content_differs' }],
+      unnamed: 1,
     });
   });
 
@@ -71,6 +69,14 @@ describe('verify-files', () => {
     const r = run(write('a/.env', pem('MIIEvQIBADANBgkqhkiG9w0BAQEFAASC')), write('b/.env', pem('MIIEvQIBADANBgkqhkiG9w0BAQEFAASD')));
     expect(r.status).toBe(1);
     expect(r.stdout + r.stderr).not.toMatch(/MIIEvQ/);
+  });
+
+  it('never names an all-uppercase fragment of an unquoted multi-line key', () => {
+    const a = envDigest('SIGNING_KEY=-----BEGIN-----\nSECRETTAIL0KEYMATERIAL==\n');
+    const b = envDigest('SIGNING_KEY=-----BEGIN-----\nOTHERTAILKEYMATERIAL==\n');
+    const c = compareEnv(a, b);
+    expect(c.named).toEqual([]);
+    expect(c.unnamed).toBe(2);
   });
 
   it('CLI never prints values or key material, even a fragment shaped like KEY=VALUE', () => {

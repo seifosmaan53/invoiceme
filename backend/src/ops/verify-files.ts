@@ -9,9 +9,10 @@
  * - Two .env files (both named .env or *.env, or VERIFY_FILES_MODE=env): the
  *   files are first compared whole (SHA-256). If they differ, the entries are
  *   compared: multi-line quoted values (e.g. PEM keys) are one value; values
- *   are hashed immediately and NEVER printed. Only conventional key names
- *   (UPPER_SNAKE_CASE) are printed; any other difference is counted, not named,
- *   so a fragment of key material can never appear in the output.
+ *   are hashed immediately and NEVER printed. A key is named only when it is a
+ *   conventional name (UPPER_SNAKE_CASE) present in BOTH files with different
+ *   values; missing/extra keys and anything else are counted, not named, so a
+ *   fragment of key material can never appear in the output.
  * - Symbolic links inside a directory are reported and count as not verified.
  *
  * Read-only. Exit code: 0 = identical, 1 = differences, 2 = could not run.
@@ -107,9 +108,14 @@ export interface EnvComparison {
   unnamed: number;
 }
 
+/**
+ * Names only keys that exist in BOTH files with different values. A key that
+ * exists in one file only may be a fragment of an unquoted multi-line key
+ * that happens to look like KEY=VALUE, so it is counted, never named.
+ */
 export function compareEnv(a: EnvDigest, b: EnvDigest): EnvComparison {
   const all = compareManifests(a.entries, b.entries);
-  const named = all.filter((d) => PRINTABLE_KEY.test(d.path));
+  const named = all.filter((d) => d.issue === 'content_differs' && PRINTABLE_KEY.test(d.path));
   const unnamed = all.length - named.length + (a.other === b.other ? 0 : 1);
   return { named, unnamed };
 }
@@ -142,7 +148,7 @@ function main(argv: string[]): number {
         const c = compareEnv(ea, envDigest(tb));
         diffs = c.named;
         if (c.unnamed > 0) {
-          console.log(`[DIFFERS] ${c.unnamed} other difference(s) (unusual key names or unparsed lines; not printed)`);
+          console.log(`[DIFFERS] ${c.unnamed} other difference(s) (missing/extra keys, unusual key names or unparsed lines; names not printed)`);
           diffs = [...diffs, ...Array.from({ length: c.unnamed }, () => ({ path: '', issue: 'content_differs' as const }))];
         }
         if (diffs.length === 0) {

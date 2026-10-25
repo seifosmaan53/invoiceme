@@ -107,13 +107,15 @@ Redis is optional — the backend falls back to an in-memory cache if `REDIS_HOS
 ```bash
 cd backend
 cp env.example .env        # fill in secrets — see Configuration section
-npm install
+npm ci                     # never downloads a browser (backend/.puppeteerrc.cjs)
 npm run migration:run -- -d migrations/data-source.ts
 npm run start:dev
 ```
 
 API is available at `http://localhost:3000/api`.
 Set `ENABLE_SWAGGER=true` in `.env` to expose interactive docs at `/api/docs`.
+
+To render invoice PDFs from a checkout, set `PUPPETEER_EXECUTABLE_PATH` to an installed Chrome/Chromium; `node scripts/find-browser.js` prints one. The Docker image ships its own Chromium. `npm run build` writes `dist/main.js` in a checkout as well as in Docker, so `npm run start:prod` and the `:prod` operational scripts work in both. See [docs/DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md#build-output-and-operational-scripts).
 
 ### 3. Mobile / web app
 
@@ -258,7 +260,11 @@ cd backend
 npm test                   # unit tests
 npm run test:e2e           # end-to-end tests (requires running Postgres)
 npm run test:cov           # coverage report
+npm run lint               # all lint findings (existing debt is recorded, not fixed)
+npm run lint:ci            # CI gate: no findings above scripts/lint-baseline.json
 ```
+
+E2E tests need the `DB_TEST_*`/`DB_*` variables and `DB_SYNCHRONIZE=true` that CI sets; [docs/TESTING.md](docs/TESTING.md#e2e-tests) has the full list and a disposable-cluster recipe. Neither suite needs a larger Node heap ([why](docs/TESTING.md#memory)).
 
 **Mobile:**
 

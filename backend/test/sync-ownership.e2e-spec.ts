@@ -548,6 +548,23 @@ describe('Sync ownership enforcement (E2E)', () => {
       expect(res.body.invoices.map((i: Invoice) => i.id)).toContain(invoiceA.id);
       expect(res.body.invoiceItems.map((i: InvoiceItem) => i.id)).toContain(itemA.id);
     });
+
+    it('does not embed another user’s client in a pre-existing cross-owner invoice', async () => {
+      // A row the old push allowed (invoice of A pointing at B's client), written directly
+      const legacy = await makeInvoice(userA.id, clientB.id, 'A-LEGACY');
+
+      const res = await pull(tokenA);
+      const pulled = res.body.invoices.find((i: Invoice) => i.id === legacy.id);
+      expect(pulled).toBeDefined();
+      expect(pulled.client).toBeNull();
+      expect(JSON.stringify(res.body)).not.toContain('victim-client@example.test');
+      expect(JSON.stringify(res.body)).not.toContain('Victim Client');
+
+      // Positive control: A's normal invoice still embeds A's own client
+      const own = res.body.invoices.find((i: Invoice) => i.id === invoiceA.id);
+      expect(own.client.id).toBe(clientA.id);
+      expect(own.client.name).toBe('Attacker Client');
+    });
   });
 
   describe('with the production validation pipe (src/main.ts options)', () => {

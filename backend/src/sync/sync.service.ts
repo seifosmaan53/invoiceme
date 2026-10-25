@@ -168,6 +168,14 @@ export class SyncService {
       }),
     ]);
 
+    // Push now rejects cross-owner client references, but rows written before
+    // that check may still point at another user's client: never embed it.
+    for (const invoice of invoices) {
+      if (invoice.client && invoice.client.userId !== userId) {
+        invoice.client = null;
+      }
+    }
+
     // Get invoice IDs for related data
     const invoiceIds = invoices.map((inv) => inv.id);
     const clientIds = clients.map((c) => c.id);

@@ -105,6 +105,24 @@ describe('Integrity report: schema compatibility (E2E)', () => {
     }
   });
 
+  it('lists clients whose fields look encrypted, as information only', async () => {
+    const { name, client } = await schemaWith(range(1, 17));
+    await admin.query(`INSERT INTO ${name}.users (id, email, password_hash, name) VALUES ('11111111-1111-1111-1111-111111111111','o@enc.invalid','x','Owner')`);
+    await admin.query(`INSERT INTO ${name}.clients (id, user_id, name, email) VALUES
+      ('22222222-2222-2222-2222-222222222222','11111111-1111-1111-1111-111111111111','Plain Ltd','plain@enc.invalid'),
+      ('33333333-3333-3333-3333-333333333333','11111111-1111-1111-1111-111111111111','Cipher Ltd','U2FsdGVkX1+fakeciphertext')`);
+    try {
+      const report = await runIntegrityReport(client);
+      const enc = report.results.find((r) => r.id === 'encrypted_client_fields')!;
+      expect(enc.level).toBe('info');
+      expect(enc.rows).toEqual([{ client_id: '33333333-3333-3333-3333-333333333333' }]);
+      expect(report.findingCount).toBe(0);
+      expect(exitCodeFor(report)).toBe(0);
+    } finally {
+      await client.end();
+    }
+  });
+
   it('a check whose query fails is NOT CHECKED, the remaining checks still run, and the transaction stays read-only', async () => {
     const { name, client } = await schemaWith(range(1, 17));
     // Same column, incompatible type: the ->> operator in two checks fails on text.

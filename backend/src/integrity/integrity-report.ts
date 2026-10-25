@@ -18,7 +18,9 @@
  * whose query fails is also NOT CHECKED (each check runs under a savepoint).
  * A database is only reported clean when every finding check actually ran.
  * The output also includes a schema fingerprint (markers for SQL migrations
- * 001-017) to help identify an installation's version.
+ * 001-017, origin guessed from index names). These are diagnostic clues, not a
+ * migration history: never decide which migrations to apply from them alone
+ * (see scripts/schema-review.sh and docs/operations/customer-update.md).
  *
  * Exit code: 0 = every check ran, no findings; 1 = findings that need operator
  * review; 2 = the report could not run at all; 3 = no findings among the checks
@@ -312,6 +314,18 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
                   AND c2.change_type::text = 'create' AND c2.synced = true)
        ORDER BY o.created_at, o.change_id`,
   },
+  {
+    id: 'encrypted_client_fields',
+    level: 'info',
+    description:
+      'Clients whose email, phone or notes look encrypted (CryptoJS "U2FsdGVkX1" prefix): if any exist, ENCRYPTION_KEY is needed to read them and must be preserved',
+    requires: { clients: ['id', 'email', 'phone', 'notes'] },
+    sql: `
+      SELECT id::text AS client_id
+        FROM clients
+       WHERE email LIKE 'U2FsdGVkX1%' OR phone LIKE 'U2FsdGVkX1%' OR notes LIKE 'U2FsdGVkX1%'
+       ORDER BY id`,
+  },
 ];
 
 /**
@@ -367,6 +381,7 @@ export function formatReport(report: IntegrityReport): string {
   const lines: string[] = ['Cross-owner integrity report (read-only)', ''];
   const present = Object.entries(report.schema.migrations).filter(([, ok]) => ok).map(([m]) => m);
   const absent = Object.entries(report.schema.migrations).filter(([, ok]) => !ok).map(([m]) => m);
+  lines.push('Schema fingerprint (diagnostic clues only, NOT a migration history; review the actual schema before any change):');
   lines.push(`Schema markers present: ${present.join(' ') || 'none'}`);
   lines.push(`Schema markers absent:  ${absent.join(' ') || 'none'}`);
   lines.push(`Schema origin (from index names): ${report.schema.origin}` +

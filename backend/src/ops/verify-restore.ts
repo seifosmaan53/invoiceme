@@ -8,15 +8,21 @@
  * Connection: VERIFY_SOURCE_URL and VERIFY_RESTORED_URL (postgres:// URLs).
  * Optional VERIFY_SOURCE_SCHEMA / VERIFY_RESTORED_SCHEMA (default: public).
  *
- * WHAT IT CHECKS, per side inside ONE read-only REPEATABLE READ transaction
- * (a single consistent snapshot), rolled back afterwards:
- *   - table data: every base table's row count and a hash of its rows;
+ * WHAT IT CHECKS, per side inside one read-only REPEATABLE READ transaction
+ * (table data comes from one MVCC snapshot; sequence positions and object
+ * definitions are read from the catalog and assume a QUIET source), with the
+ * session's output settings pinned (UTC, ISO dates, full float precision, hex
+ * bytea) so servers with different defaults compare correctly:
+ *   - table data: every table's row count and a hash of its rows (each row is
+ *     hashed, then the sorted row hashes; no table-size limit);
  *   - schema objects: columns (type, nullability, default), constraints,
  *     indexes, sequences INCLUDING their current value, extensions (database
  *     wide), enum types, views, functions and triggers, with the schema name
- *     normalised so two schemas can be compared. CHECK expressions are
- *     compared without casts and parentheses, because a dump round trip may
- *     print the same rule differently.
+ *     normalised so two schemas can be compared. A constraint whose text
+ *     differs only in casts or redundant parentheses (a dump round trip may
+ *     re-print a CHECK rule) is reported as EQUIVALENT and listed for review.
+ *   - completeness: any table or sequence the connecting role cannot read
+ *     makes the result NOT PROVEN (grant SELECT on tables AND sequences).
  *
  * WHAT IT DOES NOT CHECK (verify separately, see
  * docs/operations/customer-update.md): uploaded files (S3/MinIO), the
@@ -70,6 +76,8 @@ export interface SchemaSnapshot {
   tables: Map<string, TableDigest>;
   /** Normalised, sorted descriptions of each object in each category. */
   objects: Record<ObjectCategory, string[]>;
+  /** Objects the role could not read; any entry means the result is not proven. */
+  unreadable: string[];
 }
 
 export interface TableComparison {
@@ -81,16 +89,21 @@ export interface TableComparison {
 
 export interface ObjectComparison {
   category: ObjectCategory;
-  status: 'match' | 'mismatch';
+  /** 'equivalent': differs only in casts/redundant parentheses (see equivalent). */
+  status: 'match' | 'equivalent' | 'mismatch';
   sourceCount: number;
   restoredCount: number;
   onlyInSource: string[];
   onlyInRestore: string[];
+  /** Pairs [source, restored] that are textually different but equivalent. */
+  equivalent: [string, string][];
 }
 
 export interface RestoreComparison {
   tables: TableComparison[];
   objects: ObjectComparison[];
+  /** Unreadable objects on either side (the comparison is then incomplete). */
+  unreadable: string[];
   ok: boolean;
 }
 
@@ -100,19 +113,50 @@ export interface QueryClient {
 
 const ident = (name: string) => '"' + name.replace(/"/g, '""') + '"';
 
+const CAST = /::"?[a-z_][a-z0-9_]*"?(?: varying| precision| with(?:out)? time zone)?(?:\(\d+(?:,\s*\d+)?\))?(?:\[\])?/gi;
+const ATOM_PARENS = /(?<![A-Za-z0-9_\]"])\(('(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?)\)/g;
+
+/** Index of the matching ")" for each "(" (string literals skipped). */
+function matchParens(s: string): Map<number, number> {
+  const pairs = new Map<number, number>();
+  const stack: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === "'") {
+      i++;
+      while (i < s.length && !(s[i] === "'" && s[i + 1] !== "'")) i += s[i] === "'" ? 2 : 1;
+    } else if (ch === '(') stack.push(i);
+    else if (ch === ')' && stack.length) pairs.set(stack.pop()!, i);
+  }
+  return pairs;
+}
+
+/** Removes one pair of parentheses that directly wraps another pair's entire content: "((x))" -> "(x)". */
+function dropDoubledParens(s: string): string {
+  const pairs = matchParens(s);
+  for (const [open, close] of pairs) {
+    if (s[open + 1] === '(' && pairs.get(open + 1) === close - 1) {
+      return s.slice(0, open + 1) + s.slice(open + 2, close - 1) + s.slice(close);
+    }
+  }
+  return s;
+}
+
 /**
- * CHECK expressions are re-parsed when a dump is restored, and PostgreSQL may
- * print the same rule with casts arranged differently (e.g. an IN list on a
- * varchar column). Compare them without type casts and parentheses; the
- * constraint name, table and the remaining expression must still match.
+ * A constraint definition with casts and REDUNDANT parentheses removed:
+ * parentheses around a single literal/identifier/number (not function calls)
+ * and doubled parentheses. Parentheses that group operators are kept, so
+ * operator precedence still distinguishes two rules.
  */
 export function normaliseCheck(text: string): string {
-  if (!/ CHECK /.test(text)) return text;
-  return text
-    .replace(/::[a-z_ ]+(\[\])?/gi, '')
-    .replace(/[()]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+  let out = text.replace(CAST, '');
+  let prev: string;
+  do {
+    prev = out;
+    out = out.replace(ATOM_PARENS, '$1');
+    out = dropDoubledParens(out);
+  } while (out !== prev);
+  return out.replace(/\s+/g, ' ').trim();
 }
 
 /** Removes the schema qualifier so that objects in two different schemas compare equal. */
@@ -135,13 +179,14 @@ const OBJECT_QUERIES: Record<ObjectCategory, string> = {
   sequences: `
     SELECT sequencename || ' start=' || start_value || ' inc=' || increment_by ||
            ' last=' || coalesce(last_value::text, 'unused') AS d
-      FROM pg_sequences WHERE schemaname = $1`,
+      FROM pg_sequences
+     WHERE schemaname = $1 AND has_sequence_privilege(format('%I.%I', schemaname, sequencename), 'SELECT')`,
   extensions: `SELECT extname || ' ' || extversion AS d FROM pg_extension`,
   enum_types: `
     SELECT t.typname || ' ' || string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder) AS d
       FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid
      WHERE t.typnamespace = $1::regnamespace GROUP BY t.typname`,
-  views: `SELECT viewname || ' ' || md5(definition) AS d FROM pg_views WHERE schemaname = $1`,
+  views: `SELECT viewname || ' ' || definition AS d FROM pg_views WHERE schemaname = $1`,
   functions: `
     SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ') ' || pg_get_functiondef(p.oid) AS d
       FROM pg_proc p WHERE p.pronamespace = $1::regnamespace AND p.prokind IN ('f', 'p')`,
@@ -158,21 +203,46 @@ export async function snapshotSchema(client: QueryClient, schema: string): Promi
     await client.query('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY');
     const { rows: ro } = await client.query('SHOW transaction_read_only');
     if (ro[0]?.transaction_read_only !== 'on') throw new Error('Refusing to run: the transaction is not read-only');
+    // Row text depends on these settings; pin them so different servers agree.
+    for (const setting of [
+      "SET LOCAL timezone = 'UTC'",
+      "SET LOCAL datestyle = 'ISO, YMD'",
+      "SET LOCAL intervalstyle = 'postgres'",
+      'SET LOCAL extra_float_digits = 3',
+      "SET LOCAL bytea_output = 'hex'",
+    ]) {
+      await client.query(setting);
+    }
 
+    // pg_class, not information_schema: tables the role cannot read must not silently disappear.
     const { rows: tables } = await client.query(
-      `SELECT table_name FROM information_schema.tables
-        WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name`,
+      `SELECT c.relname AS table_name, has_table_privilege(c.oid, 'SELECT') AS readable
+         FROM pg_class c
+        WHERE c.relnamespace = $1::regnamespace AND c.relkind IN ('r', 'p')
+        ORDER BY c.relname`,
       [schema],
     );
+    const unreadable: string[] = [];
     const tableDigests = new Map<string, TableDigest>();
-    for (const { table_name } of tables) {
+    for (const { table_name, readable } of tables) {
+      if (!readable) {
+        unreadable.push(`table ${table_name}`);
+        continue;
+      }
+      // Hash each row, then the sorted row hashes: no single huge value, no collation dependence.
       const { rows } = await client.query(
         `SELECT count(*)::int AS n,
-                md5(coalesce(string_agg(t::text, E'\\n' ORDER BY t::text), '')) AS h
-           FROM ${ident(schema)}.${ident(table_name)} t`,
+                md5(coalesce(string_agg(h, '' ORDER BY h), '')) AS h
+           FROM (SELECT md5(t::text) AS h FROM ${ident(schema)}.${ident(table_name)} t) r`,
       );
       tableDigests.set(table_name, { rows: rows[0].n, hash: rows[0].h });
     }
+    const { rows: hiddenSeq } = await client.query(
+      `SELECT sequencename FROM pg_sequences
+        WHERE schemaname = $1 AND NOT has_sequence_privilege(format('%I.%I', schemaname, sequencename), 'SELECT')`,
+      [schema],
+    );
+    for (const { sequencename } of hiddenSeq) unreadable.push(`sequence ${sequencename}`);
 
     const objects = {} as Record<ObjectCategory, string[]>;
     for (const category of OBJECT_CATEGORIES) {
@@ -180,13 +250,14 @@ export async function snapshotSchema(client: QueryClient, schema: string): Promi
       objects[category] = rows
         .map((r: { d: string }) => {
           const normalised = normaliseSchema(r.d, schema);
-          const text = category === 'constraints' ? normaliseCheck(normalised) : normalised;
-          // Long definitions are compared by hash; the name stays readable.
-          return category === 'functions' ? `${text.split(' ')[0]} ${createHash('md5').update(text).digest('hex')}` : text;
+          // Long definitions are compared by hash after normalisation; the name stays readable.
+          return category === 'functions' || category === 'views'
+            ? `${normalised.split(' ')[0]} ${createHash('md5').update(normalised).digest('hex')}`
+            : normalised;
         })
         .sort();
     }
-    return { tables: tableDigests, objects };
+    return { tables: tableDigests, objects, unreadable };
   } finally {
     await client.query('ROLLBACK');
   }
@@ -205,20 +276,34 @@ export function compareSnapshots(source: SchemaSnapshot, restored: SchemaSnapsho
   const objects: ObjectComparison[] = OBJECT_CATEGORIES.map((category) => {
     const s = new Set(source.objects[category]);
     const r = new Set(restored.objects[category]);
-    const onlyInSource = [...s].filter((x) => !r.has(x));
-    const onlyInRestore = [...r].filter((x) => !s.has(x));
-    return {
-      category,
-      status: onlyInSource.length === 0 && onlyInRestore.length === 0 ? 'match' : 'mismatch',
-      sourceCount: s.size,
-      restoredCount: r.size,
-      onlyInSource,
-      onlyInRestore,
-    };
+    let onlyInSource = [...s].filter((x) => !r.has(x));
+    let onlyInRestore = [...r].filter((x) => !s.has(x));
+    const equivalent: [string, string][] = [];
+    if (category === 'constraints') {
+      // Exact text first; only then try the narrow normalisation, and report it as such.
+      for (const a of [...onlyInSource]) {
+        const b = onlyInRestore.find((x) => normaliseCheck(x) === normaliseCheck(a));
+        if (b !== undefined) {
+          equivalent.push([a, b]);
+          onlyInSource = onlyInSource.filter((x) => x !== a);
+          onlyInRestore = onlyInRestore.filter((x) => x !== b);
+        }
+      }
+    }
+    const status: ObjectComparison['status'] =
+      onlyInSource.length > 0 || onlyInRestore.length > 0 ? 'mismatch' : equivalent.length > 0 ? 'equivalent' : 'match';
+    return { category, status, sourceCount: s.size, restoredCount: r.size, onlyInSource, onlyInRestore, equivalent };
   });
+  const unreadable = [
+    ...source.unreadable.map((x) => `source: ${x}`),
+    ...restored.unreadable.map((x) => `restore: ${x}`),
+  ];
   const ok =
-    tables.length > 0 && tables.every((t) => t.status === 'match') && objects.every((o) => o.status === 'match');
-  return { tables, objects, ok };
+    tables.length > 0 &&
+    unreadable.length === 0 &&
+    tables.every((t) => t.status === 'match') &&
+    objects.every((o) => o.status !== 'mismatch');
+  return { tables, objects, unreadable, ok };
 }
 
 export function formatComparison(c: RestoreComparison, quietNote?: string): string {
@@ -233,13 +318,23 @@ export function formatComparison(c: RestoreComparison, quietNote?: string): stri
     lines.push(`  [${o.status.toUpperCase()}] ${o.category}: source ${o.sourceCount}, restored ${o.restoredCount}`);
     for (const x of o.onlyInSource.slice(0, 10)) lines.push(`      only in source:  ${x}`);
     for (const x of o.onlyInRestore.slice(0, 10)) lines.push(`      only in restore: ${x}`);
+    for (const [a, b] of o.equivalent) {
+      lines.push(`      equivalent, review: source  ${a}`);
+      lines.push(`                          restore ${b}`);
+    }
   }
   lines.push('');
+  for (const u of c.unreadable) lines.push(`NOT READABLE by this role: ${u}`);
+  if (c.unreadable.length) lines.push('NOT PROVEN: the role cannot read every table and sequence (grant SELECT on both).');
   if (quietNote) lines.push(quietNote);
+  const equivalents = c.objects.reduce((n, o) => n + o.equivalent.length, 0);
   if (c.tables.length === 0) lines.push('FAILED: no tables found to compare.');
   else if (c.ok && !quietNote) {
-    lines.push(`OK: all ${c.tables.length} tables and all schema object categories match.`);
-  } else if (!c.ok) lines.push('FAILED: the restore does not match the source.');
+    lines.push(
+      `OK: all ${c.tables.length} tables and all schema object categories match` +
+        (equivalents ? ` (${equivalents} constraint definition(s) differ only in casts/parentheses; review them above).` : '.'),
+    );
+  } else if (!c.ok && !c.unreadable.length) lines.push('FAILED: the restore does not match the source.');
   lines.push(
     'Not covered here: uploaded files, .env configuration and keys, database roles, ownership and privileges.',
   );
@@ -265,10 +360,15 @@ export async function writeCounter(client: QueryClient, schema: string): Promise
   return rows[0].n;
 }
 
-async function identity(client: QueryClient): Promise<string> {
+/**
+ * Identifies a database independently of how we connected (socket, localhost,
+ * 127.0.0.1): the server's start time and port plus the database's oid. Two
+ * different servers practically never share a start time to the microsecond.
+ */
+export async function identity(client: QueryClient): Promise<string> {
   const { rows } = await client.query(
-    `SELECT current_database() AS db, coalesce(inet_server_addr()::text, 'local') AS addr,
-            inet_server_port() AS port, pg_postmaster_start_time()::text AS started`,
+    `SELECT d.oid::text AS db_oid, inet_server_port() AS port, pg_postmaster_start_time()::text AS started
+       FROM pg_database d WHERE d.datname = current_database()`,
   );
   return JSON.stringify(rows[0]);
 }
@@ -287,13 +387,13 @@ async function main(): Promise<number> {
   try {
     await source.connect();
     await restored.connect();
-    if ((await identity(source)) === (await identity(restored)) && sourceSchema === restoredSchema) {
+    const sameDb = (await identity(source)) === (await identity(restored));
+    if (sameDb && sourceSchema === restoredSchema) {
       console.error('Refusing to run: the source and the restored database are the same database and schema.');
       return 2;
     }
     // The restored side connects too; when both are on the same database (test
     // setups) that connection is not "another client" of the source.
-    const sameDb = (await identity(source)) === (await identity(restored));
     const sessions = (await otherSessions(source)) - (sameDb ? 1 : 0);
     const before = await writeCounter(source, sourceSchema);
     const result = compareSnapshots(await snapshotSchema(source, sourceSchema), await snapshotSchema(restored, restoredSchema));

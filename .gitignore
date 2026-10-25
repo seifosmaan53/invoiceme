@@ -39,3 +39,4 @@ Thumbs.db
 # backend/dist/ - in backend/.gitignore
 # mobile/build/ - in mobile/.gitignore
 
+release/

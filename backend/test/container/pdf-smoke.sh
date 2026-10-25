@@ -67,7 +67,21 @@ for name in service cache; do
   if command -v qpdf >/dev/null; then
     qpdf --check "$pdf" > /dev/null || fail "qpdf --check failed for $name.pdf"
   fi
-  pdftotext "$pdf" - | grep -qF "$INVOICE_NUMBER" || fail "$name.pdf does not contain $INVOICE_NUMBER"
+  # pdftotext joins a number wrapped at a hyphen and drops the hyphen, so
+  # compare with hyphens and whitespace removed on both sides.
+  if ! pdftotext "$pdf" - | tr -d -- '- \n' | grep -qF "$(printf %s "$INVOICE_NUMBER" | tr -d -- '-')"; then
+    echo "--- text of $name.pdf (first 60 lines) ---" >&2
+    pdftotext "$pdf" - | head -60 >&2
+    pdffonts "$pdf" >&2 || true
+    echo "--- container stderr (last 40 lines) ---" >&2
+    tail -40 "$WORK/stderr.log" >&2
+    fail "$name.pdf does not contain $INVOICE_NUMBER"
+  fi
+  # A line total such as $110.00 used to be read by String.replace as a $1
+  # pattern, which printed raw template text in the item table.
+  if [ "$name" = service ]; then
+    pdftotext "$pdf" - | grep -qF '$110.00' || fail "service.pdf item table lacks the line total \$110.00"
+  fi
   echo "OK $name.pdf: $size bytes, $pages page(s), producer: $(awk -F': *' '/^Producer:/ {print $2}' "$WORK/$name.info"), contains $INVOICE_NUMBER"
 done
 

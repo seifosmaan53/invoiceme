@@ -268,6 +268,7 @@ export class InvoicesController {
   }
 
   @Post(':id/duplicate')
+  @RequirePermission('write:invoices')
   @ApiOperation({ summary: 'Duplicate an invoice or estimate' })
   @ApiCreatedResponse({
     description: 'Invoice duplicated successfully',
@@ -289,6 +290,7 @@ export class InvoicesController {
   }
 
   @Post(':id/convert')
+  @RequirePermission('write:invoices')
   @ApiOperation({ summary: 'Convert an estimate to an invoice' })
   @ApiResponse({ status: 201, description: 'Estimate converted to invoice successfully' })
   @ApiResponse({ status: 400, description: 'Only estimates can be converted' })
@@ -308,6 +310,7 @@ export class InvoicesController {
   }
 
   @Post(':id/send')
+  @RequirePermission('write:invoices')
   @ApiOperation({ summary: 'Send an invoice via email' })
   @ApiResponse({ status: 200, description: 'Invoice sent successfully' })
   @ApiResponse({ status: 404, description: 'Invoice not found' })
@@ -413,6 +416,7 @@ export class InvoicesController {
   }
 
   @Post(':id/attachments')
+  @RequirePermission('write:invoices')
   @UseInterceptors(
     FileInterceptor('file', {
       limits: {
@@ -492,6 +496,7 @@ export class InvoicesController {
   }
 
   @Get(':id/attachments')
+  @RequirePermission('read:invoices')
   @ApiOperation({ summary: 'Get all attachments for an invoice' })
   @ApiResponse({ status: 200, description: 'List of attachments retrieved successfully' })
   @ApiResponse({ status: 404, description: 'Invoice not found' })
@@ -523,6 +528,7 @@ export class InvoicesController {
   }
 
   @Post(':id/pdf')
+  @RequirePermission('read:invoices')
   @ApiOperation({ summary: 'Generate PDF for an invoice' })
   @ApiResponse({ status: 200, description: 'PDF generated successfully' })
   @ApiResponse({ status: 404, description: 'Invoice not found' })
@@ -818,6 +824,7 @@ export class InvoicesController {
   }
 
   @Get('export/csv')
+  @RequirePermission('read:invoices')
   @ApiOperation({ summary: 'Export all invoices as CSV' })
   @ApiOkResponse({
     description: 'CSV file with all invoices',
@@ -868,6 +875,7 @@ export class InvoicesController {
   }
 
   @Post('import/csv')
+  @RequirePermission('write:invoices')
   @ApiOperation({ summary: 'Import invoices from CSV file' })
   @ApiCreatedResponse({
     description: 'Invoices imported successfully',
@@ -905,6 +913,7 @@ export class InvoicesController {
   }
 
   @Post('bulk-archive')
+  @RequirePermission('delete:invoices')
   @ApiOperation({ summary: 'Bulk archive invoices' })
   @ApiOkResponse({
     description: 'Invoices archived successfully',

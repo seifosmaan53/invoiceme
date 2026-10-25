@@ -1,7 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import * as puppeteer from 'puppeteer';
-import { Browser } from 'puppeteer';
+import { Browser, Page } from 'puppeteer';
 import { CacheService } from './cache.service';
+import { PDF_BROWSER_ARGS, lockDownPage } from './pdf-render-sandbox';
 
 @Injectable()
 export class PdfCacheService {
@@ -26,10 +27,21 @@ export class PdfCacheService {
           '--disable-dev-shm-usage', // Overcome limited resource problems
           '--disable-accelerated-2d-canvas',
           '--disable-gpu',
+          ...PDF_BROWSER_ARGS, // no network from rendering (pdf-render-sandbox.ts)
         ],
       });
     }
     return this.browserInstance;
+  }
+
+  /**
+   * New page on the shared browser with network requests blocked and
+   * JavaScript disabled. Use this for any page that renders user data.
+   */
+  async newPage(): Promise<Page> {
+    const page = await (await this.getBrowser()).newPage();
+    await lockDownPage(page);
+    return page;
   }
 
   /**

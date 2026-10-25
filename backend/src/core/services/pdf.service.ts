@@ -5,6 +5,13 @@ import * as path from 'path';
 import { Invoice } from '../../entities/invoice.entity';
 import { InvoiceItem } from '../../entities/invoice-item.entity';
 import { Client } from '../../entities/client.entity';
+import { PDF_BROWSER_ARGS, lockDownPage } from './pdf-render-sandbox';
+import { checkPdfLogoUrl, fetchLogoAsDataUri } from './pdf-logo';
+
+// Values that end up inside CSS. Anything else falls back to the default, so
+// historical rows saved before input validation cannot inject CSS.
+const HEX_COLOR = /^#[0-9A-Fa-f]{6}$/;
+const FONT_FAMILY = /^[A-Za-z0-9 -]{1,50}$/;
 
 interface InvoiceData {
   invoice: Invoice;
@@ -160,6 +167,7 @@ export class PdfService {
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage', // Overcome limited resource problems
           '--disable-accelerated-2d-canvas', // Better compatibility
+          ...PDF_BROWSER_ARGS, // no network from rendering (pdf-render-sandbox.ts)
         ],
       };
       
@@ -219,6 +227,7 @@ export class PdfService {
       try {
         console.log('[PDF Generation] Creating new page...');
         const page = await browser.newPage();
+        const blockedUrls = await lockDownPage(page);
         
         console.log(`[PDF Generation] Setting page content (HTML length: ${html.length} chars)...`);
         // Set content with timeout to prevent hanging
@@ -227,6 +236,9 @@ export class PdfService {
           timeout: 30000, // 30 second timeout
         });
         console.log('[PDF Generation] Page content set successfully');
+        if (blockedUrls.length > 0) {
+          console.warn(`[PDF Generation] Blocked ${blockedUrls.length} network request(s) from the invoice page`);
+        }
         
         console.log('[PDF Generation] Generating PDF...');
         const pdf = await page.pdf({
@@ -372,12 +384,13 @@ export class PdfService {
 
     // Get customization settings
     const settings = data.settings || {};
-    const logoUrl = settings.logoUrl || '';
-    const primaryColor = settings.primaryColor || '#4a90e2';
-    const secondaryColor = settings.secondaryColor || '#333333';
-    const fontFamily = settings.fontFamily || 'Arial';
+    const primaryColor = HEX_COLOR.test(settings.primaryColor || '') ? settings.primaryColor! : '#4a90e2';
+    const secondaryColor = HEX_COLOR.test(settings.secondaryColor || '') ? settings.secondaryColor! : '#333333';
+    const fontFamily = FONT_FAMILY.test(settings.fontFamily || '') ? settings.fontFamily! : 'Arial';
     const layout = settings.layout === 'minimal' ? 'minimal' : 'classic';
     const showLogo = settings.showLogo !== false;
+    // data: URI fetched by the server, or '' (the browser never sees the URL)
+    const logoUrl = showLogo ? await this.resolveLogo(settings.logoUrl) : '';
     const showClientDetails = settings.showClientDetails !== false;
     const showInvoiceDetails = settings.showInvoiceDetails !== false;
     const showFooter = settings.showFooter !== false;
@@ -421,34 +434,34 @@ export class PdfService {
 
     // Replace template variables
     let html = template
-      .replace(/\{\{invoiceNumber\}\}/g, invoiceNumber)
+      .replace(/\{\{invoiceNumber\}\}/g, () => this.escapeHtml(invoiceNumber))
       .replace(/\{\{invoiceType\}\}/g, invoiceType === 'invoice' ? 'Invoice' : 'Estimate')
       .replace(/\{\{invoiceTypeDisplay\}\}/g, invoiceType === 'invoice' ? 'Invoice' : 'Estimate')
       .replace(/\{\{issueDate\}\}/g, issueDate)
       .replace(/\{\{#if dueDate\}\}/g, dueDate ? '' : '<!--')
       .replace(/\{\{\/if\}\}/g, dueDate ? '' : '-->')
       .replace(/\{\{dueDate\}\}/g, dueDate || '')
-      .replace(/\{\{status\}\}/g, statusDisplay)
-      .replace(/\{\{currency\}\}/g, invoiceCurrency)
-      .replace(/\{\{companyName\}\}/g, companyName)
-      .replace(/\{\{logoUrl\}\}/g, logoUrl)
+      .replace(/\{\{status\}\}/g, () => this.escapeHtml(statusDisplay))
+      .replace(/\{\{currency\}\}/g, () => this.escapeHtml(invoiceCurrency))
+      .replace(/\{\{companyName\}\}/g, () => companyName)
+      .replace(/\{\{logoUrl\}\}/g, () => escapedLogoUrl)
       .replace(/\{\{primaryColor\}\}/g, primaryColor)
       .replace(/\{\{secondaryColor\}\}/g, secondaryColor)
       .replace(/\{\{fontFamily\}\}/g, fontFamily)
-      .replace(/\{\{clientName\}\}/g, this.escapeHtml(clientName))
-      .replace(/\{\{clientEmail\}\}/g, client.email ? this.escapeHtml(client.email) : '')
-      .replace(/\{\{clientPhone\}\}/g, client.phone ? this.escapeHtml(client.phone) : '')
-      .replace(/\{\{clientAddress\}\}/g, this.escapeHtml(clientAddress))
+      .replace(/\{\{clientName\}\}/g, () => this.escapeHtml(clientName))
+      .replace(/\{\{clientEmail\}\}/g, () => (client.email ? this.escapeHtml(client.email) : ''))
+      .replace(/\{\{clientPhone\}\}/g, () => (client.phone ? this.escapeHtml(client.phone) : ''))
+      .replace(/\{\{clientAddress\}\}/g, () => this.escapeHtml(clientAddress))
       .replace(/\{\{subtotal\}\}/g, formatCurrency(invoiceSubtotal, invoiceCurrency))
       .replace(/\{\{taxTotal\}\}/g, formatCurrency(invoiceTaxTotal, invoiceCurrency))
       .replace(/\{\{discountTotal\}\}/g, formatCurrency(invoiceDiscountTotal, invoiceCurrency))
       .replace(/\{\{total\}\}/g, formatCurrency(invoiceTotal, invoiceCurrency))
-      .replace(/\{\{notes\}\}/g, rawNotes)
+      .replace(/\{\{notes\}\}/g, () => rawNotes)
       .replace(/\{\{showTaxOrDiscount\}\}/g, showTaxOrDiscount ? 'true' : '')
       .replace(/\{\{bodyClass\}\}/g, bodyClass.trim())
-      .replace(/\{\{logoBlock\}\}/g, logoBlock)
-      .replace(/\{\{notesSection\}\}/g, notesSection)
-      .replace(/\{\{footerSection\}\}/g, footerSection);
+      .replace(/\{\{logoBlock\}\}/g, () => logoBlock)
+      .replace(/\{\{notesSection\}\}/g, () => notesSection)
+      .replace(/\{\{footerSection\}\}/g, () => footerSection);
 
     // Replace items
     const itemsHtml = items
@@ -461,7 +474,7 @@ export class PdfService {
         return `
         <tr>
           <td class="description">${this.escapeHtml(item.description)}</td>
-          <td style="text-align: center;">${item.quantity}</td>
+          <td style="text-align: center;">${this.escapeHtml(String(item.quantity ?? ''))}</td>
           <td style="text-align: right;">${formatCurrency(item.unitPrice, invoiceCurrency)}</td>
           ${taxCell}
           ${discountCell}
@@ -470,10 +483,10 @@ export class PdfService {
       })
       .join('');
 
-    html = html.replace(/\{\{#each items\}\}([\s\S]*?)\{\{\/each\}\}/g, itemsHtml);
+    html = html.replace(/\{\{#each items\}\}([\s\S]*?)\{\{\/each\}\}/g, () => itemsHtml);
 
     // Replace status badge class - use invoiceStatus (already has safe default)
-    const statusLower = invoiceStatus.toLowerCase();
+    const statusLower = this.escapeHtml(invoiceStatus.toLowerCase());
     html = html.replace(/class="badge {{status}}"/g, `class="badge ${statusLower}"`);
 
     // Handle client field conditionals (email, phone, address)
@@ -495,6 +508,26 @@ export class PdfService {
     html = html.replace(/\{\{\/if\}\}/g, '');
 
     return html;
+  }
+
+  /**
+   * Turn the stored logo URL into a data: URI fetched by the server
+   * (pdf-logo.ts), or '' when there is none, it is not acceptable (e.g. a
+   * historical value saved before validation) or the fetch fails. Never
+   * throws: a missing logo must not prevent the invoice PDF.
+   */
+  private async resolveLogo(logoUrl: string | undefined): Promise<string> {
+    if (!logoUrl) return '';
+    if (checkPdfLogoUrl(logoUrl)) {
+      console.warn('[PDF Generation] Stored logo URL is not an acceptable https URL; rendering without logo');
+      return '';
+    }
+    try {
+      return await fetchLogoAsDataUri(logoUrl);
+    } catch (error: any) {
+      console.warn(`[PDF Generation] Logo left out: ${error?.message || error}`);
+      return '';
+    }
   }
 
   private formatDate(date: Date | string): string {

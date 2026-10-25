@@ -1,13 +1,17 @@
 import { IsOptional, IsString, MaxLength, Matches, IsBoolean, IsIn } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
+import { LOGO_MAX_URL_LENGTH } from '../../core/services/pdf-logo';
 
 export class UpdateUserSettingsDto {
   @ApiPropertyOptional({
-    description: 'Public URL to company logo used in PDFs',
+    description:
+      'Public https URL of the company logo used in PDFs (PNG, JPEG, GIF or WebP, at most 1 MB). ' +
+      'The server fetches it when rendering; empty string or null removes it.',
     example: 'https://my-cdn.com/logos/company-logo.png',
   })
   @IsString()
   @IsOptional()
+  @MaxLength(LOGO_MAX_URL_LENGTH)
   pdfLogoUrl?: string;
 
   @ApiPropertyOptional({
@@ -39,6 +43,10 @@ export class UpdateUserSettingsDto {
   @IsString()
   @IsOptional()
   @MaxLength(50)
+  // Inserted into the PDF's CSS: letters, digits, spaces and hyphens only
+  @Matches(/^[A-Za-z0-9 -]+$/, {
+    message: 'Font family may contain only letters, digits, spaces and hyphens',
+  })
   pdfFontFamily?: string;
 
   @ApiPropertyOptional({

@@ -258,6 +258,7 @@ export class ClientsController {
   }
 
   @Post('bulk-archive')
+  @RequirePermission('delete:clients')
   @ApiOperation({ summary: 'Bulk archive clients' })
   @ApiOkResponse({
     description: 'Clients archived successfully',

@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { UserSettings } from '../entities/user-settings.entity';
 import { UpdateUserSettingsDto } from './dto/user-settings.dto';
+import { checkPdfLogoUrl } from '../core/services/pdf-logo';
 
 @Injectable()
 export class UserSettingsService {
@@ -51,7 +52,17 @@ export class UserSettingsService {
 
     // Only update fields that are provided
     if (dto.pdfLogoUrl !== undefined) {
-      existing.pdfLogoUrl = dto.pdfLogoUrl || null;
+      const logoUrl = dto.pdfLogoUrl || null;
+      // The app sends the stored value back with every save. Re-sending an
+      // unchanged historical value is not an error (rendering ignores
+      // unacceptable values); setting a new value must pass the rule.
+      if (logoUrl !== null && logoUrl !== existing.pdfLogoUrl) {
+        const problem = checkPdfLogoUrl(logoUrl);
+        if (problem) {
+          throw new BadRequestException(problem);
+        }
+      }
+      existing.pdfLogoUrl = logoUrl;
     }
     if (dto.pdfPrimaryColor !== undefined) {
       existing.pdfPrimaryColor = dto.pdfPrimaryColor;

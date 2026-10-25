@@ -180,11 +180,15 @@ export class AuthService {
 
     const accessToken = this.jwtService.sign(payload);
 
+    // jwtid makes every issued refresh token unique: without it, two logins
+    // in the same second produce the same {sub, iat, exp} token and violate
+    // the unique constraint on refresh_tokens.token
     const refreshTokenValue = this.jwtService.sign(
       { sub: user.id },
       {
         secret: this.configService.get('JWT_REFRESH_SECRET'),
         expiresIn: this.configService.get('JWT_REFRESH_EXPIRES_IN') || '7d',
+        jwtid: crypto.randomUUID(),
       },
     );
 

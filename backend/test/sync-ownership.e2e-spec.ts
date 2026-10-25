@@ -480,6 +480,63 @@ describe('Sync ownership enforcement (E2E)', () => {
     });
   });
 
+  describe('reused ids and relation objects', () => {
+    it('rejects a CREATE that reuses another user’s invoice id', async () => {
+      const res = await push(tokenA, [
+        change(ChangeObjectType.INVOICE, invoiceB.id, ChangeType.CREATE, {
+          clientId: clientA.id,
+          number: 'A-EVIL',
+          issueDate: '2026-10-01',
+          total: 1,
+        }),
+      ]).expect(200);
+      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      const after = await invoiceRepository.findOneBy({ id: invoiceB.id });
+      expect(after.userId).toBe(userB.id);
+      expect(after.clientId).toBe(clientB.id);
+      expect(after.number).toBe('B-0001');
+      expect(Number(after.total)).toBe(100);
+    });
+
+    it('rejects a CREATE that reuses another user’s invoice item id', async () => {
+      const res = await push(tokenA, [
+        change(ChangeObjectType.INVOICE_ITEM, itemB.id, ChangeType.CREATE, {
+          invoiceId: invoiceA.id,
+          description: 'pwned',
+          quantity: 1,
+          unitPrice: 0,
+          lineTotal: 0,
+        }),
+      ]).expect(200);
+      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      const after = await invoiceItemRepository.findOneBy({ id: itemB.id });
+      expect(after.invoiceId).toBe(invoiceB.id);
+      expect(after.description).toBe('Victim Item');
+    });
+
+    it('ignores relation objects that would re-point foreign keys', async () => {
+      const res = await push(tokenA, [
+        change(ChangeObjectType.INVOICE, invoiceA.id, ChangeType.UPDATE, { notes: 'via relation', client: { id: clientB.id } }),
+        change(ChangeObjectType.INVOICE_ITEM, itemA.id, ChangeType.UPDATE, { description: 'via relation', invoice: { id: invoiceB.id } }),
+        change(ChangeObjectType.CLIENT, clientA.id, ChangeType.UPDATE, { name: 'via relation', user: { id: userB.id } }),
+      ]).expect(200);
+      expect(res.body.synced + res.body.failed).toBe(3);
+
+      const invoice = await invoiceRepository.findOneBy({ id: invoiceA.id });
+      expect(invoice.clientId).toBe(clientA.id);
+      const item = await invoiceItemRepository.findOneBy({ id: itemA.id });
+      expect(item.invoiceId).toBe(invoiceA.id);
+      const client = await clientRepository.findOneBy({ id: clientA.id });
+      expect(client.userId).toBe(userA.id);
+
+      // Positive control: the plain column changes in the same changes were applied
+      expect(res.body).toEqual({ synced: 3, failed: 0 });
+      expect(invoice.notes).toBe('via relation');
+      expect(item.description).toBe('via relation');
+      expect(client.name).toBe('via relation');
+    });
+  });
+
   describe('pull', () => {
     it('returns only the authenticated user’s records across all collections', async () => {
       const res = await pull(tokenA);

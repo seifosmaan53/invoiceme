@@ -17,6 +17,9 @@ export class PdfCacheService {
     if (!this.browserInstance) {
       this.browserInstance = await puppeteer.launch({
         headless: true,
+        // Set in the container image to Alpine's Chromium (see Dockerfile).
+        // When unset, Puppeteer falls back to its own downloaded browser.
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',

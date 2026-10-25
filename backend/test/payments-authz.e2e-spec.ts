@@ -450,6 +450,24 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       expect(await statusOf(invoiceA)).toBe(InvoiceStatus.SENT);
     });
 
+    it('the detail view does not count a payment made before the invoice currency changed', async () => {
+      const piA = await pay(invoiceA, tokenA); // USD 110.00
+      await invoiceRepository.update({ id: invoiceA.id }, { currency: 'EUR' });
+
+      await postWebhook(paymentIntentEvent('payment_intent.succeeded', succeededIntent(piA, invoiceA, userA))).expect(200);
+      expect((await paymentRepository.findOneByOrFail({ providerPaymentId: piA })).status).toBe(PaymentStatus.COMPLETED);
+      expect(await statusOf(invoiceA)).toBe(InvoiceStatus.SENT);
+
+      // GET /invoices/:id recomputes status from payments; it must agree
+      await request(app.getHttpServer()).get(`/api/v1/invoices/${invoiceA.id}`).set('Authorization', `Bearer ${tokenA}`).expect(200);
+      expect(await statusOf(invoiceA)).toBe(InvoiceStatus.SENT);
+
+      // Positive control: back in USD, the same payment covers it
+      await invoiceRepository.update({ id: invoiceA.id }, { currency: 'USD' });
+      await request(app.getHttpServer()).get(`/api/v1/invoices/${invoiceA.id}`).set('Authorization', `Bearer ${tokenA}`).expect(200);
+      expect(await statusOf(invoiceA)).toBe(InvoiceStatus.PAID);
+    });
+
     it('ignores an event whose metadata names a different invoice than the stored payment', async () => {
       const piA = await pay(invoiceA, tokenA);
 

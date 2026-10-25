@@ -4,7 +4,8 @@
  *
  *   node healthcheck.js [url]
  *
- * Default URL: http://127.0.0.1:${API_PORT:-3000}/api/v1/health (or HEALTHCHECK_URL).
+ * Default URL: http://127.0.0.1:<port>/api/v1/health, where <port> is API_PORT from
+ * the environment or from the .env next to this file (default 3000); or HEALTHCHECK_URL.
  * Healthy ONLY when the response is exactly HTTP 200 (redirects are not
  * followed and count as failure) and the JSON body has status "ok" and
  * database "connected". Exit 0 = healthy, 1 = not healthy. Times out after
@@ -16,10 +17,23 @@
  */
 'use strict';
 
-const url =
-  process.argv[2] ||
-  process.env.HEALTHCHECK_URL ||
-  `http://127.0.0.1:${process.env.API_PORT || 3000}/api/v1/health`;
+const fs = require('fs');
+const path = require('path');
+
+/** API_PORT from the environment, else from the app's .env next to this file (like the app itself), else 3000. */
+function apiPort() {
+  if (process.env.API_PORT) return process.env.API_PORT;
+  try {
+    const env = fs.readFileSync(path.join(__dirname, '.env'), 'utf8');
+    const m = /^\s*(?:export\s+)?API_PORT\s*=\s*["']?(\d+)["']?\s*$/m.exec(env);
+    if (m) return m[1];
+  } catch {
+    // no .env: default port
+  }
+  return '3000';
+}
+
+const url = process.argv[2] || process.env.HEALTHCHECK_URL || `http://127.0.0.1:${apiPort()}/api/v1/health`;
 const timeoutMs = Number(process.env.HEALTHCHECK_TIMEOUT_MS || 5000);
 
 async function main() {

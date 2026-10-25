@@ -48,6 +48,7 @@ spec:
           # pass; the script requires HTTP 200 and the expected body.
           exec:
             command: ["node", "healthcheck.js"]
+          timeoutSeconds: 5
           initialDelaySeconds: 40
           periodSeconds: 30
         readinessProbe:
@@ -55,5 +56,6 @@ spec:
           # pass; the script requires HTTP 200 and the expected body.
           exec:
             command: ["node", "healthcheck.js"]
+          timeoutSeconds: 5
           initialDelaySeconds: 10
           periodSeconds: 10

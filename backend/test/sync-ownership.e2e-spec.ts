@@ -198,20 +198,20 @@ describe('Sync ownership enforcement (E2E)', () => {
       const res = await push(tokenA, [
         change(ChangeObjectType.CLIENT, clientB.id, ChangeType.UPDATE, { name: 'pwned', email: 'attacker@evil.test' }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       const after = await clientRepository.findOneBy({ id: clientB.id });
       expect(after.name).toBe('Victim Client');
       expect(after.email).toBe('victim-client@example.test');
       expect(after.userId).toBe(userB.id);
 
       const own = await push(tokenB, [change(ChangeObjectType.CLIENT, clientB.id, ChangeType.UPDATE, { name: 'Renamed by owner' })]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await clientRepository.findOneBy({ id: clientB.id })).name).toBe('Renamed by owner');
     });
 
     it('rejects a CREATE that reuses another user’s client id', async () => {
       const res = await push(tokenA, [change(ChangeObjectType.CLIENT, clientB.id, ChangeType.CREATE, { name: 'pwned' })]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       const after = await clientRepository.findOneBy({ id: clientB.id });
       expect(after.name).toBe('Victim Client');
       expect(after.userId).toBe(userB.id);
@@ -219,11 +219,11 @@ describe('Sync ownership enforcement (E2E)', () => {
 
     it('rejects soft-deleting another user’s client; owner delete succeeds', async () => {
       const res = await push(tokenA, [change(ChangeObjectType.CLIENT, clientB.id, ChangeType.DELETE)]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await clientRepository.findOneBy({ id: clientB.id })).deletedAt).toBeNull();
 
       const own = await push(tokenB, [change(ChangeObjectType.CLIENT, clientB.id, ChangeType.DELETE)]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await clientRepository.findOneBy({ id: clientB.id })).deletedAt).not.toBeNull();
     });
 
@@ -244,7 +244,7 @@ describe('Sync ownership enforcement (E2E)', () => {
       const res = await push(tokenA, [
         change(ChangeObjectType.CLIENT, clientA.id, ChangeType.UPDATE, { name: 'Still mine', userId: userB.id }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 1, failed: 0 });
+      expect(res.body).toMatchObject({ synced: 1, failed: 0 });
       const after = await clientRepository.findOneBy({ id: clientA.id });
       expect(after.name).toBe('Still mine');
       expect(after.userId).toBe(userA.id);
@@ -256,23 +256,23 @@ describe('Sync ownership enforcement (E2E)', () => {
       const res = await push(tokenA, [
         change(ChangeObjectType.INVOICE, invoiceB.id, ChangeType.UPDATE, { total: 1, status: InvoiceStatus.PAID }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       const after = await invoiceRepository.findOneBy({ id: invoiceB.id });
       expect(Number(after.total)).toBe(100);
       expect(after.status).toBe(InvoiceStatus.DRAFT);
 
       const own = await push(tokenB, [change(ChangeObjectType.INVOICE, invoiceB.id, ChangeType.UPDATE, { notes: 'owner note' })]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await invoiceRepository.findOneBy({ id: invoiceB.id })).notes).toBe('owner note');
     });
 
     it('rejects soft-deleting another user’s invoice; owner delete succeeds', async () => {
       const res = await push(tokenA, [change(ChangeObjectType.INVOICE, invoiceB.id, ChangeType.DELETE)]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await invoiceRepository.findOneBy({ id: invoiceB.id })).deletedAt).toBeNull();
 
       const own = await push(tokenB, [change(ChangeObjectType.INVOICE, invoiceB.id, ChangeType.DELETE)]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await invoiceRepository.findOneBy({ id: invoiceB.id })).deletedAt).not.toBeNull();
     });
 
@@ -286,7 +286,7 @@ describe('Sync ownership enforcement (E2E)', () => {
           total: 1,
         }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect(await invoiceRepository.findOneBy({ id: invoiceId })).toBeNull();
 
       const attackerPull = await pull(tokenA);
@@ -303,7 +303,7 @@ describe('Sync ownership enforcement (E2E)', () => {
           total: 1,
         }),
       ]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       const created = await invoiceRepository.findOneBy({ id: ownId });
       expect(created.userId).toBe(userA.id);
       expect(created.clientId).toBe(clientA.id);
@@ -313,7 +313,7 @@ describe('Sync ownership enforcement (E2E)', () => {
       const res = await push(tokenA, [
         change(ChangeObjectType.INVOICE, invoiceA.id, ChangeType.UPDATE, { clientId: clientB.id }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await invoiceRepository.findOneBy({ id: invoiceA.id })).clientId).toBe(clientA.id);
 
       // Positive control: re-pointing at another client of the same user works
@@ -321,7 +321,7 @@ describe('Sync ownership enforcement (E2E)', () => {
       const own = await push(tokenA, [
         change(ChangeObjectType.INVOICE, invoiceA.id, ChangeType.UPDATE, { clientId: otherA.id }),
       ]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await invoiceRepository.findOneBy({ id: invoiceA.id })).clientId).toBe(otherA.id);
     });
 
@@ -348,7 +348,7 @@ describe('Sync ownership enforcement (E2E)', () => {
           lineTotal: 999,
         }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect(await invoiceItemRepository.findOneBy({ id: itemId })).toBeNull();
       const victimPull = await pull(tokenB);
       expect(victimPull.body.invoiceItems.map((i: InvoiceItem) => i.id)).not.toContain(itemId);
@@ -363,7 +363,7 @@ describe('Sync ownership enforcement (E2E)', () => {
           lineTotal: 5,
         }),
       ]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await invoiceItemRepository.findOneBy({ id: ownId })).invoiceId).toBe(invoiceB.id);
     });
 
@@ -371,13 +371,13 @@ describe('Sync ownership enforcement (E2E)', () => {
       const res = await push(tokenA, [
         change(ChangeObjectType.INVOICE_ITEM, itemB.id, ChangeType.UPDATE, { description: 'pwned', unitPrice: 0 }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await invoiceItemRepository.findOneBy({ id: itemB.id })).description).toBe('Victim Item');
 
       const own = await push(tokenB, [
         change(ChangeObjectType.INVOICE_ITEM, itemB.id, ChangeType.UPDATE, { description: 'Owner edit' }),
       ]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await invoiceItemRepository.findOneBy({ id: itemB.id })).description).toBe('Owner edit');
     });
 
@@ -385,28 +385,28 @@ describe('Sync ownership enforcement (E2E)', () => {
       const moveOut = await push(tokenA, [
         change(ChangeObjectType.INVOICE_ITEM, itemA.id, ChangeType.UPDATE, { invoiceId: invoiceB.id }),
       ]).expect(200);
-      expect(moveOut.body).toEqual({ synced: 0, failed: 1 });
+      expect(moveOut.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await invoiceItemRepository.findOneBy({ id: itemA.id })).invoiceId).toBe(invoiceA.id);
 
       const steal = await push(tokenA, [
         change(ChangeObjectType.INVOICE_ITEM, itemB.id, ChangeType.UPDATE, { invoiceId: invoiceA.id }),
       ]).expect(200);
-      expect(steal.body).toEqual({ synced: 0, failed: 1 });
+      expect(steal.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await invoiceItemRepository.findOneBy({ id: itemB.id })).invoiceId).toBe(invoiceB.id);
     });
 
     it('rejects deleting another user’s item; owner delete succeeds and is idempotent', async () => {
       const res = await push(tokenA, [change(ChangeObjectType.INVOICE_ITEM, itemB.id, ChangeType.DELETE)]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect(await invoiceItemRepository.findOneBy({ id: itemB.id })).not.toBeNull();
 
       const own = await push(tokenB, [change(ChangeObjectType.INVOICE_ITEM, itemB.id, ChangeType.DELETE)]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect(await invoiceItemRepository.findOneBy({ id: itemB.id })).toBeNull();
 
       // Retrying the same delete (e.g. after a lost response) stays a no-op success
       const retry = await push(tokenB, [change(ChangeObjectType.INVOICE_ITEM, itemB.id, ChangeType.DELETE)]).expect(200);
-      expect(retry.body).toEqual({ synced: 1, failed: 0 });
+      expect(retry.body).toMatchObject({ synced: 1, failed: 0 });
     });
   });
 
@@ -415,7 +415,7 @@ describe('Sync ownership enforcement (E2E)', () => {
       const attId = uuidv4();
       const data = { ownerType: 'invoice', ownerId: invoiceB.id, url: 'https://evil.example.test/x.pdf', filename: 'x.pdf' };
       const res = await push(tokenA, [change(ChangeObjectType.ATTACHMENT, attId, ChangeType.CREATE, data)]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect(await attachmentRepository.findOneBy({ id: attId })).toBeNull();
       const victimPull = await pull(tokenB);
       expect(victimPull.body.attachments.map((a: Attachment) => a.id)).not.toContain(attId);
@@ -424,22 +424,22 @@ describe('Sync ownership enforcement (E2E)', () => {
       const own = await push(tokenB, [
         change(ChangeObjectType.ATTACHMENT, ownId, ChangeType.CREATE, { ...data, url: 'https://files.example.test/own.pdf' }),
       ]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
     });
 
     it('rejects updating or deleting another user’s attachment; owner delete succeeds', async () => {
       const upd = await push(tokenA, [
         change(ChangeObjectType.ATTACHMENT, attachmentB.id, ChangeType.UPDATE, { url: 'https://evil.example.test/swap.pdf' }),
       ]).expect(200);
-      expect(upd.body).toEqual({ synced: 0, failed: 1 });
+      expect(upd.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await attachmentRepository.findOneBy({ id: attachmentB.id })).url).toBe('https://files.example.test/victim.pdf');
 
       const del = await push(tokenA, [change(ChangeObjectType.ATTACHMENT, attachmentB.id, ChangeType.DELETE)]).expect(200);
-      expect(del.body).toEqual({ synced: 0, failed: 1 });
+      expect(del.body).toMatchObject({ synced: 0, failed: 1 });
       expect(await attachmentRepository.findOneBy({ id: attachmentB.id })).not.toBeNull();
 
       const own = await push(tokenB, [change(ChangeObjectType.ATTACHMENT, attachmentB.id, ChangeType.DELETE)]).expect(200);
-      expect(own.body).toEqual({ synced: 1, failed: 0 });
+      expect(own.body).toMatchObject({ synced: 1, failed: 0 });
       expect(await attachmentRepository.findOneBy({ id: attachmentB.id })).toBeNull();
     });
 
@@ -450,7 +450,7 @@ describe('Sync ownership enforcement (E2E)', () => {
       const res = await push(tokenA, [
         change(ChangeObjectType.ATTACHMENT, attA.id, ChangeType.UPDATE, { ownerId: clientB.id }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await attachmentRepository.findOneBy({ id: attA.id })).ownerId).toBe(clientA.id);
     });
   });
@@ -471,7 +471,7 @@ describe('Sync ownership enforcement (E2E)', () => {
         }),
         change(ChangeObjectType.INVOICE, invoiceB.id, ChangeType.DELETE),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 2, failed: 2 });
+      expect(res.body).toMatchObject({ synced: 2, failed: 2 });
 
       expect((await clientRepository.findOneBy({ id: newClientId })).userId).toBe(userA.id);
       expect(await invoiceItemRepository.findOneBy({ id: newItemId })).not.toBeNull();
@@ -490,7 +490,7 @@ describe('Sync ownership enforcement (E2E)', () => {
           total: 1,
         }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       const after = await invoiceRepository.findOneBy({ id: invoiceB.id });
       expect(after.userId).toBe(userB.id);
       expect(after.clientId).toBe(clientB.id);
@@ -508,7 +508,7 @@ describe('Sync ownership enforcement (E2E)', () => {
           lineTotal: 0,
         }),
       ]).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       const after = await invoiceItemRepository.findOneBy({ id: itemB.id });
       expect(after.invoiceId).toBe(invoiceB.id);
       expect(after.description).toBe('Victim Item');
@@ -530,7 +530,7 @@ describe('Sync ownership enforcement (E2E)', () => {
       expect(client.userId).toBe(userA.id);
 
       // Positive control: the plain column changes in the same changes were applied
-      expect(res.body).toEqual({ synced: 3, failed: 0 });
+      expect(res.body).toMatchObject({ synced: 3, failed: 0 });
       expect(invoice.notes).toBe('via relation');
       expect(item.description).toBe('via relation');
       expect(client.name).toBe('via relation');
@@ -571,13 +571,13 @@ describe('Sync ownership enforcement (E2E)', () => {
     it('accepts a well-formed push from the mobile client', async () => {
       const newId = uuidv4();
       const res = await push(tokenA, [change(ChangeObjectType.CLIENT, newId, ChangeType.CREATE, { name: 'Via prod pipe' })], prodApp).expect(200);
-      expect(res.body).toEqual({ synced: 1, failed: 0 });
+      expect(res.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await clientRepository.findOneBy({ id: newId })).userId).toBe(userA.id);
     });
 
     it('still enforces ownership', async () => {
       const res = await push(tokenA, [change(ChangeObjectType.CLIENT, clientB.id, ChangeType.UPDATE, { name: 'pwned' })], prodApp).expect(200);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await clientRepository.findOneBy({ id: clientB.id })).name).toBe('Victim Client');
     });
 

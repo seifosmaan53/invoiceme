@@ -342,11 +342,16 @@ describe('Sync push contract (E2E)', () => {
       const clientId = uuidv4();
       await push(tokenA, [change(ChangeObjectType.CLIENT, clientId, ChangeType.CREATE, { name: 'Acme' }, uuidv4())]);
       // name is NOT NULL: the update fails in the database.
+      const changeId = uuidv4();
       const res = await push(tokenA, [
-        change(ChangeObjectType.CLIENT, clientId, ChangeType.UPDATE, { name: null, email: 'x@example.test' }, uuidv4()),
+        change(ChangeObjectType.CLIENT, clientId, ChangeType.UPDATE, { name: null, email: 'x@example.test' }, changeId),
       ]);
       expect(res.body.results[0].status).toBe('failed');
       expect(await clientRepository.findOneByOrFail({ id: clientId })).toMatchObject({ name: 'Acme', email: null });
+      // The failed change is still recorded, unapplied, for the audit log and a later retry.
+      expect(await deviceChangeRepository.findOneByOrFail({ userId: userA.id, changeId })).toMatchObject({
+        synced: false,
+      });
     });
   });
 

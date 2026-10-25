@@ -1,9 +1,10 @@
+import { isDeepStrictEqual } from 'util';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, MoreThan } from 'typeorm';
+import { Repository, In, MoreThan, EntityManager } from 'typeorm';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsArray, IsEnum, IsNotEmpty, IsObject, IsOptional, IsString, ValidateNested } from 'class-validator';
+import { IsArray, IsEnum, IsNotEmpty, IsObject, IsOptional, IsString, IsUUID, ValidateNested } from 'class-validator';
 import { DeviceChange, ChangeType, ChangeObjectType } from '../entities/device-change.entity';
 import { Client } from '../entities/client.entity';
 import { Invoice } from '../entities/invoice.entity';
@@ -24,9 +25,10 @@ export class SyncOwnershipError extends Error {}
 
 /**
  * Change object format for sync
- * Matches: {object_type, object_id, change_type, data, device_id, updated_at}
+ * Matches: {change_id?, object_type, object_id, change_type, data, device_id, updated_at}
  */
 export interface ChangeObject {
+  change_id?: string;
   object_type: ChangeObjectType;
   object_id: string;
   change_type: ChangeType;
@@ -36,6 +38,17 @@ export interface ChangeObject {
 }
 
 export class ChangeObjectDto {
+  @ApiProperty({
+    description:
+      'Optional idempotency key, unique per change on the device. A change_id is applied at most once per user; ' +
+      'resending it returns status "duplicate". Omit only for old clients (no replay protection).',
+    example: '0f8fad5b-d9cb-469f-a165-70867728950e',
+    required: false,
+  })
+  @IsOptional()
+  @IsUUID()
+  change_id?: string;
+
   @ApiProperty({ description: 'Type of object (client, invoice, etc.)', example: 'client' })
   @IsEnum(ChangeObjectType)
   object_type: ChangeObjectType;
@@ -77,6 +90,30 @@ export class SyncPushDto {
   changes: ChangeObject[];
 }
 
+/**
+ * - applied: applied by this request.
+ * - duplicate: this change_id was already applied earlier; not applied again.
+ * - failed: not applied (rejected or invalid). Resending it retries it.
+ */
+export type ChangeStatus = 'applied' | 'duplicate' | 'failed';
+
+export interface ChangeResult {
+  /** Position of the change in the request's `changes` array. */
+  index: number;
+  change_id: string | null;
+  object_type: ChangeObjectType;
+  object_id: string;
+  status: ChangeStatus;
+}
+
+export interface SyncPushResponse {
+  /** applied + duplicate. Kept for clients that only read the counts. */
+  synced: number;
+  failed: number;
+  /** One entry per change, in request order. */
+  results: ChangeResult[];
+}
+
 export interface SyncPullResponse {
   clients: Client[];
   invoices: Invoice[];
@@ -102,44 +139,135 @@ export class SyncService {
 
   /**
    * Push changes from mobile device to server
-   * Accepts array of changes in format: {object_type, object_id, change_type, data, device_id, updated_at}
+   * Accepts array of changes in format: {change_id?, object_type, object_id, change_type, data, device_id, updated_at}
    *
    * The owner of every created or modified record is always `userId` (the
    * authenticated user). Changes that target or reference another user's data
    * are not applied and are counted in `failed`.
+   *
+   * Changes are processed in array order, each in its own transaction, and a
+   * failure does not stop the rest of the batch. See docs/SYNC-CONTRACT.md.
    */
-  async pushChanges(userId: string, syncPushDto: SyncPushDto): Promise<{ synced: number; failed: number }> {
-    const deviceId = syncPushDto.deviceId;
-    let syncedCount = 0;
-    let failedCount = 0;
+  async pushChanges(userId: string, syncPushDto: SyncPushDto): Promise<SyncPushResponse> {
+    const results: ChangeResult[] = [];
 
-    // Process each change
-    for (const changeObj of syncPushDto.changes) {
+    for (const [index, changeObj] of syncPushDto.changes.entries()) {
+      let status: ChangeStatus;
       try {
-        // Create device change record
-        const change = this.deviceChangeRepository.create({
-          userId,
-          deviceId: changeObj.device_id || deviceId,
-          objectType: changeObj.object_type,
-          objectId: changeObj.object_id,
-          changeJson: changeObj.data,
-          changeType: changeObj.change_type,
-        });
-
-        await this.deviceChangeRepository.save(change);
-
-        // Process the change immediately
-        await this.processChange(change, userId);
-        change.synced = true;
-        await this.deviceChangeRepository.save(change);
-        syncedCount++;
+        status = await this.pushChange(userId, syncPushDto.deviceId, changeObj);
       } catch (error) {
         console.error(`Error processing change ${changeObj.object_id}:`, error);
-        failedCount++;
+        status = 'failed';
       }
+      results.push({
+        index,
+        change_id: changeObj.change_id ?? null,
+        object_type: changeObj.object_type,
+        object_id: changeObj.object_id,
+        status,
+      });
     }
 
-    return { synced: syncedCount, failed: failedCount };
+    const failed = results.filter((result) => result.status === 'failed').length;
+    return { synced: results.length - failed, failed, results };
+  }
+
+  /**
+   * Record and apply one change in a single transaction.
+   *
+   * The device_changes row is kept even when applying fails (the change is
+   * rolled back to a savepoint), so it stays `synced = false` and a resend of
+   * the same change_id applies it then. A change_id that is already applied
+   * is answered as duplicate without touching any record.
+   */
+  private async pushChange(userId: string, deviceId: string, changeObj: ChangeObject): Promise<ChangeStatus> {
+    return this.deviceChangeRepository.manager.transaction(async (manager) => {
+      // Changes to the same object run one after another, whatever request
+      // they arrive in, so concurrent writes cannot lose each other's fields.
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+        `sync:${changeObj.object_type}:${changeObj.object_id}`,
+      ]);
+
+      const change = await this.recordChange(manager, userId, deviceId, changeObj);
+      if (!change) {
+        return 'failed';
+      }
+      if (change.synced) {
+        return 'duplicate';
+      }
+
+      await manager.query('SAVEPOINT sync_apply');
+      try {
+        await this.bindTo(manager).processChange(change, userId);
+      } catch (error) {
+        await manager.query('ROLLBACK TO SAVEPOINT sync_apply');
+        console.error(`Error processing change ${changeObj.object_id}:`, error);
+        return 'failed';
+      }
+      await manager.update(DeviceChange, change.id, { synced: true });
+      return 'applied';
+    });
+  }
+
+  /**
+   * The device_changes row for this change, locked for the transaction.
+   * Without a change_id a new row is written every time (old clients).
+   * With one, an existing row for the same user and change_id is reused; it
+   * must describe the same change, otherwise null is returned (rejected).
+   */
+  private async recordChange(
+    manager: EntityManager,
+    userId: string,
+    deviceId: string,
+    changeObj: ChangeObject,
+  ): Promise<DeviceChange | null> {
+    const repository = manager.getRepository(DeviceChange);
+    const values = {
+      userId,
+      changeId: changeObj.change_id ?? null,
+      deviceId: changeObj.device_id || deviceId,
+      objectType: changeObj.object_type,
+      objectId: changeObj.object_id,
+      changeJson: changeObj.data,
+      changeType: changeObj.change_type,
+    };
+
+    if (!changeObj.change_id) {
+      const change = repository.create(values);
+      await repository.save(change);
+      return change;
+    }
+
+    // A concurrent insert of the same change_id waits on the unique index here.
+    await repository.createQueryBuilder().insert().values(values).orIgnore().execute();
+    const change = await repository.findOne({
+      where: { userId, changeId: changeObj.change_id },
+      lock: { mode: 'pessimistic_write' },
+    });
+    const sameChange =
+      change.objectType === changeObj.object_type &&
+      change.objectId === changeObj.object_id &&
+      change.changeType === changeObj.change_type &&
+      isDeepStrictEqual(change.changeJson, changeObj.data);
+    if (!sameChange) {
+      console.error(`Change ${changeObj.change_id} was already recorded with different contents`);
+      return null;
+    }
+    return change;
+  }
+
+  /**
+   * This service with its repositories bound to `manager`, so that the
+   * process*Change methods below run inside the caller's transaction.
+   */
+  private bindTo(manager: EntityManager): this {
+    return Object.assign(Object.create(this), {
+      deviceChangeRepository: manager.getRepository(DeviceChange),
+      clientRepository: manager.getRepository(Client),
+      invoiceRepository: manager.getRepository(Invoice),
+      invoiceItemRepository: manager.getRepository(InvoiceItem),
+      attachmentRepository: manager.getRepository(Attachment),
+    });
   }
 
   /**

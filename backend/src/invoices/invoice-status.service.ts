@@ -70,7 +70,7 @@ export class InvoiceStatusService {
                 clientName: invoice.client?.name || 'Unknown',
                 amount: parseFloat(invoice.total.toString()),
                 currency: invoice.currency,
-                dueDate: invoice.dueDate ? invoice.dueDate.toISOString().split('T')[0] : undefined,
+                dueDate: invoice.dueDate ? new Date(invoice.dueDate).toISOString().split('T')[0] : undefined,
               });
             }
           } catch (error) {

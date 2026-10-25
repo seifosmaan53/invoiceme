@@ -824,8 +824,9 @@ export class InvoicesController {
       status: invoice.status,
       clientName: invoice.client?.name || '',
       clientEmail: invoice.client?.email || '',
-      issueDate: invoice.issueDate.toISOString().split('T')[0],
-      dueDate: invoice.dueDate ? invoice.dueDate.toISOString().split('T')[0] : '',
+      // date columns come back from Postgres as 'YYYY-MM-DD' strings
+      issueDate: new Date(invoice.issueDate).toISOString().split('T')[0],
+      dueDate: invoice.dueDate ? new Date(invoice.dueDate).toISOString().split('T')[0] : '',
       currency: invoice.currency,
       subtotal: invoice.subtotal.toString(),
       taxTotal: invoice.taxTotal.toString(),

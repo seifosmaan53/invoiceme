@@ -36,12 +36,26 @@ jobs:
           cache: 'npm'
           cache-dependency-path: backend/package-lock.json
 
+      # backend/.puppeteerrc.cjs skips Puppeteer's Chrome download (no
+      # variable needed); the next step fails if a browser was downloaded.
+      # Every unit/E2E test mocks PdfService; real PDFs are rendered by the
+      # container smoke test below and by the update-bundle workflow.
       - name: Install dependencies
+        timeout-minutes: 10
         run: npm ci
-        env:
-          # Every test mocks PdfService, so no real Chromium is ever launched.
-          # Skipping the ~170MB Puppeteer download keeps install fast and reliable.
-          PUPPETEER_SKIP_DOWNLOAD: 'true'
+
+      - name: No Puppeteer browser was downloaded
+        run: |
+          if [ -d "$HOME/.cache/puppeteer" ]; then
+            ls -R "$HOME/.cache/puppeteer" | head -20
+            echo "npm ci downloaded a browser: is backend/.puppeteerrc.cjs missing?"
+            exit 1
+          fi
+
+      # Fails only on findings above scripts/lint-baseline.json (the existing
+      # debt is recorded there, not fixed); `npm run lint` shows everything.
+      - name: Lint (no new findings)
+        run: npm run lint:ci
 
       - name: Unit tests
         run: npm test
@@ -98,6 +112,60 @@ jobs:
             sudo apt-get install -y --no-install-recommends poppler-utils
           fi
           backend/test/container/pdf-smoke.sh invoiceme-backend:ci
+
+  # verify-restore.e2e-spec.ts skips its Unix-socket identity test unless a
+  # PostgreSQL socket exists on the machine running Jest. The backend job's
+  # service container exposes TCP only, so this job uses the PostgreSQL
+  # preinstalled on the runner (socket in /var/run/postgresql) and fails if
+  # that test is skipped instead of run.
+  restore-socket:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Start the runner's PostgreSQL
+        run: |
+          sudo systemctl start postgresql.service
+          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres'"
+          # Ubuntu's default for the local socket is peer authentication (OS
+          # user must be postgres); use the password instead, like over TCP.
+          hba=$(sudo -u postgres psql -Atc 'show hba_file')
+          sudo sed -i '1i local all postgres scram-sha-256' "$hba"
+          sudo -u postgres psql -c 'select pg_reload_conf()'
+          sudo -u postgres psql -c 'CREATE DATABASE invoiceme_test'
+          ls -la /var/run/postgresql/
+          PGPASSWORD=postgres psql -h /var/run/postgresql -U postgres -d invoiceme_test -Atc 'select 1'
+
+      - name: Install dependencies
+        timeout-minutes: 10
+        run: npm ci
+
+      - name: Restore verification E2E, including the Unix-socket test
+        env:
+          DB_TEST_HOST: localhost
+          DB_TEST_PORT: 5432
+          DB_TEST_USERNAME: postgres
+          DB_TEST_PASSWORD: postgres
+          DB_TEST_DATABASE: invoiceme_test
+        run: |
+          npx jest --config ./test/jest-e2e.json --runInBand --json --outputFile="$RUNNER_TEMP/verify-restore.json" test/verify-restore.e2e-spec.ts
+          node -e '
+            const r = require(process.argv[1]);
+            const all = r.testResults.flatMap((s) => s.assertionResults);
+            const t = all.find((a) => a.title === "identifies the same database over a Unix socket and over TCP");
+            console.log(`${all.length} tests; socket test: ${t ? t.status : "not found"}`);
+            if (!t || t.status !== "passed") process.exit(1);
+          ' "$RUNNER_TEMP/verify-restore.json"
 
   mobile:
     runs-on: ubuntu-latest

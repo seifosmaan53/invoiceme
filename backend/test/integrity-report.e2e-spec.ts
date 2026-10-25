@@ -10,7 +10,7 @@ import { InvoiceItem } from '../src/entities/invoice-item.entity';
 import { Attachment, AttachmentOwnerType } from '../src/entities/attachment.entity';
 import { RecurringInvoice, RecurrenceFrequency } from '../src/entities/recurring-invoice.entity';
 import { DeviceChange, ChangeType, ChangeObjectType } from '../src/entities/device-change.entity';
-import { runIntegrityReport, formatReport, INTEGRITY_CHECKS } from '../src/integrity/integrity-report';
+import { runIntegrityReport, formatReport, INTEGRITY_CHECKS, connectionConfig, QueryClient } from '../src/integrity/integrity-report';
 
 /**
  * The integrity report against the disposable test database, seeded with one
@@ -168,6 +168,48 @@ describe('Integrity report (read-only, E2E)', () => {
     // the connection is usable again (the failed transaction was rolled back)
     expect((await pg.query('SELECT 1 AS one')).rows[0].one).toBe(1);
   });
+
+  it('its connection defaults every transaction to read-only (second guard)', async () => {
+    const before = await snapshot();
+    const ro = new PgClient(
+      connectionConfig({ DB_HOST: db.host, DB_PORT: String(db.port), DB_USERNAME: db.username, DB_PASSWORD: db.password, DB_DATABASE: db.database }),
+    );
+    await ro.connect();
+    try {
+      expect((await ro.query('SHOW default_transaction_read_only')).rows[0].default_transaction_read_only).toBe('on');
+      await expect(ro.query(`UPDATE users SET name = 'changed'`)).rejects.toThrow(/read-only transaction/);
+    } finally {
+      await ro.end();
+    }
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it('refuses to run any check when the transaction does not report read-only, and rolls back', async () => {
+    const sent: string[] = [];
+    const fake: QueryClient = {
+      query: async (sql: string) => {
+        sent.push(sql);
+        return { rows: sql === 'SHOW transaction_read_only' ? [{ transaction_read_only: 'off' }] : [] };
+      },
+    };
+    await expect(runIntegrityReport(fake)).rejects.toThrow(/not read-only/);
+    expect(sent).toEqual(['BEGIN', 'SET TRANSACTION READ ONLY', 'SHOW transaction_read_only', 'ROLLBACK']);
+  });
+
+  it('npm run integrity:report exits 2 when it cannot run, without printing the password', () => {
+    const secret = 'integrity-secret-do-not-print';
+    const res = spawnSync('npm', ['run', '-s', 'integrity:report'], {
+      cwd: path.join(__dirname, '..'),
+      env: {
+        ...env,
+        INTEGRITY_DATABASE_URL: `postgres://${db.username}:${secret}@${db.host}:${db.port}/integrity_missing_db_${Date.now()}`,
+      },
+      encoding: 'utf8',
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('Integrity report failed');
+    expect(res.stdout + res.stderr).not.toContain(secret);
+  }, 60000);
 
   it('npm run integrity:report exits 1 with findings and 0 on a clean database', async () => {
     const run = () =>

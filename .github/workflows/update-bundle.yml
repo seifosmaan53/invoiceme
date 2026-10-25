@@ -68,11 +68,13 @@ jobs:
           cd ../site/invoiceme-backend-*
           sha256sum -c --quiet SHA256SUMS
           cat VERSION.txt
-          echo "BUNDLE=$PWD" >> "$GITHUB_ENV"
+          # Mixed form (D:/a/...) on Windows: usable by bash and as a step working-directory.
+          if command -v cygpath > /dev/null; then echo "BUNDLE=$(cygpath -m "$PWD")"; else echo "BUNDLE=$PWD"; fi >> "$GITHUB_ENV"
 
       - name: Start PostgreSQL (Linux)
         if: runner.os == 'Linux'
         run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils > /dev/null
           sudo systemctl start postgresql.service
           sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres'"
           echo "PGHOST=localhost" >> "$GITHUB_ENV"

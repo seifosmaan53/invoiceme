@@ -654,7 +654,7 @@ describe('InvoicesController', () => {
       expect(result.notes).toBe(updateInvoiceDto.notes);
     });
 
-    it('should propagate NotFoundException/ForbiddenException', async () => {
+    it('should propagate NotFoundException (missing or another user\'s invoice)', async () => {
       const id = 'non-existent-id';
       const updateInvoiceDto: UpdateInvoiceDto = {
         notes: 'Updated notes',

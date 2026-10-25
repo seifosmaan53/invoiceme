@@ -26,7 +26,6 @@ import {
   ApiOkResponse,
   ApiCreatedResponse,
   ApiNotFoundResponse,
-  ApiForbiddenResponse,
   ApiNoContentResponse,
 } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
@@ -186,8 +185,7 @@ export class InvoicesController {
     description: 'Get a single invoice by ID',
     type: Invoice,
   })
-  @ApiNotFoundResponse({ description: 'Invoice not found' })
-  @ApiForbiddenResponse({ description: 'Access denied' })
+  @ApiNotFoundResponse({ description: 'Invoice not found (also returned for another user\'s invoice)' })
   async findOne(@Param('id') id: string, @CurrentUser() user: any, @Req() req: any) {
     const invoice = await this.invoicesService.findOne(id, user.userId);
     await this.auditService.log(
@@ -209,7 +207,7 @@ export class InvoicesController {
     type: Invoice,
   })
   @ApiResponse({ status: 400, description: 'Validation error' })
-  @ApiNotFoundResponse({ description: 'Client not found' })
+  @ApiNotFoundResponse({ description: 'Client not found (also returned for another user\'s client)' })
   async create(@Body() createInvoiceDto: CreateInvoiceDto, @CurrentUser() user: any, @Req() req: any) {
     const invoice = await this.invoicesService.create(createInvoiceDto, user.userId);
     await this.auditService.log(
@@ -230,8 +228,7 @@ export class InvoicesController {
     description: 'Update an existing invoice',
     type: Invoice,
   })
-  @ApiNotFoundResponse({ description: 'Invoice not found' })
-  @ApiForbiddenResponse({ description: 'Access denied' })
+  @ApiNotFoundResponse({ description: 'Invoice not found (also returned for another user\'s invoice)' })
   async update(
     @Param('id') id: string,
     @Body() updateInvoiceDto: UpdateInvoiceDto,
@@ -256,8 +253,7 @@ export class InvoicesController {
   @ApiNoContentResponse({
     description: 'Archive (soft-delete) an invoice',
   })
-  @ApiNotFoundResponse({ description: 'Invoice not found' })
-  @ApiForbiddenResponse({ description: 'Access denied' })
+  @ApiNotFoundResponse({ description: 'Invoice not found (also returned for another user\'s invoice)' })
   async delete(@Param('id') id: string, @CurrentUser() user: any, @Req() req: any) {
     const invoice = await this.invoicesService.findOne(id, user.userId);
     await this.invoicesService.archive(id, user.userId);
@@ -277,8 +273,7 @@ export class InvoicesController {
     description: 'Invoice duplicated successfully',
     type: Invoice,
   })
-  @ApiNotFoundResponse({ description: 'Invoice not found' })
-  @ApiForbiddenResponse({ description: 'Access denied' })
+  @ApiNotFoundResponse({ description: 'Invoice not found (also returned for another user\'s invoice)' })
   async duplicate(@Param('id') id: string, @CurrentUser() user: any, @Req() req: any) {
     const originalInvoice = await this.invoicesService.findOne(id, user.userId);
     const duplicatedInvoice = await this.invoicesService.duplicateInvoice(id, user.userId);

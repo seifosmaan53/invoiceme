@@ -4,6 +4,12 @@ import { Repository } from 'typeorm';
 import { InvoiceTemplate } from '../entities/invoice-template.entity';
 import { CreateInvoiceDto } from '../invoices/dto/invoice.dto';
 
+// Fields a template update may change. The PATCH body is untyped, so the
+// global ValidationPipe does not filter it; without this list a body could set
+// userId (move the template to another account) or id (overwrite another
+// user's template on save).
+const UPDATABLE_FIELDS = ['name', 'description', 'type', 'currency', 'defaultDueDays', 'lineItemsJson', 'notes'] as const;
+
 @Injectable()
 export class InvoiceTemplatesService {
   constructor(
@@ -64,7 +70,11 @@ export class InvoiceTemplatesService {
     updates: Partial<InvoiceTemplate>,
   ): Promise<InvoiceTemplate> {
     const template = await this.findOne(id, userId);
-    Object.assign(template, updates);
+    for (const field of UPDATABLE_FIELDS) {
+      if (updates[field] !== undefined) {
+        (template as any)[field] = updates[field];
+      }
+    }
     return this.templateRepository.save(template);
   }
 

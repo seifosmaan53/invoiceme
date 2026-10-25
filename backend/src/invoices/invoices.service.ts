@@ -11,6 +11,11 @@ import { PaginatedResponse, PaginationDto } from '../core/dto/pagination.dto';
 import { NotificationService } from '../core/services/notification.service';
 import { InvoiceNumberFormatterService } from '../core/services/invoice-number-formatter.service';
 
+// Shown when an invoice still points at a client of another user (a row
+// written before ownership was enforced). That client is never returned.
+export const FOREIGN_CLIENT_MESSAGE =
+  'This invoice is linked to a client that is not in your account. Assign one of your clients first.';
+
 @Injectable()
 export class InvoicesService {
   constructor(
@@ -267,6 +272,8 @@ export class InvoicesService {
         throw new NotFoundException('Client not found');
       }
       invoice.clientId = updateInvoiceDto.clientId;
+      // The eagerly loaded relation wins over clientId on save; replace it too.
+      invoice.client = client;
     }
 
     const queryRunner = this.dataSource.createQueryRunner();
@@ -366,6 +373,8 @@ export class InvoicesService {
 
   async duplicateInvoice(id: string, userId: string): Promise<Invoice> {
     const originalInvoice = await this.findOne(id, userId);
+    // Copying a legacy cross-owner client link would create a new one.
+    await this.assertClientOwned(originalInvoice.clientId, userId);
 
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
@@ -431,6 +440,7 @@ export class InvoicesService {
     if (estimate.type !== InvoiceType.ESTIMATE) {
       throw new BadRequestException('Only estimates can be converted to invoices');
     }
+    await this.assertClientOwned(estimate.clientId, userId);
 
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
@@ -486,6 +496,14 @@ export class InvoicesService {
       throw error;
     } finally {
       await queryRunner.release();
+    }
+  }
+
+  /** Archived clients are allowed: an invoice may outlive its client. */
+  private async assertClientOwned(clientId: string, userId: string): Promise<void> {
+    const owned = await this.clientRepository.exists({ where: { id: clientId, userId } });
+    if (!owned) {
+      throw new BadRequestException(FOREIGN_CLIENT_MESSAGE);
     }
   }
 

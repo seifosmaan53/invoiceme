@@ -122,7 +122,10 @@ export class ClientsService {
   async update(id: string, updateClientDto: UpdateClientDto, userId: string): Promise<Client> {
     const client = await this.findOne(id, userId);
 
-    const { tags, address_json, ...rest } = updateClientDto;
+    // id/userId/user are not in the DTO, but only the main.ts pipe rejects
+    // them; never let a body re-target the save or move the client.
+    const { tags, address_json, id: _id, userId: _userId, user: _user, ...rest } = updateClientDto as UpdateClientDto &
+      Partial<Pick<Client, 'id' | 'userId' | 'user'>>;
     Object.assign(client, rest);
     
     if (address_json !== undefined) {

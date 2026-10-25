@@ -33,7 +33,10 @@ export function withoutForeignClient<T extends { userId: string; client?: Client
 /**
  * Ids (of the given type) that another user changed through sync. Only applied
  * changes (synced = true) count: rejected pushes are logged too, and must not
- * let anyone hide a victim's records.
+ * let anyone hide a victim's records. Deletes don't count either: a delete
+ * never plants a record, and a delete of an id that does not exist is applied
+ * as a no-op, so counting it would hide the owner's record if that id is
+ * created later (e.g. a device re-pushing a deleted item).
  */
 export async function idsChangedByOtherUser(
   db: DataSource | EntityManager,
@@ -47,6 +50,7 @@ export async function idsChangedByOtherUser(
        FROM device_changes
       WHERE object_type::text = $1
         AND synced = true
+        AND change_type::text <> 'delete'
         AND user_id::text <> $2
         AND object_id::text = ANY($3::text[])`,
     [objectType, ownerId, ids],

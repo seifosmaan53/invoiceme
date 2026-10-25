@@ -482,6 +482,45 @@ describe('Historical cross-owner rows (E2E)', () => {
       expect(att.body.map((x: Attachment) => x.id)).toContain(attachmentB.id);
     });
 
+    it('another user’s applied no-op delete of an unused id does not hide the owner’s record created later with that id', async () => {
+      const itemId = '7f1c2a90-1b6e-4c3d-9a55-000000000a01';
+      const attachmentId = '7f1c2a90-1b6e-4c3d-9a55-000000000a02';
+      const push = (token: string, changes: any[]) =>
+        api().post('/api/v1/sync/push').set('Authorization', `Bearer ${token}`).send({ deviceId: 'dev', changes });
+
+      // A deletes ids that do not exist yet: applied as no-ops (synced = true)
+      const del = await push(tokenA, [
+        { object_type: 'invoice_item', object_id: itemId, change_type: 'delete', data: {} },
+        { object_type: 'attachment', object_id: attachmentId, change_type: 'delete', data: {} },
+      ]);
+      expect(del.body).toEqual({ synced: 2, failed: 0 });
+
+      // B later creates its own records with those ids
+      const create = await push(tokenB, [
+        {
+          object_type: 'invoice_item',
+          object_id: itemId,
+          change_type: 'create',
+          data: { invoiceId: invoiceB.id, description: 'B re-created line', quantity: 1, unitPrice: 5, lineTotal: 5 },
+        },
+        {
+          object_type: 'attachment',
+          object_id: attachmentId,
+          change_type: 'create',
+          data: { ownerType: 'invoice', ownerId: invoiceB.id, url: 'https://files.example.test/b-later.pdf', filename: 'b-later.pdf' },
+        },
+      ]);
+      expect(create.body).toEqual({ synced: 2, failed: 0 });
+
+      const res = await api().get(`/api/v1/invoices/${invoiceB.id}`).set('Authorization', `Bearer ${tokenB}`).expect(200);
+      expect(res.body.items.map((i: InvoiceItem) => i.id)).toContain(itemId);
+      const att = await api().get(`/api/v1/invoices/${invoiceB.id}/attachments`).set('Authorization', `Bearer ${tokenB}`).expect(200);
+      expect(att.body.map((x: Attachment) => x.id)).toContain(attachmentId);
+      const pull = await api().get('/api/v1/sync/pull').set('Authorization', `Bearer ${tokenB}`).expect(200);
+      expect(pull.body.invoiceItems.map((i: InvoiceItem) => i.id)).toContain(itemId);
+      expect(pull.body.attachments.map((x: Attachment) => x.id)).toContain(attachmentId);
+    });
+
     it('attachment list omits attachments with another user’s sync history; own attachment listed', async () => {
       const b = await api().get(`/api/v1/invoices/${invoiceB.id}/attachments`).set('Authorization', `Bearer ${tokenB}`).expect(200);
       expect(b.body.map((x: Attachment) => x.id)).toEqual([attachmentB.id]);

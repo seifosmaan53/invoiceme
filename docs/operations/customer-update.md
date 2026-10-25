@@ -40,6 +40,7 @@ Answer these before preparing anything installation-specific:
 | Encryption key | whether `ENCRYPTION_KEY` is set in `.env` (yes/no only, never the value) |
 | User accounts | how many accounts exist (`SELECT count(*) FROM users;`). With one account the cross-account flaw had no possible victim; with several it may have |
 | Browser for PDFs | whether Chrome or Chromium is installed, and its path |
+| `NODE_ENV` and TLS | the `NODE_ENV` value, and whether a TLS proxy or certificate fronts the backend. With `NODE_ENV=production` the backend redirects plain HTTP to HTTPS and refuses non-GET requests over HTTP, so the update must keep the same arrangement or the clients stop working |
 
 ## 2. A read-only database role
 
@@ -172,14 +173,19 @@ On the customer machine, in the maintenance window:
 
 Build the image from the commit to ship (`docker build -t invoiceme-backend:<commit> ./backend`).
 For a machine without internet access, transfer it with `docker save` /
-`docker load` and verify the archive's checksum. Keep the existing volumes and
+`docker load` and verify the archive's checksum. The image's health check calls
+`/api/v1/health` (earlier images called `/api/health`, which does not exist, so
+their health status was never meaningful). Keep the existing volumes and
 `.env`; follow steps 2, 6 and 7 above with the container in place of the
 folder. The image already contains Chromium and sets
 `PUPPETEER_EXECUTABLE_PATH`.
 
 ## 6. Verify after the update
 
-1. `GET /api/health` returns 200.
+1. `GET /api/v1/health` returns 200 with `"database":"connected"`. With
+   `NODE_ENV=production` the backend redirects plain-HTTP requests to HTTPS
+   (301) and refuses non-GET requests over HTTP, so call it the way clients
+   reach it (through the TLS proxy, or over HTTPS).
 2. The operator signs in with their own account, opens existing invoices and
    clients, and renders one invoice PDF.
 3. The integrity report returns 0, or the same findings as before the update

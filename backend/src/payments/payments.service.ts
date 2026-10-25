@@ -5,6 +5,7 @@ import { Payment, PaymentStatus } from '../entities/payment.entity';
 import { Invoice, InvoiceStatus } from '../entities/invoice.entity';
 import { NotificationService } from '../core/services/notification.service';
 import { User } from '../entities/user.entity';
+import { ownedClient } from '../core/utils/cross-owner.util';
 
 @Injectable()
 export class PaymentsService {
@@ -89,7 +90,7 @@ export class PaymentsService {
             userName: user.name,
             invoiceNumber: payment.invoice.number,
             invoiceId: payment.invoice.id,
-            clientName: payment.invoice.client?.name || 'Unknown',
+            clientName: ownedClient(payment.invoice)?.name || 'Unknown',
             amount: parseFloat(payment.amount.toString()),
             currency: payment.currency,
           });

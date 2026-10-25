@@ -81,9 +81,23 @@ jobs:
       - name: Build
         run: npm run build
 
+      # Timeouts turn a stalled network fetch into a failure instead of a hang.
       - name: Build Docker image
         working-directory: .
+        timeout-minutes: 20
         run: docker build -t invoiceme-backend:ci ./backend
+
+      # Renders a synthetic invoice PDF inside the image through the real
+      # PdfService/PdfCacheService and Alpine's Chromium, then validates it.
+      - name: Container PDF smoke test
+        working-directory: .
+        timeout-minutes: 10
+        run: |
+          if ! command -v pdfinfo >/dev/null || ! command -v pdftotext >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends poppler-utils
+          fi
+          backend/test/container/pdf-smoke.sh invoiceme-backend:ci
 
   mobile:
     runs-on: ubuntu-latest

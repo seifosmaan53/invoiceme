@@ -353,6 +353,12 @@ Create a new invoice or estimate.
 
 Get a specific invoice.
 
+`client` is `null` when the invoice's `clientId` refers to a client of another
+user (possible only in rows written before ownership checks existed; see
+`docs/security/2026-10-25-historical-cross-owner.md`). The list behaves the
+same way, and `POST /invoices/:id/pdf` and `/send` return 400 for such an
+invoice until it is re-pointed to one of the user's own clients.
+
 **Response (200 OK):**
 ```json
 {
@@ -480,7 +486,8 @@ Create Stripe PaymentIntent for invoice.
 
 #### POST /sync/push
 
-Push pending changes from mobile device.
+Push pending changes from mobile device. Full semantics (ownership, failures,
+retries, deletes, conflicts): [SYNC-CONTRACT.md](SYNC-CONTRACT.md).
 
 **Request Body:**
 ```json
@@ -488,12 +495,14 @@ Push pending changes from mobile device.
   "deviceId": "device-uuid-here",
   "changes": [
     {
-      "objectType": "invoice",
-      "objectId": "123e4567-e89b-12d3-a456-426614174000",
-      "changeJson": {
+      "object_type": "invoice",
+      "object_id": "123e4567-e89b-12d3-a456-426614174000",
+      "change_type": "update",
+      "data": {
         "status": "sent"
       },
-      "changeType": "update"
+      "device_id": "device-uuid-here",
+      "updated_at": "2024-01-01T00:00:00.000Z"
     }
   ]
 }
@@ -502,9 +511,13 @@ Push pending changes from mobile device.
 **Response (200 OK):**
 ```json
 {
-  "synced": 1
+  "synced": 1,
+  "failed": 0
 }
 ```
+
+Changes that target or reference another user's data are not applied and are
+counted in `failed`.
 
 #### GET /sync/pull
 

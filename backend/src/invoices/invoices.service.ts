@@ -10,6 +10,13 @@ import { CreateInvoiceDto, UpdateInvoiceDto } from './dto/invoice.dto';
 import { PaginatedResponse, PaginationDto } from '../core/dto/pagination.dto';
 import { NotificationService } from '../core/services/notification.service';
 import { InvoiceNumberFormatterService } from '../core/services/invoice-number-formatter.service';
+import { ChangeObjectType } from '../entities/device-change.entity';
+import { ownedClient, withoutForeignClient, withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
+
+// Shown when an invoice still points at a client of another user (a row
+// written before ownership was enforced). That client is never returned.
+export const FOREIGN_CLIENT_MESSAGE =
+  'This invoice is linked to a client that is not in your account. Assign one of your clients first.';
 
 @Injectable()
 export class InvoicesService {
@@ -45,9 +52,11 @@ export class InvoicesService {
     const skip = (page - 1) * limit;
     const searchTerm = (search || pagination?.search || '').trim().toLowerCase();
 
-    // Always load client relation for list view to display client names
+    // Always load client relation for list view to display client names.
+    // Only join the owner's client: legacy rows may point at another user's
+    // client, which must neither be returned nor be matched by the search.
     const queryBuilder = this.invoiceRepository.createQueryBuilder('invoice')
-      .leftJoinAndSelect('invoice.client', 'client')
+      .leftJoinAndSelect('invoice.client', 'client', 'client.userId = invoice.userId')
       .where('invoice.userId = :userId', { userId })
       .andWhere('invoice.deletedAt IS NULL');
 
@@ -141,13 +150,14 @@ export class InvoicesService {
             where: { id: invoice.id },
             relations: ['client'],
           });
-          if (invoiceWithClient?.client) {
+          const client = invoiceWithClient && ownedClient(invoiceWithClient);
+          if (client) {
             await this.notificationService.notifyInvoicePaid({
               userEmail: user.email,
               userName: user.name,
               invoiceNumber: invoiceWithClient.number,
               invoiceId: invoiceWithClient.id,
-              clientName: invoiceWithClient.client.name,
+              clientName: client.name,
               amount: parseFloat(invoiceWithClient.total.toString()),
               currency: invoiceWithClient.currency,
             });
@@ -160,7 +170,20 @@ export class InvoicesService {
     }
   }
 
+  /**
+   * The invoice for display (responses, PDF, email). A client or line item
+   * that belongs to another user is left out; see cross-owner.util.ts.
+   * Not for saving: use findOwned() when the entity will be written back.
+   */
   async findOne(id: string, userId: string): Promise<Invoice> {
+    const invoice = withoutForeignClient(await this.findOwned(id, userId));
+    if (invoice.items) {
+      invoice.items = await withoutForeignSyncHistory(this.dataSource, ChangeObjectType.INVOICE_ITEM, invoice.items, userId);
+    }
+    return invoice;
+  }
+
+  private async findOwned(id: string, userId: string): Promise<Invoice> {
     const invoice = await this.invoiceRepository.findOne({
       where: { id, deletedAt: null },
       relations: ['client', 'items'],
@@ -257,7 +280,7 @@ export class InvoicesService {
   }
 
   async update(id: string, updateInvoiceDto: UpdateInvoiceDto, userId: string): Promise<Invoice> {
-    const invoice = await this.findOne(id, userId);
+    const invoice = await this.findOwned(id, userId);
 
     if (updateInvoiceDto.clientId) {
       const client = await this.clientRepository.findOne({
@@ -267,6 +290,8 @@ export class InvoicesService {
         throw new NotFoundException('Client not found');
       }
       invoice.clientId = updateInvoiceDto.clientId;
+      // The eagerly loaded relation wins over clientId on save; replace it too.
+      invoice.client = client;
     }
 
     const queryRunner = this.dataSource.createQueryRunner();
@@ -359,13 +384,15 @@ export class InvoicesService {
   }
 
   async archive(id: string, userId: string): Promise<void> {
-    const invoice = await this.findOne(id, userId);
+    const invoice = await this.findOwned(id, userId);
     invoice.deletedAt = new Date();
     await this.invoiceRepository.save(invoice);
   }
 
   async duplicateInvoice(id: string, userId: string): Promise<Invoice> {
     const originalInvoice = await this.findOne(id, userId);
+    // Copying a legacy cross-owner client link would create a new one.
+    await this.assertClientOwned(originalInvoice.clientId, userId);
 
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
@@ -431,6 +458,7 @@ export class InvoicesService {
     if (estimate.type !== InvoiceType.ESTIMATE) {
       throw new BadRequestException('Only estimates can be converted to invoices');
     }
+    await this.assertClientOwned(estimate.clientId, userId);
 
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
@@ -486,6 +514,14 @@ export class InvoicesService {
       throw error;
     } finally {
       await queryRunner.release();
+    }
+  }
+
+  /** Archived clients are allowed: an invoice may outlive its client. */
+  private async assertClientOwned(clientId: string, userId: string): Promise<void> {
+    const owned = await this.clientRepository.exists({ where: { id: clientId, userId } });
+    if (!owned) {
+      throw new BadRequestException(FOREIGN_CLIENT_MESSAGE);
     }
   }
 
@@ -589,11 +625,12 @@ export class InvoicesService {
    * Get all invoices for export (no pagination)
    */
   async findAllForExport(userId: string): Promise<Invoice[]> {
-    return this.invoiceRepository.find({
+    const invoices = await this.invoiceRepository.find({
       where: { userId, deletedAt: null },
       relations: ['client'],
       order: { issueDate: 'DESC' },
     });
+    return invoices.map(withoutForeignClient);
   }
 
   async getDashboardStats(userId: string): Promise<{

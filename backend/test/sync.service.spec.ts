@@ -15,10 +15,15 @@ describe('SyncService', () => {
   let mockInvoiceItemRepository: any;
   let mockAttachmentRepository: any;
 
+  // SyncService only applies fields that are real entity columns
+  const metadata = (...columns: string[]) => ({ columns: columns.map((propertyName) => ({ propertyName })) });
+
   beforeEach(async () => {
     mockDeviceChangeRepository = {
       create: jest.fn(),
       save: jest.fn(),
+      // device_changes lookup for records another user changed (none here)
+      manager: { query: jest.fn().mockResolvedValue([]) },
     };
 
     mockClientRepository = {
@@ -26,6 +31,9 @@ describe('SyncService', () => {
       findOne: jest.fn(),
       save: jest.fn(),
       create: jest.fn(),
+      insert: jest.fn(),
+      exists: jest.fn(),
+      metadata: metadata('id', 'userId', 'name', 'email', 'phone', 'deletedAt'),
     };
 
     mockInvoiceRepository = {
@@ -110,12 +118,7 @@ describe('SyncService', () => {
       });
 
       mockClientRepository.findOne.mockResolvedValue(null);
-      mockClientRepository.create.mockReturnValue({
-        id: 'client-id',
-        userId: 'user-id',
-        ...changes[0].data,
-      });
-      mockClientRepository.save.mockResolvedValue({ id: 'client-id' });
+      mockClientRepository.insert.mockResolvedValue({ identifiers: [{ id: 'client-id' }] });
 
       const result = await service.pushChanges('user-id', {
         deviceId: 'device-id',
@@ -126,6 +129,69 @@ describe('SyncService', () => {
       expect(result.failed).toBe(0);
       expect(mockDeviceChangeRepository.create).toHaveBeenCalled();
       expect(mockDeviceChangeRepository.save).toHaveBeenCalledTimes(2); // Create and update synced status
+      expect(mockClientRepository.findOne).toHaveBeenCalledWith({ where: { id: 'client-id', userId: 'user-id' } });
+      expect(mockClientRepository.insert).toHaveBeenCalledWith({
+        name: 'Test Client',
+        email: 'test@example.com',
+        id: 'client-id',
+        userId: 'user-id',
+      });
+    });
+
+    it('should never take the owner from change data', async () => {
+      const changes = [
+        {
+          object_type: ChangeObjectType.CLIENT,
+          object_id: 'client-id',
+          change_type: ChangeType.CREATE,
+          data: { name: 'Test Client', userId: 'other-user-id', id: 'other-id' },
+          device_id: 'device-id',
+          updated_at: '2024-01-01T00:00:00Z',
+        },
+      ];
+
+      mockDeviceChangeRepository.create.mockReturnValue({
+        userId: 'user-id',
+        objectType: ChangeObjectType.CLIENT,
+        objectId: 'client-id',
+        changeJson: changes[0].data,
+        changeType: ChangeType.CREATE,
+      });
+      mockClientRepository.findOne.mockResolvedValue(null);
+
+      const result = await service.pushChanges('user-id', { deviceId: 'device-id', changes });
+
+      expect(result).toEqual({ synced: 1, failed: 0 });
+      expect(mockClientRepository.insert).toHaveBeenCalledWith({ name: 'Test Client', id: 'client-id', userId: 'user-id' });
+    });
+
+    it('should count a DELETE of another user\'s client as failed', async () => {
+      const changes = [
+        {
+          object_type: ChangeObjectType.CLIENT,
+          object_id: 'client-id',
+          change_type: ChangeType.DELETE,
+          data: {},
+          device_id: 'device-id',
+          updated_at: '2024-01-01T00:00:00Z',
+        },
+      ];
+
+      mockDeviceChangeRepository.create.mockReturnValue({
+        userId: 'user-id',
+        objectType: ChangeObjectType.CLIENT,
+        objectId: 'client-id',
+        changeJson: {},
+        changeType: ChangeType.DELETE,
+      });
+      mockClientRepository.findOne.mockResolvedValue(null); // not visible to this user
+      mockClientRepository.exists.mockResolvedValue(true); // but exists for someone else
+      mockClientRepository.metadata.tableName = 'clients';
+
+      const result = await service.pushChanges('user-id', { deviceId: 'device-id', changes });
+
+      expect(result).toEqual({ synced: 0, failed: 1 });
+      expect(mockClientRepository.save).not.toHaveBeenCalled();
     });
 
     it('should handle failed changes gracefully', async () => {

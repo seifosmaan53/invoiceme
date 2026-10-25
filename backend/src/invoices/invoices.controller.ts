@@ -30,7 +30,7 @@ import {
   ApiNoContentResponse,
 } from '@nestjs/swagger';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { InvoicesService } from './invoices.service';
+import { InvoicesService, FOREIGN_CLIENT_MESSAGE } from './invoices.service';
 import { PdfService } from '../core/services/pdf.service';
 import { S3Service } from '../core/services/s3.service';
 import { StripeService } from '../core/services/stripe.service';
@@ -55,6 +55,8 @@ import { AuditAction, AuditResource } from '../entities/audit-log.entity';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Attachment } from '../entities/attachment.entity';
+import { ChangeObjectType } from '../entities/device-change.entity';
+import { withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
 import { PaginationDto } from '../core/dto/pagination.dto';
 import { sanitizeFilename } from '../core/utils/sanitize.util';
 import { Res } from '@nestjs/common';
@@ -316,6 +318,12 @@ export class InvoicesController {
   async send(@Param('id') id: string, @CurrentUser() user: any, @Req() req: any) {
     const invoice = await this.invoicesService.findOne(id, user.userId);
 
+    // findOne() leaves out a client of another user (legacy row): refuse
+    // rather than email or render it.
+    if (!invoice.client) {
+      throw new BadRequestException(FOREIGN_CLIENT_MESSAGE);
+    }
+
     // Validate invoice can be sent
     if (!invoice.client?.email) {
       throw new BadRequestException('Client email is required to send invoice');
@@ -506,7 +514,13 @@ export class InvoicesController {
       },
     });
 
-    return attachments;
+    // Leave out attachments another user created or re-pointed through sync
+    return withoutForeignSyncHistory(
+      this.attachmentRepository.manager,
+      ChangeObjectType.ATTACHMENT,
+      attachments,
+      user.userId,
+    );
   }
 
   @Post(':id/pdf')
@@ -527,8 +541,10 @@ export class InvoicesController {
         throw new NotFoundException(`Invoice with ID ${id} not found`);
       }
 
+      // findOne() leaves out a client of another user (legacy row): refuse
+      // rather than render the PDF without one.
       if (!invoice.client) {
-        throw new BadRequestException('Invoice must have an associated client');
+        throw new BadRequestException(FOREIGN_CLIENT_MESSAGE);
       }
 
       // Get user info for PDF (with safe defaults)
@@ -824,8 +840,9 @@ export class InvoicesController {
       status: invoice.status,
       clientName: invoice.client?.name || '',
       clientEmail: invoice.client?.email || '',
-      issueDate: invoice.issueDate.toISOString().split('T')[0],
-      dueDate: invoice.dueDate ? invoice.dueDate.toISOString().split('T')[0] : '',
+      // date columns come back from Postgres as 'YYYY-MM-DD' strings
+      issueDate: new Date(invoice.issueDate).toISOString().split('T')[0],
+      dueDate: invoice.dueDate ? new Date(invoice.dueDate).toISOString().split('T')[0] : '',
       currency: invoice.currency,
       subtotal: invoice.subtotal.toString(),
       taxTotal: invoice.taxTotal.toString(),

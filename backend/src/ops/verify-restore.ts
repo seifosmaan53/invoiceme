@@ -39,7 +39,10 @@
  * write counters change during the run.
  *
  * Exit code: 0 = everything compared matches and the source was quiet;
- * 1 = differences, or the source was not quiet (not proven); 2 = could not run.
+ * 1 = differences, or not proven (source not quiet, unreadable objects);
+ * 2 = could not run; 4 = matches except constraint definitions that differ
+ * only in text casts/redundant parentheses: a person must review the listed
+ * pairs, then rerun with VERIFY_ACCEPT_EQUIVALENT=true to get exit 0.
  */
 import { Client as PgClient } from 'pg';
 import { createHash } from 'crypto';
@@ -113,7 +116,8 @@ export interface QueryClient {
 
 const ident = (name: string) => '"' + name.replace(/"/g, '""') + '"';
 
-const CAST = /::"?[a-z_][a-z0-9_]*"?(?: varying| precision| with(?:out)? time zone)?(?:\(\d+(?:,\s*\d+)?\))?(?:\[\])?/gi;
+/** Only casts to text types: those are what a dump round trip rearranges. Casts to other types are kept. */
+const TEXT_CAST = /::(?:text|character varying|varchar|bpchar)(?:\(\d+\))?(?:\[\])?(?![a-z0-9_])/gi;
 const ATOM_PARENS = /(?<![A-Za-z0-9_\]"])\(('(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_]*|\d+(?:\.\d+)?)\)/g;
 
 /** Index of the matching ")" for each "(" (string literals skipped). */
@@ -143,20 +147,25 @@ function dropDoubledParens(s: string): string {
 }
 
 /**
- * A constraint definition with casts and REDUNDANT parentheses removed:
+ * A constraint definition with text casts and REDUNDANT parentheses removed:
  * parentheses around a single literal/identifier/number (not function calls)
  * and doubled parentheses. Parentheses that group operators are kept, so
- * operator precedence still distinguishes two rules.
+ * operator precedence still distinguishes two rules, and casts to non-text
+ * types are kept. String literals are swapped for opaque placeholders first,
+ * so their contents are never changed.
  */
 export function normaliseCheck(text: string): string {
-  let out = text.replace(CAST, '');
+  const literals: string[] = [];
+  let out = text.replace(/'(?:[^']|'')*'/g, (lit) => `L${literals.push(lit) - 1}L`);
+  out = out.replace(TEXT_CAST, '');
   let prev: string;
   do {
     prev = out;
     out = out.replace(ATOM_PARENS, '$1');
     out = dropDoubledParens(out);
   } while (out !== prev);
-  return out.replace(/\s+/g, ' ').trim();
+  out = out.replace(/\s+/g, ' ').trim();
+  return out.replace(/L(\d+)L/g, (_m, i) => literals[Number(i)]);
 }
 
 /** Removes the schema qualifier so that objects in two different schemas compare equal. */
@@ -209,6 +218,7 @@ export async function snapshotSchema(client: QueryClient, schema: string): Promi
       "SET LOCAL datestyle = 'ISO, YMD'",
       "SET LOCAL intervalstyle = 'postgres'",
       'SET LOCAL extra_float_digits = 3',
+      "SET LOCAL lc_monetary = 'C'",
       "SET LOCAL bytea_output = 'hex'",
     ]) {
       await client.query(setting);
@@ -361,13 +371,14 @@ export async function writeCounter(client: QueryClient, schema: string): Promise
 }
 
 /**
- * Identifies a database independently of how we connected (socket, localhost,
- * 127.0.0.1): the server's start time and port plus the database's oid. Two
+ * Identifies a database independently of how we connected (Unix socket,
+ * localhost, 127.0.0.1): the server's start time, its configured port
+ * (current_setting, also set on socket connections) and the database's oid. Two
  * different servers practically never share a start time to the microsecond.
  */
 export async function identity(client: QueryClient): Promise<string> {
   const { rows } = await client.query(
-    `SELECT d.oid::text AS db_oid, inet_server_port() AS port, pg_postmaster_start_time()::text AS started
+    `SELECT d.oid::text AS db_oid, current_setting('port') AS port, pg_postmaster_start_time()::text AS started
        FROM pg_database d WHERE d.datname = current_database()`,
   );
   return JSON.stringify(rows[0]);
@@ -406,7 +417,16 @@ async function main(): Promise<number> {
       quietNote = 'NOT PROVEN: the source recorded writes during verification; stop the application and retry.';
     }
     console.log(formatComparison(result, quietNote));
-    return result.ok && !quietNote ? 0 : 1;
+    if (!result.ok || quietNote) return 1;
+    const equivalents = result.objects.reduce((n, o) => n + o.equivalent.length, 0);
+    if (equivalents > 0 && env.VERIFY_ACCEPT_EQUIVALENT !== 'true') {
+      console.log(
+        `REVIEW NEEDED: ${equivalents} EQUIVALENT definition(s) listed above. After a person has confirmed them, ` +
+          'rerun with VERIFY_ACCEPT_EQUIVALENT=true (exit 4 until then).',
+      );
+      return 4;
+    }
+    return 0;
   } catch (error) {
     console.error(`Restore verification failed: ${error instanceof Error ? error.message : String(error)}`);
     return 2;

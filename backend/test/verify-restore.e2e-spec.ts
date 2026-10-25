@@ -190,6 +190,17 @@ describe('Restore verification (read-only, E2E)', () => {
     }
   });
 
+  const socketDir = ['/tmp', '/var/run/postgresql'].find((d) => fs.existsSync(path.join(d, `.s.PGSQL.${db.port}`)));
+  (socketDir ? it : it.skip)('identifies the same database over a Unix socket and over TCP', async () => {
+    const viaSocket = new PgClient({ ...db, host: socketDir });
+    await viaSocket.connect();
+    try {
+      expect(await identity(viaSocket)).toBe(await identity(ro));
+    } finally {
+      await viaSocket.end();
+    }
+  });
+
   it('normalises the schema qualifier, quoted or not', () => {
     expect(normaliseSchema('CREATE INDEX x ON verify_a.invoices USING btree (id)', 'verify_a')).toBe('CREATE INDEX x ON invoices USING btree (id)');
     expect(normaliseSchema('nextval(\'"verify_a".seq\')', 'verify_a')).toBe("nextval('seq')");

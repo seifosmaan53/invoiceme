@@ -32,6 +32,10 @@ describe('verify-restore comparison', () => {
     ['IS NULL vs IS NOT NULL', "t c CHECK (((x)::text IS NOT NULL OR (y)::text = 'a'::text))", "t c CHECK (((x)::text IS NULL OR (y)::text = 'a'::text))"],
     ['a different value', "t c CHECK ((status)::text = 'a'::text)", "t c CHECK ((status)::text = 'b'::text)"],
     ['a different function', 't c CHECK ((lower(name) = name))', 't c CHECK ((upper(name) = name))'],
+    ['a cast to a different type', 't c CHECK (((code)::integer > 5))', 't c CHECK ((code > 5))'],
+    ['a cast with a different precision', 't c CHECK (((amount)::numeric(10,0) > (0)::numeric))', 't c CHECK (((amount)::numeric(10,2) > (0)::numeric))'],
+    ['a literal containing a cast', "t c CHECK (((v)::text = 'a::int'::text))", "t c CHECK (((v)::text = 'a'::text))"],
+    ['a literal containing parentheses', "t c CHECK (((v)::text = '(b)'::text))", "t c CHECK (((v)::text = 'b'::text))"],
   ])('a genuinely different rule (%s) is a MISMATCH', (_label, a, b) => {
     expect(normaliseCheck(a)).not.toBe(normaliseCheck(b));
     const c = compareSnapshots(snap([a]), snap([b]));

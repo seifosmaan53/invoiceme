@@ -173,7 +173,12 @@ jobs:
           kill "$(cat "$RUNNER_TEMP/backend.pid")"
           "$PGBINDIR/psql" -At -d postgres -c "select pg_terminate_backend(pid) from pg_stat_activity where datname = '$DB' and pid <> pg_backend_pid()" > /dev/null
           sleep 3
-          node dist/ops/verify-restore.js | tee "$RUNNER_TEMP/quiet.txt"
+          # A dump round trip re-prints one CHECK rule: exit 4 (review needed) until a person accepts it.
+          set +e; node dist/ops/verify-restore.js > "$RUNNER_TEMP/quiet.txt"; quiet=$?; set -e
+          cat "$RUNNER_TEMP/quiet.txt"
+          [ "$quiet" = 4 ] && grep -q "^REVIEW NEEDED" "$RUNNER_TEMP/quiet.txt" \
+            || { echo "expected exit 4 (EQUIVALENT definitions to review), got $quiet"; exit 1; }
+          VERIFY_ACCEPT_EQUIVALENT=true node dist/ops/verify-restore.js | tee "$RUNNER_TEMP/quiet.txt"
           grep -q "^OK: all" "$RUNNER_TEMP/quiet.txt"
           grep -qE "\[MATCH\] clients: source 2 rows, restored 2 rows" "$RUNNER_TEMP/quiet.txt"
           grep -qE "\[MATCH\] sequences: source 1, restored 1" "$RUNNER_TEMP/quiet.txt"

@@ -11,7 +11,7 @@ import { Invoice } from '../entities/invoice.entity';
 import { InvoiceItem } from '../entities/invoice-item.entity';
 import { Attachment, AttachmentOwnerType } from '../entities/attachment.entity';
 import { withoutForeignClient, withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
-import { assertValidAttachmentUrl } from '../common/attachment-url';
+import { assertValidAttachmentUrl, withValidAttachmentUrls } from '../common/attachment-url';
 
 /** Fields a device may never set: the primary key comes from object_id, the owner from the JWT. */
 const PROTECTED_FIELDS = ['id', 'userId'];
@@ -322,7 +322,9 @@ export class SyncService {
     );
 
     // Get attachments for invoices and clients
-    const attachments = await withoutForeignSyncHistory(
+    // Historical rows with invalid URLs are left out (stored data unchanged); see common/attachment-url.ts.
+    const attachments = withValidAttachmentUrls(
+      await withoutForeignSyncHistory(
       this.deviceChangeRepository.manager,
       ChangeObjectType.ATTACHMENT,
       await this.attachmentRepository.find({
@@ -333,6 +335,7 @@ export class SyncService {
         order: { createdAt: 'ASC' },
       }),
       userId,
+      ),
     );
 
     return {

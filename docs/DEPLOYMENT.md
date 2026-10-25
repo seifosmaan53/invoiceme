@@ -287,7 +287,7 @@ See `scripts/backup-database.sh` for backup script.
 - [ ] Production database credentials
 - [ ] S3/CDN configuration
 - [ ] Email SMTP configuration
-- [ ] `TRUST_PROXY=true` if behind load balancer
+- [ ] `TRUST_PROXY` set to the load balancer's address/subnet (or `true` for a proxy on the same machine); the proxy must overwrite `X-Forwarded-Proto`/`X-Forwarded-For`
 
 ### Security Settings
 

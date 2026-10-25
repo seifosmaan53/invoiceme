@@ -10,7 +10,7 @@ import * as express from 'express';
 import * as compression from 'compression';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { httpsEnforcement } from './core/https-enforcement';
+import { httpsEnforcement, trustProxySetting } from './core/https-enforcement';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -59,11 +59,13 @@ async function bootstrap() {
     }),
   );
 
-  // Security: Trust proxy (for correct IP detection behind load balancer)
-  const trustProxy = configService.get<string>('TRUST_PROXY') === 'true';
+  // Security: Trust proxy (for correct IP detection behind load balancer).
+  // TRUST_PROXY=true trusts only a proxy on this machine; otherwise name the
+  // proxy's address(es)/subnet(s). See core/https-enforcement.ts.
+  const trustProxy = trustProxySetting(configService.get<string>('TRUST_PROXY'));
   if (trustProxy) {
     const expressApp = app.getHttpAdapter().getInstance();
-    expressApp.set('trust proxy', 1);
+    expressApp.set('trust proxy', trustProxy);
   }
 
   // Security: Rate limiting - Prevent DDoS and brute force attacks
@@ -267,8 +269,11 @@ Access tokens expire. Use \`POST /api/v1/auth/refresh\` with your refresh token 
   }
 
   const port = process.env.API_PORT || 3000;
-  // Listen on all network interfaces (0.0.0.0) to allow mobile app connections
-  await app.listen(port, '0.0.0.0');
+  // Listen on all network interfaces (0.0.0.0) by default to allow mobile app
+  // connections. Behind a proxy on the same machine set API_HOST=127.0.0.1 so
+  // the backend cannot be reached except through the proxy.
+  const host = process.env.API_HOST || '0.0.0.0';
+  await app.listen(port, host);
   console.log(`Application is running on: http://localhost:${port}/api`);
   console.log(`Network accessible at: http://0.0.0.0:${port}/api`);
   if (enableSwagger) {

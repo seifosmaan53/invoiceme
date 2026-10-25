@@ -1,27 +1,44 @@
 import * as express from 'express';
 import * as request from 'supertest';
-import { httpsEnforcement, isLoopback, HEALTH_PATH } from './https-enforcement';
+import { httpsEnforcement, isLoopback, trustProxySetting, HEALTH_PATH } from './https-enforcement';
 
-function appWith(trustProxy: boolean) {
+/** An express app wired like main.ts: TRUST_PROXY parsed, then HTTPS enforcement. */
+function appWith(trustProxyEnv: string | undefined) {
   const app = express();
-  if (trustProxy) app.set('trust proxy', 1);
+  const trust = trustProxySetting(trustProxyEnv);
+  if (trust) app.set('trust proxy', trust);
   app.use(httpsEnforcement());
   app.get(HEALTH_PATH, (_req, res) => res.json({ status: 'ok' }));
-  app.get('/api/v1/invoices', (_req, res) => res.json({ ok: true }));
-  app.post('/api/v1/auth/login', (_req, res) => res.json({ ok: true }));
+  app.get('/api/v1/invoices', (req, res) => res.json({ ok: true, ip: req.ip }));
+  app.post('/api/v1/auth/login', (req, res) => res.json({ ok: true, ip: req.ip }));
   return app;
 }
 
+describe('trustProxySetting', () => {
+  it('maps TRUST_PROXY to an explicit Express trust value', () => {
+    expect(trustProxySetting(undefined)).toBeUndefined();
+    expect(trustProxySetting('')).toBeUndefined();
+    expect(trustProxySetting('false')).toBeUndefined();
+    expect(trustProxySetting('true')).toBe('loopback');
+    expect(trustProxySetting('10.0.0.5')).toBe('10.0.0.5');
+    expect(trustProxySetting('loopback, 192.168.1.0/24')).toBe('loopback, 192.168.1.0/24');
+  });
+
+  it('rejects hop counts, which trust whatever peer connects directly', () => {
+    expect(() => trustProxySetting('1')).toThrow(/hop count/);
+  });
+});
+
 describe('httpsEnforcement', () => {
-  describe('without TRUST_PROXY (trust proxy off)', () => {
-    const app = appWith(false);
+  describe('TRUST_PROXY unset: a direct client (here on loopback) cannot claim HTTPS', () => {
+    const app = appWith(undefined);
 
     it('refuses a plain-HTTP POST', async () => {
       await request(app).post('/api/v1/auth/login').expect(403);
     });
 
-    it('refuses a plain-HTTP POST that claims X-Forwarded-Proto: https (header not trusted)', async () => {
-      // Regression: the previous inline middleware read the header directly and let this through.
+    it('refuses a plain-HTTP POST that claims X-Forwarded-Proto: https', async () => {
+      // Regression: the original inline middleware read the header directly and let this through.
       await request(app).post('/api/v1/auth/login').set('X-Forwarded-Proto', 'https').expect(403);
     });
 
@@ -30,8 +47,14 @@ describe('httpsEnforcement', () => {
       expect(res.headers.location).toMatch(/^https:\/\/.+\/api\/v1\/invoices$/);
     });
 
-    it('serves the health route over plain HTTP to a loopback client', async () => {
+    it('serves the health route to a local client without forwarding headers', async () => {
       await request(app).get(HEALTH_PATH).expect(200, { status: 'ok' });
+    });
+
+    it('does not exempt health requests relayed by a same-machine proxy (forwarding headers present)', async () => {
+      await request(app).get(HEALTH_PATH).set('X-Forwarded-For', '203.0.113.9').expect(301);
+      await request(app).get(HEALTH_PATH).set('X-Forwarded-Proto', 'http').expect(301);
+      await request(app).get(HEALTH_PATH).set('Forwarded', 'for=203.0.113.9').expect(301);
     });
 
     it('does not exempt other methods on the health route', async () => {
@@ -39,23 +62,51 @@ describe('httpsEnforcement', () => {
     });
   });
 
-  describe('with TRUST_PROXY=true (trust proxy 1)', () => {
-    const app = appWith(true);
+  describe('TRUST_PROXY=true (loopback proxy only)', () => {
+    const app = appWith('true');
 
-    it('accepts requests the trusted proxy marks as HTTPS', async () => {
-      await request(app).post('/api/v1/auth/login').set('X-Forwarded-Proto', 'https').expect(200);
-      await request(app).get('/api/v1/invoices').set('X-Forwarded-Proto', 'https').expect(200);
+    it('accepts requests the local proxy marks as HTTPS and takes the client address from it', async () => {
+      const res = await request(app).post('/api/v1/auth/login').set('X-Forwarded-Proto', 'https').set('X-Forwarded-For', '198.51.100.7').expect(200);
+      expect(res.body.ip).toBe('198.51.100.7');
     });
 
-    it('still refuses requests the proxy marks as plain HTTP', async () => {
+    it('uses the value the proxy appended, not one the client sent', async () => {
+      // client sent "https", proxy appended the real scheme "http"
+      await request(app).post('/api/v1/auth/login').set('X-Forwarded-Proto', 'https, http').expect(403);
+      // client sent "http", proxy appended "https"
+      await request(app).post('/api/v1/auth/login').set('X-Forwarded-Proto', 'http, https').expect(200);
+    });
+
+    it('refuses requests the proxy marks as plain HTTP', async () => {
       await request(app).post('/api/v1/auth/login').set('X-Forwarded-Proto', 'http').expect(403);
+    });
+  });
+
+  describe('TRUST_PROXY names a remote proxy: a direct client is not trusted', () => {
+    const app = appWith('10.255.0.1');
+
+    it('ignores X-Forwarded-Proto and X-Forwarded-For from a peer that is not the named proxy', async () => {
+      await request(app).post('/api/v1/auth/login').set('X-Forwarded-Proto', 'https').set('X-Forwarded-For', '8.8.8.8').expect(403);
+      const res = await request(app)
+        .get('/api/v1/invoices')
+        .set('X-Forwarded-Proto', 'https')
+        .set('X-Forwarded-For', '8.8.8.8')
+        .expect(301);
+      expect(res.headers.location).toMatch(/^https:/);
     });
   });
 
   it('redirects a health request from a non-loopback client', () => {
     const redirect = jest.fn();
     const next = jest.fn();
-    const req: any = { secure: false, method: 'GET', path: HEALTH_PATH, originalUrl: HEALTH_PATH, headers: { host: 'pos.local' }, socket: { remoteAddress: '10.0.0.5' } };
+    const req: any = {
+      method: 'GET',
+      path: HEALTH_PATH,
+      originalUrl: HEALTH_PATH,
+      headers: { host: 'pos.local' },
+      socket: { remoteAddress: '10.0.0.5' },
+      app: { get: () => undefined },
+    };
     httpsEnforcement()(req, { redirect } as any, next);
     expect(next).not.toHaveBeenCalled();
     expect(redirect).toHaveBeenCalledWith(301, `https://pos.local${HEALTH_PATH}`);

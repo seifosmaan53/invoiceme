@@ -10,7 +10,7 @@ import { InvoiceItem } from '../src/entities/invoice-item.entity';
 import { Attachment, AttachmentOwnerType } from '../src/entities/attachment.entity';
 import { RecurringInvoice, RecurrenceFrequency } from '../src/entities/recurring-invoice.entity';
 import { DeviceChange, ChangeType, ChangeObjectType } from '../src/entities/device-change.entity';
-import { runIntegrityReport, formatReport, INTEGRITY_CHECKS, connectionConfig, QueryClient } from '../src/integrity/integrity-report';
+import { runIntegrityReport, formatReport, INTEGRITY_CHECKS, connectionConfig, QueryClient, exitCodeFor } from '../src/integrity/integrity-report';
 
 /**
  * The integrity report against the disposable test database, seeded with one
@@ -159,11 +159,15 @@ describe('Integrity report (read-only, E2E)', () => {
     expect(await snapshot()).toEqual(before);
   });
 
-  it('runs in a read-only transaction: a write inside it is refused and rolled back', async () => {
+  it('runs in a read-only transaction: a write inside it is refused, reported NOT CHECKED, and rolled back', async () => {
     const before = await snapshot();
-    await expect(
-      runIntegrityReport(pg, [{ id: 'write', level: 'finding', description: 'write probe', sql: `UPDATE users SET name = 'changed'` }]),
-    ).rejects.toThrow(/read-only transaction/);
+    const report = await runIntegrityReport(pg, [
+      { id: 'write', level: 'finding', description: 'write probe', requires: {}, sql: `UPDATE users SET name = 'changed'` },
+    ]);
+    expect(report.results[0].status).toBe('not_checked');
+    expect(report.results[0].reason).toMatch(/read-only transaction/);
+    // A refused check never counts towards a clean result.
+    expect(exitCodeFor(report)).toBe(3);
     expect(await snapshot()).toEqual(before);
     // the connection is usable again (the failed transaction was rolled back)
     expect((await pg.query('SELECT 1 AS one')).rows[0].one).toBe(1);
@@ -234,7 +238,7 @@ describe('Integrity report (read-only, E2E)', () => {
 
     await truncateAll();
     const clean = run();
-    expect(clean.stdout).toContain('No findings. Nothing was changed.');
+    expect(clean.stdout).toContain('No findings; every check ran. Nothing was changed.');
     expect(clean.status).toBe(0);
   }, 120000);
 });

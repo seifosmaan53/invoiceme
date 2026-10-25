@@ -12,8 +12,18 @@
  * one transaction opened with SET TRANSACTION READ ONLY (verified before any
  * check runs), and the transaction is always rolled back.
  *
- * Exit code: 0 = no findings, 1 = findings that need operator review,
- * 2 = the report could not run.
+ * Schema-aware: each check declares the tables and columns it needs. Before
+ * running, the report reads the live schema (information_schema, read-only)
+ * and marks any check whose requirements are missing as NOT CHECKED. A check
+ * whose query fails is also NOT CHECKED (each check runs under a savepoint).
+ * A database is only reported clean when every finding check actually ran.
+ * The output also includes a schema fingerprint (markers for SQL migrations
+ * 001-017) to help identify an installation's version.
+ *
+ * Exit code: 0 = every check ran, no findings; 1 = findings that need operator
+ * review; 2 = the report could not run at all; 3 = no findings among the checks
+ * that ran, but at least one finding check could NOT run on this schema, so
+ * the database has NOT been verified clean.
  *
  * See docs/security/2026-10-25-historical-cross-owner.md.
  */
@@ -21,10 +31,14 @@ import { Client as PgClient, ClientConfig } from 'pg';
 
 export type CheckLevel = 'finding' | 'info';
 
+/** Tables and the columns of each that a check reads. */
+export type SchemaRequirements = Record<string, string[]>;
+
 export interface IntegrityCheck {
   id: string;
   level: CheckLevel;
   description: string;
+  requires: SchemaRequirements;
   sql: string;
 }
 
@@ -32,13 +46,109 @@ export interface CheckResult {
   id: string;
   level: CheckLevel;
   description: string;
+  status: 'checked' | 'not_checked';
+  /** Why the check did not run (missing tables/columns, or the query error). */
+  reason?: string;
   count: number;
   rows: Record<string, unknown>[];
+}
+
+export interface SchemaFingerprint {
+  /** Migration id (001-017) -> whether its marker is present. */
+  migrations: Record<string, boolean>;
+  /**
+   * How the schema appears to have been created, from index naming: the SQL
+   * migrations create lowercase idx_* indexes; TypeORM synchronize creates
+   * IDX_<hash> indexes. 'unknown' when neither is seen.
+   */
+  origin: 'sql-migrations' | 'typeorm-synchronize' | 'mixed' | 'unknown';
+  /** Present when the schema does not look like InvoiceMe's (e.g. another app's database). */
+  warning?: string;
 }
 
 export interface IntegrityReport {
   results: CheckResult[];
   findingCount: number;
+  /** Finding-level checks that could not run. When > 0 the database is not verified clean. */
+  notCheckedCount: number;
+  schema: SchemaFingerprint;
+}
+
+/** Live schema: table -> set of column names, plus index names. */
+export interface LiveSchema {
+  columns: Map<string, Set<string>>;
+  indexes: Set<string>;
+}
+
+/** Markers for the repository's SQL migrations (backend/migrations/001-017). */
+export const SCHEMA_MARKERS: { migration: string; table: string; column?: string; index?: string }[] = [
+  { migration: '001', table: 'users' },
+  { migration: '002', table: 'clients' },
+  { migration: '003', table: 'invoices' },
+  { migration: '004', table: 'invoice_items' },
+  { migration: '005', table: 'attachments' },
+  { migration: '006', table: 'payments' },
+  { migration: '007', table: 'device_changes' },
+  { migration: '008', table: 'refresh_tokens' },
+  { migration: '009', table: 'password_reset_tokens' },
+  { migration: '010', table: 'audit_logs' },
+  { migration: '011', table: 'clients', column: 'tags_json' },
+  { migration: '012', table: 'invoices', index: 'idx_invoices_issue_date' },
+  { migration: '013', table: 'users', column: 'totp_secret' },
+  { migration: '014', table: 'users', column: 'invoice_number_format' },
+  { migration: '015', table: 'feedback' },
+  { migration: '016', table: 'recurring_invoices' },
+  { migration: '017', table: 'user_settings', column: 'pdf_layout' },
+];
+
+export function missingRequirements(requires: SchemaRequirements, live: LiveSchema): string[] {
+  const missing: string[] = [];
+  for (const [table, columns] of Object.entries(requires)) {
+    const have = live.columns.get(table);
+    if (!have) {
+      missing.push(`table ${table}`);
+      continue;
+    }
+    for (const column of columns) {
+      if (!have.has(column)) missing.push(`${table}.${column}`);
+    }
+  }
+  return missing;
+}
+
+export function fingerprintSchema(live: LiveSchema): SchemaFingerprint {
+  const migrations: Record<string, boolean> = {};
+  for (const m of SCHEMA_MARKERS) {
+    const cols = live.columns.get(m.table);
+    let present = !!cols;
+    if (present && m.column) present = cols!.has(m.column);
+    if (present && m.index) present = live.indexes.has(m.index);
+    migrations[m.migration] = present;
+  }
+  const sqlIdx = live.indexes.has('idx_users_email') || live.indexes.has('idx_clients_user_id');
+  const ormIdx = [...live.indexes].some((n) => /^IDX_[0-9a-f]{20,}$/.test(n));
+  const origin = sqlIdx && ormIdx ? 'mixed' : sqlIdx ? 'sql-migrations' : ormIdx ? 'typeorm-synchronize' : 'unknown';
+  const fp: SchemaFingerprint = { migrations, origin };
+  const invoices = live.columns.get('invoices');
+  if (invoices && !invoices.has('user_id') && invoices.has('userId')) {
+    fp.warning = 'invoices uses camelCase columns ("userId"): this does not look like an InvoiceMe schema (another application\'s database?)';
+  } else if (!invoices && !live.columns.get('users')) {
+    fp.warning = 'no InvoiceMe tables found in the current schema';
+  }
+  return fp;
+}
+
+async function readLiveSchema(client: QueryClient): Promise<LiveSchema> {
+  const cols = await client.query(
+    `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema()`,
+  );
+  const columns = new Map<string, Set<string>>();
+  for (const r of cols.rows) {
+    if (!columns.has(r.table_name)) columns.set(r.table_name, new Set());
+    columns.get(r.table_name)!.add(r.column_name);
+  }
+  const idx = await client.query(`SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()`);
+  return { columns, indexes: new Set(idx.rows.map((r: any) => r.indexname)) };
 }
 
 /** Minimal client surface, so tests can pass a pg.Client. */
@@ -67,9 +177,18 @@ const CHANGE_OWNERS = `
     LEFT JOIN invoices a_inv   ON a.owner_type::text = 'invoice' AND a_inv.id::text = a.owner_id::text
     LEFT JOIN clients a_cli    ON a.owner_type::text = 'client'  AND a_cli.id::text = a.owner_id::text`;
 
+const CHANGE_OWNERS_REQUIRES: SchemaRequirements = {
+      device_changes: ['id', 'object_type', 'object_id', 'change_type', 'user_id', 'synced', 'created_at'],
+      clients: ['id', 'user_id'],
+      invoices: ['id', 'user_id'],
+      invoice_items: ['id', 'invoice_id'],
+      attachments: ['id', 'owner_type', 'owner_id'],
+    };
+
 export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   {
     id: 'invoice_foreign_client',
+    requires: { invoices: ['id', 'user_id', 'client_id', 'created_at'], clients: ['id', 'user_id', 'created_at'] },
     level: 'finding',
     description: "Invoices whose client belongs to a different user",
     sql: `
@@ -83,6 +202,7 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   },
   {
     id: 'recurring_invoice_foreign_client',
+    requires: { recurring_invoices: ['id', 'user_id', 'client_id', 'created_at'], clients: ['id', 'user_id'] },
     level: 'finding',
     description: "Recurring invoices whose client belongs to a different user",
     sql: `
@@ -95,6 +215,7 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   },
   {
     id: 'applied_change_by_other_user',
+    requires: CHANGE_OWNERS_REQUIRES,
     level: 'finding',
     description: 'Applied sync changes (synced = true) made by one user to a record now owned by another user',
     sql: `
@@ -105,6 +226,7 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   },
   {
     id: 'object_changed_by_several_users',
+    requires: CHANGE_OWNERS_REQUIRES,
     level: 'finding',
     description: 'Records (existing or deleted) with applied sync changes from more than one user',
     sql: `
@@ -119,6 +241,7 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   },
   {
     id: 'owner_field_in_change',
+    requires: { device_changes: ['id', 'object_type', 'object_id', 'change_type', 'user_id', 'change_json', 'synced', 'created_at'] },
     level: 'finding',
     description:
       'Sync changes that carried a userId (owner) field; before the ownership fix this moved or planted records',
@@ -132,6 +255,7 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   },
   {
     id: 'relation_repointed_by_sync',
+    requires: { device_changes: ['id', 'object_type', 'object_id', 'change_type', 'user_id', 'change_json', 'synced', 'created_at'] },
     level: 'finding',
     description:
       'Applied sync updates that rewrote a foreign key (clientId, invoiceId, ownerId, ownerType); the previous value is not recorded',
@@ -149,6 +273,7 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   },
   {
     id: 'attachment_without_owner',
+    requires: { attachments: ['id', 'owner_type', 'owner_id', 'created_at'], invoices: ['id'], clients: ['id'] },
     level: 'finding',
     description: 'Attachments whose owner_id matches no invoice/client of its owner_type (owner cannot be determined)',
     sql: `
@@ -161,6 +286,7 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   },
   {
     id: 'rejected_change_by_other_user',
+    requires: CHANGE_OWNERS_REQUIRES,
     level: 'info',
     description: 'Rejected sync changes (synced = false) aimed at a record owned by another user: attempts, no data changed',
     sql: `
@@ -171,6 +297,7 @@ export const INTEGRITY_CHECKS: IntegrityCheck[] = [
   },
   {
     id: 'applied_delete_without_create',
+    requires: CHANGE_OWNERS_REQUIRES,
     level: 'info',
     description:
       'Applied sync deletes of records that no longer exist and that the actor never created through sync (owner unknown)',
@@ -203,13 +330,34 @@ export async function runIntegrityReport(
       throw new Error('Refusing to run: the transaction is not read-only');
     }
 
+    const live = await readLiveSchema(client);
+    const schema = fingerprintSchema(live);
+
     const results: CheckResult[] = [];
     for (const check of checks) {
-      const res = await client.query(check.sql);
-      results.push({ id: check.id, level: check.level, description: check.description, count: res.rows.length, rows: res.rows });
+      const base = { id: check.id, level: check.level, description: check.description };
+      const missing = missingRequirements(check.requires, live);
+      if (missing.length > 0) {
+        results.push({ ...base, status: 'not_checked', reason: `missing ${missing.join(', ')}`, count: 0, rows: [] });
+        continue;
+      }
+      // A failed query aborts a PostgreSQL transaction; the savepoint keeps the
+      // remaining checks running inside the same read-only transaction.
+      await client.query('SAVEPOINT integrity_check');
+      try {
+        const res = await client.query(check.sql);
+        await client.query('RELEASE SAVEPOINT integrity_check');
+        results.push({ ...base, status: 'checked', count: res.rows.length, rows: res.rows });
+      } catch (error) {
+        await client.query('ROLLBACK TO SAVEPOINT integrity_check');
+        const message = error instanceof Error ? error.message : String(error);
+        results.push({ ...base, status: 'not_checked', reason: `query failed: ${message}`, count: 0, rows: [] });
+      }
     }
-    const findingCount = results.filter((r) => r.level === 'finding').reduce((n, r) => n + r.count, 0);
-    return { results, findingCount };
+    const checked = results.filter((r) => r.status === 'checked');
+    const findingCount = checked.filter((r) => r.level === 'finding').reduce((n, r) => n + r.count, 0);
+    const notCheckedCount = results.filter((r) => r.level === 'finding' && r.status === 'not_checked').length;
+    return { results, findingCount, notCheckedCount, schema };
   } finally {
     await client.query('ROLLBACK');
   }
@@ -217,7 +365,19 @@ export async function runIntegrityReport(
 
 export function formatReport(report: IntegrityReport): string {
   const lines: string[] = ['Cross-owner integrity report (read-only)', ''];
+  const present = Object.entries(report.schema.migrations).filter(([, ok]) => ok).map(([m]) => m);
+  const absent = Object.entries(report.schema.migrations).filter(([, ok]) => !ok).map(([m]) => m);
+  lines.push(`Schema markers present: ${present.join(' ') || 'none'}`);
+  lines.push(`Schema markers absent:  ${absent.join(' ') || 'none'}`);
+  lines.push(`Schema origin (from index names): ${report.schema.origin}` +
+    (report.schema.origin === 'typeorm-synchronize' ? ' (marker 012 is index-only and is never present in such schemas)' : ''));
+  if (report.schema.warning) lines.push(`WARNING: ${report.schema.warning}`);
+  lines.push('');
   for (const r of report.results) {
+    if (r.status === 'not_checked') {
+      lines.push(`[NOT CHECKED] ${r.id} - ${r.description} (${r.reason})`);
+      continue;
+    }
     const tag = r.level === 'finding' ? 'FINDING' : 'INFO';
     lines.push(`[${r.count > 0 ? tag : 'OK'}] ${r.id}: ${r.count} - ${r.description}`);
     for (const row of r.rows) {
@@ -225,12 +385,26 @@ export function formatReport(report: IntegrityReport): string {
     }
   }
   lines.push('');
-  lines.push(
-    report.findingCount > 0
-      ? `${report.findingCount} finding row(s) need operator review. Nothing was changed.`
-      : 'No findings. Nothing was changed.',
-  );
+  if (report.findingCount > 0) {
+    lines.push(`${report.findingCount} finding row(s) need operator review. Nothing was changed.`);
+  }
+  if (report.notCheckedCount > 0) {
+    lines.push(
+      `INCOMPLETE: ${report.notCheckedCount} finding check(s) could not run on this schema. ` +
+        'This database has NOT been verified clean. Nothing was changed.',
+    );
+  }
+  if (report.findingCount === 0 && report.notCheckedCount === 0) {
+    lines.push('No findings; every check ran. Nothing was changed.');
+  }
   return lines.join('\n');
+}
+
+/** 1 = findings, 3 = nothing found but not every finding check ran, 0 = verified clean. */
+export function exitCodeFor(report: IntegrityReport): number {
+  if (report.findingCount > 0) return 1;
+  if (report.notCheckedCount > 0) return 3;
+  return 0;
 }
 
 export function connectionConfig(env: NodeJS.ProcessEnv = process.env): ClientConfig {
@@ -258,7 +432,7 @@ async function main(): Promise<number> {
     await client.connect();
     const report = await runIntegrityReport(client);
     console.log(formatReport(report));
-    return report.findingCount > 0 ? 1 : 0;
+    return exitCodeFor(report);
   } catch (error) {
     console.error(`Integrity report failed: ${error instanceof Error ? error.message : String(error)}`);
     return 2;

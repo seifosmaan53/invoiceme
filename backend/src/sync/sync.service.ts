@@ -9,6 +9,7 @@ import { Client } from '../entities/client.entity';
 import { Invoice } from '../entities/invoice.entity';
 import { InvoiceItem } from '../entities/invoice-item.entity';
 import { Attachment, AttachmentOwnerType } from '../entities/attachment.entity';
+import { withoutForeignClient, withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
 
 /** Fields a device may never set: the primary key comes from object_id, the owner from the JWT. */
 const PROTECTED_FIELDS = ['id', 'userId'];
@@ -171,32 +172,39 @@ export class SyncService {
 
     // Push now rejects cross-owner client references, but rows written before
     // that check may still point at another user's client: never embed it.
-    for (const invoice of invoices) {
-      if (invoice.client && invoice.client.userId !== userId) {
-        invoice.client = null;
-      }
-    }
+    invoices.forEach(withoutForeignClient);
 
     // Get invoice IDs for related data
     const invoiceIds = invoices.map((inv) => inv.id);
     const clientIds = clients.map((c) => c.id);
 
-    // Get all invoice items for the returned invoices
-    const invoiceItems = invoiceIds.length > 0
-      ? await this.invoiceItemRepository.find({
-          where: { invoiceId: In(invoiceIds) },
-          order: { createdAt: 'ASC' },
-        })
-      : [];
+    // Get all invoice items for the returned invoices. Items and attachments
+    // another user created or re-pointed through the old push are left out.
+    const invoiceItems = await withoutForeignSyncHistory(
+      this.deviceChangeRepository.manager,
+      ChangeObjectType.INVOICE_ITEM,
+      invoiceIds.length > 0
+        ? await this.invoiceItemRepository.find({
+            where: { invoiceId: In(invoiceIds) },
+            order: { createdAt: 'ASC' },
+          })
+        : [],
+      userId,
+    );
 
     // Get attachments for invoices and clients
-    const attachments = await this.attachmentRepository.find({
-      where: [
-        ...(invoiceIds.length > 0 ? [{ ownerType: 'invoice' as any, ownerId: In(invoiceIds) }] : []),
-        ...(clientIds.length > 0 ? [{ ownerType: 'client' as any, ownerId: In(clientIds) }] : []),
-      ],
-      order: { createdAt: 'ASC' },
-    });
+    const attachments = await withoutForeignSyncHistory(
+      this.deviceChangeRepository.manager,
+      ChangeObjectType.ATTACHMENT,
+      await this.attachmentRepository.find({
+        where: [
+          ...(invoiceIds.length > 0 ? [{ ownerType: 'invoice' as any, ownerId: In(invoiceIds) }] : []),
+          ...(clientIds.length > 0 ? [{ ownerType: 'client' as any, ownerId: In(clientIds) }] : []),
+        ],
+        order: { createdAt: 'ASC' },
+      }),
+      userId,
+    );
 
     return {
       clients,

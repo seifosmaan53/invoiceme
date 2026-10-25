@@ -22,6 +22,8 @@ describe('SyncService', () => {
     mockDeviceChangeRepository = {
       create: jest.fn(),
       save: jest.fn(),
+      // device_changes lookup for records another user changed (none here)
+      manager: { query: jest.fn().mockResolvedValue([]) },
     };
 
     mockClientRepository = {

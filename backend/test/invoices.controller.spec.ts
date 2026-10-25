@@ -99,6 +99,8 @@ describe('InvoicesController', () => {
       create: jest.fn(),
       save: jest.fn(),
       find: jest.fn(),
+      // device_changes lookup for records another user changed (none here)
+      manager: { query: jest.fn().mockResolvedValue([]) },
     };
 
     const mockCsvService = {

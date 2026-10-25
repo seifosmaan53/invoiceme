@@ -5,6 +5,7 @@ import { Repository, LessThan } from 'typeorm';
 import { Invoice, InvoiceStatus } from '../entities/invoice.entity';
 import { NotificationService } from '../core/services/notification.service';
 import { User } from '../entities/user.entity';
+import { ownedClient } from '../core/utils/cross-owner.util';
 
 /**
  * Service to automatically update invoice statuses
@@ -67,7 +68,7 @@ export class InvoiceStatusService {
                 userName: user.name,
                 invoiceNumber: invoice.number,
                 invoiceId: invoice.id,
-                clientName: invoice.client?.name || 'Unknown',
+                clientName: ownedClient(invoice)?.name || 'Unknown',
                 amount: parseFloat(invoice.total.toString()),
                 currency: invoice.currency,
                 dueDate: invoice.dueDate ? new Date(invoice.dueDate).toISOString().split('T')[0] : undefined,

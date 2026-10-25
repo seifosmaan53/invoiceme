@@ -6,6 +6,8 @@ import { Client } from '../../entities/client.entity';
 import { Invoice } from '../../entities/invoice.entity';
 import { AuditLog } from '../../entities/audit-log.entity';
 import { EncryptionService } from './encryption.service';
+import { ChangeObjectType } from '../../entities/device-change.entity';
+import { withoutForeignSyncHistory } from '../utils/cross-owner.util';
 
 @Injectable()
 export class GdprService {
@@ -45,11 +47,22 @@ export class GdprService {
       this.encryptionService.decryptFields(client, ['email', 'phone', 'notes']),
     );
 
-    // Get all invoices
+    // Get all invoices. The export carries only clientId, so the client
+    // relation is not loaded (legacy rows may point at another user's client).
+    // Line items another user added through sync are left out.
     const invoices = await this.invoiceRepository.find({
       where: { userId, deletedAt: null },
-      relations: ['client', 'items'],
+      relations: ['items'],
+      loadEagerRelations: false,
     });
+    for (const invoice of invoices) {
+      invoice.items = await withoutForeignSyncHistory(
+        this.invoiceRepository.manager,
+        ChangeObjectType.INVOICE_ITEM,
+        invoice.items || [],
+        userId,
+      );
+    }
 
     // Get audit logs
     const auditLogs = await this.auditLogRepository.find({

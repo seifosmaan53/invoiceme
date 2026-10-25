@@ -9,9 +9,12 @@
 # builder stage: only src/, tsconfig.json and nest-cli.json, so the entry
 # point is dist/main.js), package.json + package-lock.json, the SQL
 # migrations, env.example, the operations and security docs, VERSION.txt and
-# SHA256SUMS, healthcheck.js and scripts/schema-review.sh. It does NOT contain node_modules: bcrypt is a native module, so
+# SHA256SUMS, healthcheck.js, .puppeteerrc.cjs and scripts/schema-review.sh.
+# It does NOT contain node_modules: bcrypt is a native module, so
 # dependencies are installed on the target machine with
 #   PUPPETEER_SKIP_DOWNLOAD=true npm ci --omit=dev
+# (.puppeteerrc.cjs already skips Puppeteer's browser download; the variable
+# is kept in the documented command as a second guard.)
 # See docs/operations/customer-update.md.
 set -euo pipefail
 
@@ -35,16 +38,17 @@ git archive "$commit" backend docs/operations docs/security docs/SYNC-CONTRACT.m
 # Builder stage (mirrors backend/Dockerfile).
 build="$work/build"
 mkdir -p "$build"
-cp "$work/backend/package.json" "$work/backend/package-lock.json" "$work/backend/tsconfig.json" "$work/backend/nest-cli.json" "$build/"
+cp "$work/backend/package.json" "$work/backend/package-lock.json" "$work/backend/tsconfig.json" "$work/backend/nest-cli.json" "$work/backend/.puppeteerrc.cjs" "$build/"
 cp -R "$work/backend/src" "$build/src"
-(cd "$build" && PUPPETEER_SKIP_DOWNLOAD=true npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null)
+# .puppeteerrc.cjs skips Puppeteer's Chrome download (no timeout; never shipped).
+(cd "$build" && npm ci --no-audit --no-fund >/dev/null && npm run build >/dev/null)
 test -f "$build/dist/main.js" || { echo "Build did not produce dist/main.js" >&2; exit 1; }
 
 name="invoiceme-backend-$short"
 bundle="$work/$name"
 mkdir -p "$bundle/docs"
 cp -R "$build/dist" "$bundle/dist"
-cp "$work/backend/package.json" "$work/backend/package-lock.json" "$work/backend/env.example" "$work/backend/healthcheck.js" "$bundle/"
+cp "$work/backend/package.json" "$work/backend/package-lock.json" "$work/backend/env.example" "$work/backend/healthcheck.js" "$work/backend/.puppeteerrc.cjs" "$bundle/"
 mkdir -p "$bundle/migrations"
 cp "$work"/backend/migrations/*.sql "$bundle/migrations/"
 cp -R "$work/docs/operations" "$work/docs/security" "$bundle/docs/"

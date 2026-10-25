@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { InvoiceTemplate } from '../entities/invoice-template.entity';
@@ -25,16 +25,14 @@ export class InvoiceTemplatesService {
   }
 
   async findOne(id: string, userId: string): Promise<InvoiceTemplate> {
+    // Scoped to the owner: another user's template is answered exactly like a
+    // missing one, so the response does not reveal that the id exists.
     const template = await this.templateRepository.findOne({
-      where: { id },
+      where: { id, userId },
     });
 
     if (!template) {
       throw new NotFoundException('Template not found');
-    }
-
-    if (template.userId !== userId) {
-      throw new ForbiddenException('Access denied');
     }
 
     return template;

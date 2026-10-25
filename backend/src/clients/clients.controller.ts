@@ -8,7 +8,6 @@ import {
   ApiOkResponse,
   ApiCreatedResponse,
   ApiNotFoundResponse,
-  ApiForbiddenResponse,
   ApiNoContentResponse,
 } from '@nestjs/swagger';
 import { ClientsService } from './clients.service';
@@ -107,8 +106,7 @@ export class ClientsController {
     description: 'Get a single client by ID',
     type: Client,
   })
-  @ApiNotFoundResponse({ description: 'Client not found' })
-  @ApiForbiddenResponse({ description: 'Access denied' })
+  @ApiNotFoundResponse({ description: 'Client not found (also returned for another user\'s client)' })
   async findOne(@Param('id') id: string, @CurrentUser() user: any) {
     return this.clientsService.findOne(id, user.userId);
   }
@@ -132,8 +130,7 @@ export class ClientsController {
     description: 'Update an existing client',
     type: Client,
   })
-  @ApiNotFoundResponse({ description: 'Client not found' })
-  @ApiForbiddenResponse({ description: 'Access denied' })
+  @ApiNotFoundResponse({ description: 'Client not found (also returned for another user\'s client)' })
   async update(
     @Param('id') id: string,
     @Body() updateClientDto: UpdateClientDto,
@@ -148,8 +145,7 @@ export class ClientsController {
   @ApiNoContentResponse({
     description: 'Archive (soft-delete) a client',
   })
-  @ApiNotFoundResponse({ description: 'Client not found' })
-  @ApiForbiddenResponse({ description: 'Access denied' })
+  @ApiNotFoundResponse({ description: 'Client not found (also returned for another user\'s client)' })
   async archive(@Param('id') id: string, @CurrentUser() user: any) {
     await this.clientsService.archive(id, user.userId);
   }

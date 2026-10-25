@@ -566,7 +566,13 @@ describe('Historical cross-owner rows (E2E)', () => {
         await paymentRepository.save(
           paymentRepository.create({ invoiceId, providerPaymentId: id, amount: 100, currency: 'USD', status: PaymentStatus.PENDING }),
         );
-        await payments.updatePaymentStatus(id, PaymentStatus.COMPLETED);
+        // As the verified webhook passes it (amount and currency are checked)
+        await payments.updatePaymentStatus(id, PaymentStatus.COMPLETED, {
+          id,
+          amount_received: 10000,
+          currency: 'usd',
+          metadata: { invoice_id: invoiceId },
+        });
       }
       const received = mockNotificationService.notifyPaymentReceived.mock.calls.map((c) => c[0]);
       received.forEach(expectNoVictimData);

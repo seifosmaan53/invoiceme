@@ -9,8 +9,8 @@ import { initSentry } from './core/config/sentry.config';
 import * as express from 'express';
 import * as compression from 'compression';
 import helmet from 'helmet';
-import rateLimit from 'express-rate-limit';
-import { httpsEnforcement, trustProxySetting } from './core/https-enforcement';
+import { applyHttpSecurity } from './core/https-enforcement';
+import { createRateLimiters } from './core/rate-limit';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -20,11 +20,19 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const nodeEnv = configService.get<string>('NODE_ENV') || 'development';
 
-  // Security: Enforce HTTPS in production. X-Forwarded-Proto is honoured only
-  // when TRUST_PROXY=true (see core/https-enforcement.ts).
-  if (nodeEnv === 'production') {
-    app.use(httpsEnforcement());
-    console.log('🔒 HTTPS enforcement enabled');
+  // Security: one trusted-proxy policy (TRUST_PROXY) for req.ip, req.protocol,
+  // req.secure, HTTPS enforcement, rate-limit keys and logs; then, in
+  // production, HTTPS enforcement. Plain-HTTP GETs are redirected only to
+  // PUBLIC_ORIGIN or an allowed TRUSTED_HOSTS entry, otherwise refused.
+  // See core/https-enforcement.ts.
+  const httpSecurity = applyHttpSecurity(app.getHttpAdapter().getInstance(), {
+    NODE_ENV: nodeEnv,
+    TRUST_PROXY: configService.get<string>('TRUST_PROXY'),
+    PUBLIC_ORIGIN: configService.get<string>('PUBLIC_ORIGIN'),
+    TRUSTED_HOSTS: configService.get<string>('TRUSTED_HOSTS'),
+  });
+  if (httpSecurity.enforced) {
+    console.log(`🔒 HTTPS enforcement enabled (plain-HTTP GET redirect: ${httpSecurity.redirect})`);
   }
 
   // Use Winston logger for all NestJS logging
@@ -59,57 +67,16 @@ async function bootstrap() {
     }),
   );
 
-  // Security: Trust proxy (for correct IP detection behind load balancer).
-  // TRUST_PROXY=true trusts only a proxy on this machine; otherwise name the
-  // proxy's address(es)/subnet(s). See core/https-enforcement.ts.
-  const trustProxy = trustProxySetting(configService.get<string>('TRUST_PROXY'));
-  if (trustProxy) {
-    const expressApp = app.getHttpAdapter().getInstance();
-    expressApp.set('trust proxy', trustProxy);
-  }
-
-  // Security: Rate limiting - Prevent DDoS and brute force attacks
-  const rateLimitTtl = parseInt(configService.get<string>('RATE_LIMIT_TTL') || '60', 10);
-  const rateLimitMax = parseInt(configService.get<string>('RATE_LIMIT_MAX') || '100', 10);
-
-  // General API rate limiter
-  app.use(
-    '/api',
-    rateLimit({
-      windowMs: rateLimitTtl * 1000,
-      max: rateLimitMax,
-      message: 'Too many requests from this IP, please try again later.',
-      standardHeaders: true,
-      legacyHeaders: false,
-    }),
-  );
-
-  // Stricter rate limiting for authentication endpoints
-  // More lenient in development mode to prevent blocking during testing
-  const loginRateLimit = nodeEnv === 'development' 
-    ? rateLimit({
-        windowMs: 2 * 60 * 1000, // 2 minutes
-        max: 50, // 50 attempts per 2 minutes (very lenient for dev)
-        message: 'Too many login attempts, please try again later.',
-        skipSuccessfulRequests: true,
-      })
-    : rateLimit({
-        windowMs: 15 * 60 * 1000, // 15 minutes
-        max: 5, // 5 attempts per 15 minutes
-        message: 'Too many login attempts, please try again later.',
-        skipSuccessfulRequests: true,
-      });
-
-  app.use('/api/v1/auth/login', loginRateLimit);
-
-  app.use(
-    '/api/v1/auth/register',
-    rateLimit({
-      windowMs: 60 * 60 * 1000, // 1 hour
-      max: 3, // 3 registrations per hour
-      message: 'Too many registration attempts, please try again later.',
-    }),
-  );
+  // Security: Rate limiting - Prevent DDoS and brute force attacks.
+  // Keyed on the trusted-proxy client address (core/rate-limit.ts).
+  const rateLimiters = createRateLimiters({
+    nodeEnv,
+    ttlSeconds: parseInt(configService.get<string>('RATE_LIMIT_TTL') || '60', 10),
+    max: parseInt(configService.get<string>('RATE_LIMIT_MAX') || '100', 10),
+  });
+  app.use('/api', rateLimiters.api);
+  app.use('/api/v1/auth/login', rateLimiters.login);
+  app.use('/api/v1/auth/register', rateLimiters.register);
 
   // Configure raw body for Stripe webhooks (must be before other middleware)
   app.use('/api/v1/webhooks/stripe', express.raw({ type: 'application/json', limit: '1mb' }));

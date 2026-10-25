@@ -440,6 +440,9 @@ describe('Payments E2E Tests', () => {
           object: {
             id: 'pi_test_123',
             status: 'succeeded',
+            amount: 11000,
+            amount_received: 11000,
+            currency: 'usd',
             metadata: {
               invoice_id: invoice.id,
               user_id: testUser.id,
@@ -617,6 +620,9 @@ describe('Payments E2E Tests', () => {
           object: {
             id: paymentIntentId,
             status: 'succeeded',
+            amount: 11000,
+            amount_received: 11000,
+            currency: 'usd',
             metadata: {
               invoice_id: invoice.id,
               user_id: testUser.id,
@@ -693,6 +699,9 @@ describe('Payments E2E Tests', () => {
           object: {
             id: 'pi_idempotent_123',
             status: 'succeeded',
+            amount: 11000,
+            amount_received: 11000,
+            currency: 'usd',
             metadata: {
               invoice_id: invoice.id,
             },

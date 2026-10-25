@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
 import { StripeService } from '../core/services/stripe.service';
 import { PaymentStatus } from '../entities/payment.entity';
+import Stripe from 'stripe';
 
 @ApiTags('Webhooks')
 @Controller('v1/webhooks')
@@ -30,50 +31,39 @@ export class WebhooksController {
       throw new BadRequestException('Missing stripe-signature header');
     }
 
-    const rawBody = req.rawBody;
-    if (!rawBody) {
+    // NestFactory's rawBody option fills req.rawBody, but main.ts mounts
+    // express.raw() on this route first, which leaves req.rawBody unset and
+    // the untouched bytes in req.body. Never use a re-serialized JSON body.
+    const rawBody = req.rawBody ?? ((req as any).body instanceof Buffer ? ((req as any).body as Buffer) : undefined);
+    if (!rawBody || rawBody.length === 0) {
       throw new BadRequestException('Missing request body');
     }
 
+    let event: Stripe.Event;
     try {
-      // Verify webhook signature
-      const event = this.stripeService.verifyWebhookSignature(
-        rawBody.toString(),
-        signature,
-      );
-
-      // Handle payment intent events
-      if (event.type === 'payment_intent.succeeded') {
-        const paymentIntent = event.data.object as any;
-        
-        console.log(`Payment succeeded: ${paymentIntent.id} for invoice ${paymentIntent.metadata?.invoice_id}`);
-        
-        // Update payment status and invoice
-        await this.paymentsService.updatePaymentStatus(
-          paymentIntent.id,
-          PaymentStatus.COMPLETED,
-          paymentIntent,
-        );
-      } else if (event.type === 'payment_intent.payment_failed') {
-        const paymentIntent = event.data.object as any;
-        
-        console.log(`Payment failed: ${paymentIntent.id} for invoice ${paymentIntent.metadata?.invoice_id}`);
-        
-        // Update payment status
-        await this.paymentsService.updatePaymentStatus(
-          paymentIntent.id,
-          PaymentStatus.FAILED,
-          paymentIntent,
-        );
-      } else {
-        console.log(`Unhandled event type: ${event.type}`);
-      }
-
-      return { received: true };
+      event = this.stripeService.verifyWebhookSignature(rawBody, signature);
     } catch (error) {
       console.error('Webhook error:', error);
       throw new BadRequestException(`Webhook signature verification failed: ${error.message}`);
     }
+
+    // Errors past this point are ours, not the sender's: they surface as 5xx
+    // so Stripe redelivers the event. Redelivery is safe (see updatePaymentStatus).
+    if (event.type === 'payment_intent.succeeded') {
+      const paymentIntent = event.data.object as any;
+      console.log(`Payment succeeded: ${paymentIntent.id} for invoice ${paymentIntent.metadata?.invoice_id}`);
+      const result = await this.paymentsService.updatePaymentStatus(paymentIntent.id, PaymentStatus.COMPLETED, paymentIntent);
+      console.log(`Payment ${paymentIntent.id}: ${result}`);
+    } else if (event.type === 'payment_intent.payment_failed') {
+      const paymentIntent = event.data.object as any;
+      console.log(`Payment failed: ${paymentIntent.id} for invoice ${paymentIntent.metadata?.invoice_id}`);
+      const result = await this.paymentsService.updatePaymentStatus(paymentIntent.id, PaymentStatus.FAILED, paymentIntent);
+      console.log(`Payment ${paymentIntent.id}: ${result}`);
+    } else {
+      console.log(`Unhandled event type: ${event.type}`);
+    }
+
+    return { received: true };
   }
 }
 

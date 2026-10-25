@@ -56,6 +56,7 @@ import { Repository } from 'typeorm';
 import { Attachment } from '../entities/attachment.entity';
 import { ChangeObjectType } from '../entities/device-change.entity';
 import { withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
+import { withValidAttachmentUrls } from '../common/attachment-url';
 import { PaginationDto } from '../core/dto/pagination.dto';
 import { sanitizeFilename } from '../core/utils/sanitize.util';
 import { Res } from '@nestjs/common';
@@ -509,12 +510,15 @@ export class InvoicesController {
       },
     });
 
-    // Leave out attachments another user created or re-pointed through sync
-    return withoutForeignSyncHistory(
-      this.attachmentRepository.manager,
-      ChangeObjectType.ATTACHMENT,
-      attachments,
-      user.userId,
+    // Leave out attachments another user created or re-pointed through sync,
+    // and stored URLs the app must not open (see common/attachment-url.ts)
+    return withValidAttachmentUrls(
+      await withoutForeignSyncHistory(
+        this.attachmentRepository.manager,
+        ChangeObjectType.ATTACHMENT,
+        attachments,
+        user.userId,
+      ),
     );
   }
 
@@ -726,6 +730,7 @@ export class InvoicesController {
   }
 
   @Post(':id/pay')
+  @RequirePermission('write:invoices')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Create Stripe payment intent for an invoice' })
   @ApiResponse({ status: 200, description: 'Payment intent created successfully' })

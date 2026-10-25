@@ -89,7 +89,7 @@ export class StripeService {
     return await this.stripe!.paymentIntents.retrieve(paymentIntentId);
   }
 
-  verifyWebhookSignature(payload: string, signature: string): Stripe.Event {
+  verifyWebhookSignature(payload: string | Buffer, signature: string): Stripe.Event {
     this.ensureAvailable();
 
     if (!this.webhookSecret) {

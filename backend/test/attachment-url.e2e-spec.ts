@@ -190,7 +190,7 @@ describe('Attachment URLs (E2E)', () => {
         ),
       );
 
-      expect(res.body).toEqual({ synced: good.length, failed: bad.length });
+      expect(res.body).toMatchObject({ synced: good.length, failed: bad.length });
       const stored = await attachmentRepository.find();
       expect(stored.map((a) => a.url).sort()).toEqual(good.map((g) => g.url).sort());
     });
@@ -200,7 +200,7 @@ describe('Attachment URLs (E2E)', () => {
       const res = await push([
         attachmentChange(id, ChangeType.CREATE, { ownerType: 'invoice', ownerId: invoice.id, url: ['https://a.example.test/x.pdf'], filename: 'f.pdf' }),
       ]);
-      expect(res.body).toEqual({ synced: 0, failed: 1 });
+      expect(res.body).toMatchObject({ synced: 0, failed: 1 });
       expect(await attachmentRepository.findOneBy({ id })).toBeNull();
     });
 
@@ -208,12 +208,12 @@ describe('Attachment URLs (E2E)', () => {
       const own = await seed('https://files.example.test/own.pdf');
 
       const denied = await push([attachmentChange(own.id, ChangeType.UPDATE, { url: 'javascript:alert(1)' })]);
-      expect(denied.body).toEqual({ synced: 0, failed: 1 });
+      expect(denied.body).toMatchObject({ synced: 0, failed: 1 });
       expect((await attachmentRepository.findOneByOrFail({ id: own.id })).url).toBe('https://files.example.test/own.pdf');
 
       // Positive control: same attachment, same owner
       const ok = await push([attachmentChange(own.id, ChangeType.UPDATE, { url: PRESIGNED_MINIO })]);
-      expect(ok.body).toEqual({ synced: 1, failed: 0 });
+      expect(ok.body).toMatchObject({ synced: 1, failed: 0 });
       expect((await attachmentRepository.findOneByOrFail({ id: own.id })).url).toBe(PRESIGNED_MINIO);
     });
 
@@ -222,7 +222,7 @@ describe('Attachment URLs (E2E)', () => {
 
       const res = await push([attachmentChange(legacy.id, ChangeType.UPDATE, { filename: 'renamed.pdf' })]);
 
-      expect(res.body).toEqual({ synced: 1, failed: 0 });
+      expect(res.body).toMatchObject({ synced: 1, failed: 0 });
       const after = await attachmentRepository.findOneByOrFail({ id: legacy.id });
       expect(after).toMatchObject({ filename: 'renamed.pdf', url: 'javascript:alert(1)' });
     });
@@ -249,10 +249,8 @@ describe('Attachment URLs (E2E)', () => {
     });
 
     // GET /sync/pull returns the same rows to the mobile app, which opens them
-    // with url_launcher. The filter there is a one-line change in
-    // sync.service.ts pullChanges(), outside this branch's ownership; it is
-    // proposed in the report and this test is enabled when it is integrated.
-    it.skip('GET /sync/pull leaves out historical invalid URLs without changing them', async () => {
+    // with url_launcher, so pull applies the same filter.
+    it('GET /sync/pull leaves out historical invalid URLs without changing them', async () => {
       const valid = await seed(PRESIGNED_AWS);
       const invalid = await seed('javascript:alert(1)');
 

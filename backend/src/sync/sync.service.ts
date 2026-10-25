@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, MoreThan } from 'typeorm';
 import { ApiProperty } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import { IsArray, IsEnum, IsNotEmpty, IsObject, IsOptional, IsString, ValidateNested } from 'class-validator';
 import { DeviceChange, ChangeType, ChangeObjectType } from '../entities/device-change.entity';
 import { Client } from '../entities/client.entity';
 import { Invoice } from '../entities/invoice.entity';
@@ -33,29 +35,43 @@ export interface ChangeObject {
 
 export class ChangeObjectDto {
   @ApiProperty({ description: 'Type of object (client, invoice, etc.)', example: 'client' })
+  @IsEnum(ChangeObjectType)
   object_type: ChangeObjectType;
 
   @ApiProperty({ description: 'Unique identifier of the object', example: '123e4567-e89b-12d3-a456-426614174000' })
+  @IsString()
+  @IsNotEmpty()
   object_id: string;
 
   @ApiProperty({ description: 'Type of change (create, update, delete)', example: 'create' })
+  @IsEnum(ChangeType)
   change_type: ChangeType;
 
   @ApiProperty({ description: 'Object data', example: { name: 'Acme Corp', email: 'contact@acme.com' } })
+  @IsObject()
   data: Record<string, any>;
 
   @ApiProperty({ description: 'Device identifier', example: 'device-123' })
+  @IsOptional()
+  @IsString()
   device_id: string;
 
   @ApiProperty({ description: 'Timestamp of the change (ISO 8601)', example: '2025-11-23T10:00:00Z' })
+  @IsOptional()
+  @IsString()
   updated_at: string;
 }
 
 export class SyncPushDto {
   @ApiProperty({ description: 'Unique device identifier', example: 'mobile-device-abc123' })
+  @IsString()
+  @IsNotEmpty()
   deviceId: string;
 
   @ApiProperty({ description: 'Array of changes to sync', type: [ChangeObjectDto] })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ChangeObjectDto)
   changes: ChangeObject[];
 }
 

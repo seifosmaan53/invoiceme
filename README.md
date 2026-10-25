@@ -184,11 +184,12 @@ invoiceme/
 
 Changes merged on 2026-10-25 that an existing installation must account for:
 
-- **Database first.** Apply `backend/migrations/018_add_device_change_change_id.sql` before starting the new server; without it every sync push fails. It is idempotent and refuses to run if existing rows would violate the new index. `docs/operations/customer-update.md` is the full procedure.
-- **HTTPS redirects.** In production, plain-HTTP GETs are redirected only to `PUBLIC_ORIGIN` or a listed `TRUSTED_HOSTS` entry; otherwise they get 403. Health probes still require a real 200.
+- **Database first.** Apply `backend/migrations/018_add_device_change_change_id.sql` before starting the new server; without it every pushed change is reported as failed. It is idempotent and refuses to run if existing rows would violate the new index. `docs/operations/customer-update.md` is the full procedure.
+- **HTTPS redirects.** In production, plain-HTTP GETs are redirected only to `PUBLIC_ORIGIN` or a listed `TRUSTED_HOSTS` entry; otherwise they get 403. Health checks accept only HTTP 200, so point external probes at HTTPS or loopback.
 - **API keys with explicit permissions** need `write:invoices` for `/pay`, duplicate, convert, send, attachment upload and CSV import; `read:invoices` for attachment lists, PDFs and CSV export; `delete:invoices` / `delete:clients` for bulk-archive. JWT logins and keys with no permission list are unaffected.
+- **`TRUST_PROXY=true`** now trusts only a proxy on the same machine (it used to trust any directly connected peer), and hop counts stop startup. A proxy on another machine must be listed by address, or clients get 403. See `docs/operations/customer-update.md`.
 - **Another user's records** return 404 instead of 403.
-- **PDF logos** must be `https` URLs on port 443 serving PNG, JPEG, GIF or WebP up to 1 MiB, without redirects. Other logos (including `http://` and SVG) are left out of the PDF. The server fetches them directly, not through a proxy.
+- **PDF logos** must be `https` URLs on port 443 serving PNG, JPEG, GIF or WebP up to 1 MiB, without redirects. Saving a new `http://`, SVG or otherwise invalid logo URL is rejected with 400; stored values that fail these rules, logos on private addresses, and fetches over 5 s are left out of the PDF. The server fetches them directly, not through a proxy.
 - **Sync clients** may send a `change_id` per change and receive per-change `results[]`; older clients keep working but get no replay protection until they send one. See [docs/SYNC-CONTRACT.md](docs/SYNC-CONTRACT.md).
 
 ---

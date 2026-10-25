@@ -71,7 +71,9 @@ for (const [addr, prefix] of [
   blocked.addSubnet(addr, prefix, 'ipv4');
 }
 for (const [addr, prefix] of [
-  ['::', 128], ['::1', 128], ['64:ff9b::', 96], ['64:ff9b:1::', 48], ['100::', 64], ['2001::', 23],
+  // ::/96 (IPv4-compatible) and ::ffff:0:0:0/96 (SIIT-translated) in any
+  // spelling, in case embeddedIpv4 does not recognise the form.
+  ['::', 96], ['::ffff:0:0:0', 96], ['64:ff9b::', 96], ['64:ff9b:1::', 48], ['100::', 64], ['2001::', 23],
   ['2001:db8::', 32], ['2002::', 16], ['fc00::', 7], ['fe80::', 10], ['fec0::', 10], ['ff00::', 8],
 ] as const) {
   blocked.addSubnet(addr, prefix, 'ipv6');

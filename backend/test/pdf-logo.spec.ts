@@ -64,6 +64,7 @@ describe('isPublicAddress (connect-time policy)', () => {
     '100.100.100.200', '0.0.0.0', '224.0.0.1', '255.255.255.255', '198.18.0.1',
     '::1', '::', '::ffff:127.0.0.1', '::ffff:7f00:1', '::ffff:169.254.169.254', '::127.0.0.1',
     'fd00:ec2::254', 'fc00::1', 'fe80::1', 'ff02::1', '64:ff9b::7f00:1', '2002:7f00:1::1', '2001::1',
+    '::ffff:0:7f00:1', '::0:7f00:1', '::ffff:0:127.0.0.1',
     'not-an-ip',
   ])('refuses %s', (address) => {
     expect(isPublicAddress(address)).toBe(false);

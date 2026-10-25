@@ -32,8 +32,8 @@ ref_db="invoiceme_schema_ref_$(date +%s)"
 # only the database name changes. Requires a postgres:// URL with a database.
 ref_url=$(node -e '
   const u = new URL(process.argv[1]);
-  if (!/^postgres(ql)?:$/.test(u.protocol) || u.pathname.length < 2) {
-    console.error("scratch-server-url must be postgres://user@host:port/database[?options]");
+  if (!/^postgres(ql)?:$/.test(u.protocol) || u.pathname.length < 2 || u.searchParams.has("dbname")) {
+    console.error("scratch-server-url must be postgres://user@host:port/database[?options] (no dbname option)");
     process.exit(2);
   }
   u.pathname = "/" + process.argv[2];

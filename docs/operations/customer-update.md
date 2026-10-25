@@ -139,7 +139,7 @@ timings, and an encrypted backup medium separate from the existing backups.
 
 1. **Stop the backend** (and anything else writing to the database). Confirm
    no client sessions remain:
-   `SELECT count(*) FROM pg_stat_activity WHERE datname = '<database>' AND pid <> pg_backend_pid();`
+   `SELECT count(*) FROM pg_stat_activity WHERE datname = '<database>' AND pid <> pg_backend_pid() AND backend_type = 'client backend';`
 2. **Fresh recovery backup:**
    - database: `pg_dump -Fc -d <database> -f invoiceme-<date>.dump`; if the
      installation created its own roles, `pg_dumpall --globals-only > roles-<date>.sql`
@@ -153,13 +153,17 @@ timings, and an encrypted backup medium separate from the existing backups.
 3. **Prove it while the source is still quiet:** restore into a scratch
    database (`createdb invoiceme_restore_check && pg_restore --no-owner -d invoiceme_restore_check invoiceme-<date>.dump`)
    and run each check below. Every one must exit 0; otherwise stop here, start
-   the backend again unchanged, and investigate.
+   the backend again unchanged, and investigate. `verify-restore` exits 4 when
+   the only differences are constraint definitions shown as EQUIVALENT: a
+   person compares each listed pair (a dump round trip re-prints some `CHECK`
+   rules with text casts rearranged) and, if they are the same rule, reruns it
+   with `VERIFY_ACCEPT_EQUIVALENT=true`.
 
    | What | Tool | It proves | It does not prove |
    |---|---|---|---|
    | Database | `node dist/ops/verify-restore.js` with `VERIFY_SOURCE_URL` (live, read-only role) and `VERIFY_RESTORED_URL` | Every table's rows (count + per-row hashes, from one MVCC snapshot, with output settings pinned), and the schema objects: columns, constraints, indexes, sequence positions, extensions, enum types, views, functions, triggers. Constraint text that differs only in casts/redundant parentheses is shown as EQUIVALENT for review. Reports NOT PROVEN if another session is connected to the source, the source records writes during the run, or the role cannot read a table or sequence | Sequence positions and definitions come from the catalog (they rely on the quiet source, step 1). Roles and passwords, ownership and privileges, anything outside `public` except extensions, files, configuration |
    | Uploaded files | `node dist/ops/verify-files.js <original-mirror> <backup-copy>` | Same relative paths, sizes and SHA-256; symbolic links are reported, not followed | That the mirror was complete at the source (compare the bucket's object count) |
-   | Configuration | `node dist/ops/verify-files.js <live .env> <backed-up .env>` | Identical file, or same keys with identical values (multi-line values included). Values are never printed; only conventional key names are | That the values are correct, only that they are preserved |
+   | Configuration | `node dist/ops/verify-files.js <live .env> <backed-up .env>` | Identical file, or same keys with identical values (multi-line values included). Values are never printed; a key is named only when present in both files with different values, everything else is counted | That the values are correct, only that they are preserved |
    | Roles (if dumped) | review `roles-<date>.sql` | It exists and lists the expected roles | That passwords are usable |
 
 4. **Install the release** (Node installations; Docker: section 6.7):
@@ -173,7 +177,9 @@ timings, and an encrypted backup medium separate from the existing backups.
       - proxy settings, if clients come through a TLS proxy (row 9):
         `TRUST_PROXY` now names the proxy. `true` trusts only a proxy on the
         same machine; a proxy on another machine is named by address or
-        subnet (`TRUST_PROXY=10.0.0.5`). Hop counts are rejected. With a
+        subnet (`TRUST_PROXY=10.0.0.5`). The only accepted values are: absent,
+        `false`, `true`, or addresses/subnets; anything else (`1`, `yes`) now
+        stops the backend at startup, so check this before starting. With a
         same-machine proxy, set `API_HOST=127.0.0.1` so the backend cannot
         be reached except through the proxy. If the backend's port stays
         reachable from the LAN, do not trust that proxy by address range
@@ -198,8 +204,10 @@ timings, and an encrypted backup medium separate from the existing backups.
 1. `node healthcheck.js` in the new folder (inside the container for Docker)
    exits 0. It requires exactly HTTP 200 with `"status":"ok"` and
    `"database":"connected"`; a redirect, another status, other content or a
-   timeout fails. It reads `API_PORT` from the environment or the folder's
-   `.env`. In production the backend answers the health route over plain HTTP
+   timeout fails. It reads `API_PORT` from the environment or the `.env` in
+   its own folder (start the backend from that folder too), and checks
+   `127.0.0.1`, so with `API_HOST` set to a specific LAN address pass the URL:
+   `node healthcheck.js http://<that address>:<port>/api/v1/health`. In production the backend answers the health route over plain HTTP
    only to a local client sending no forwarding headers, so requests relayed
    by a proxy are not exempt.
 2. A staff member signs in with their own account, opens existing invoices

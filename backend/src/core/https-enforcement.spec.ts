@@ -121,3 +121,20 @@ describe('httpsEnforcement', () => {
     expect(isLoopback(undefined)).toBe(false);
   });
 });
+
+describe('known flaws (trusted-proxy policy and redirect target)', () => {
+  it('req.secure agrees with HTTPS enforcement for a multi-value X-Forwarded-Proto', async () => {
+    // client sent "https", the trusted same-machine proxy appended the real "http"
+    const app = express();
+    app.set('trust proxy', trustProxySetting('true'));
+    app.get('/probe', (req, res) => res.json({ secure: req.secure, protocol: req.protocol }));
+    const res = await request(app).get('/probe').set('X-Forwarded-Proto', 'https, http').expect(200);
+    expect(res.body).toEqual({ secure: false, protocol: 'http' });
+  });
+
+  it('never builds a redirect Location from an arbitrary Host header', async () => {
+    const app = appWith(undefined);
+    const res = await request(app).get('/api/v1/invoices').set('Host', 'evil.example');
+    expect(res.headers.location ?? '').not.toContain('evil.example');
+  });
+});

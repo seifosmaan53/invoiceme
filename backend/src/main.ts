@@ -10,6 +10,7 @@ import * as express from 'express';
 import * as compression from 'compression';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
+import { httpsEnforcement } from './core/https-enforcement';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -19,28 +20,10 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const nodeEnv = configService.get<string>('NODE_ENV') || 'development';
 
-  // Security: Enforce HTTPS in production
+  // Security: Enforce HTTPS in production. X-Forwarded-Proto is honoured only
+  // when TRUST_PROXY=true (see core/https-enforcement.ts).
   if (nodeEnv === 'production') {
-    app.use((req, res, next) => {
-      // Check if request is secure (HTTPS) or forwarded as secure (behind proxy)
-      const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-      
-      if (!isSecure && req.method !== 'GET') {
-        // Reject non-GET requests over HTTP
-        return res.status(403).json({
-          error: 'HTTPS required',
-          message: 'This application requires HTTPS. Please use HTTPS to access the API.',
-        });
-      }
-      
-      // Redirect GET requests to HTTPS
-      if (!isSecure && req.method === 'GET') {
-        const httpsUrl = `https://${req.headers.host}${req.url}`;
-        return res.redirect(301, httpsUrl);
-      }
-      
-      next();
-    });
+    app.use(httpsEnforcement());
     console.log('🔒 HTTPS enforcement enabled');
   }
 

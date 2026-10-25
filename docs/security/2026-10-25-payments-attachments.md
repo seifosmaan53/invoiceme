@@ -42,7 +42,7 @@ authentication other than the webhook.
 
 | Path / property | Evidence | Class |
 |---|---|---|
-| `/pay` on another user's invoice | 403, no Stripe call, no row; owner control 200 (`refuses to create a payment for another user's invoice`). Killed by removing the owner check in `findOwned` (mutant P2 below) | verified acceptable |
+| `/pay` on another user's invoice | 403 when written; 404 after the non-disclosure change (fix/proxy-host) was merged. No Stripe call, no row; owner control 200 (`refuses to create a payment for another user's invoice`). Killed by removing the owner check in `findOwned` (mutant P2 below) | verified acceptable |
 | `/pay` body/query `invoiceId`, `userId`, `amount`, `currency` | ignored: the controller reads only `:id` and the JWT/API-key user. Metadata, row and amount come from the owned invoice | verified acceptable |
 | `/pay` with an API key lacking `write:invoices` | **was 200**, now 403 `API key does not have required permission: write:invoices`. Unrestricted (`[]`) and `write:invoices` keys, and JWT, still work | proven flaw → fixed (`2187f1a`) |
 | Webhook signature on the raw body | **under `main.ts`, every signed event got 400 "Missing request body"** (see §2.1). Now verified on the untouched bytes. Wrong secret, tampered body and a 600 s old timestamp are rejected with a signature error. The same payload correctly signed is accepted | proven flaw → fixed (`79481ab`) |

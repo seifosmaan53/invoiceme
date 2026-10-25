@@ -261,7 +261,7 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       const denied = await request(app.getHttpServer())
         .post(`/api/v1/invoices/${invoiceB.id}/pay`)
         .set('Authorization', `Bearer ${tokenA}`);
-      expect(denied.status).toBe(403);
+      expect(denied.status).toBe(404);
       expect(createPaymentIntent).not.toHaveBeenCalled();
       expect(await paymentRepository.countBy({ invoiceId: invoiceB.id })).toBe(0);
 
@@ -313,7 +313,7 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       expect(await paymentRepository.count()).toBe(3);
 
       // A permitted key still cannot reach another user's invoice
-      await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceB.id}/pay`).set('X-API-Key', allKey).expect(403);
+      await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceB.id}/pay`).set('X-API-Key', allKey).expect(404);
       expect(await paymentRepository.countBy({ invoiceId: invoiceB.id })).toBe(0);
     });
   });

@@ -18,6 +18,8 @@ export enum ChangeObjectType {
 @Index(['userId', 'deviceId'])
 @Index(['synced'])
 @Index(['createdAt'])
+// Migration 018. A (user, change_id) is applied at most once; NULL (old clients) is unconstrained.
+@Index('idx_device_changes_user_change_id', ['userId', 'changeId'], { unique: true, where: '"change_id" IS NOT NULL' })
 export class DeviceChange {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -28,6 +30,10 @@ export class DeviceChange {
   @ManyToOne(() => User)
   @JoinColumn({ name: 'user_id' })
   user: User;
+
+  /** Optional idempotency key sent by the device for this change. */
+  @Column({ name: 'change_id', type: 'uuid', nullable: true })
+  changeId: string | null;
 
   @Column({ name: 'device_id', type: 'varchar', length: 255 })
   deviceId: string;

@@ -30,7 +30,9 @@
     "integrity:report": "ts-node --transpile-only src/integrity/integrity-report.ts",
     "integrity:report:prod": "node dist/integrity/integrity-report.js",
     "backup:verify-restore": "ts-node --transpile-only src/ops/verify-restore.ts",
-    "backup:verify-restore:prod": "node dist/ops/verify-restore.js"
+    "backup:verify-restore:prod": "node dist/ops/verify-restore.js",
+    "backup:verify-files": "ts-node --transpile-only src/ops/verify-files.ts",
+    "backup:verify-files:prod": "node dist/ops/verify-files.js"
   },
   "dependencies": {
     "@nestjs/cache-manager": "^3.0.1",

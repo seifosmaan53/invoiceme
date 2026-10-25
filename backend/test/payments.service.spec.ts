@@ -1,5 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { Not } from 'typeorm';
 import { PaymentsService, PaymentEventResult } from '../src/payments/payments.service';
 import { Payment, PaymentStatus } from '../src/entities/payment.entity';
 import { Invoice, InvoiceStatus } from '../src/entities/invoice.entity';
@@ -277,8 +278,9 @@ describe('PaymentsService', () => {
         { id: 'payment-id', status: PaymentStatus.PENDING },
         expect.objectContaining({ status: PaymentStatus.COMPLETED, metadataJson: expect.objectContaining({ source: 'stripe', id: 'pi_1' }) }),
       );
+      // Conditional on the invoice not being paid yet, so concurrent deliveries notify once
       expect(mockInvoiceRepository.update).toHaveBeenCalledWith(
-        expect.objectContaining({ id: 'invoice-id' }),
+        { id: 'invoice-id', status: Not(InvoiceStatus.PAID) },
         { status: InvoiceStatus.PAID },
       );
       expect(mockNotificationService.notifyPaymentReceived).toHaveBeenCalledWith(

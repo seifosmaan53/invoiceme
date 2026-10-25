@@ -731,6 +731,7 @@ export class InvoicesController {
   }
 
   @Post(':id/pay')
+  @RequirePermission('write:invoices')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Create Stripe payment intent for an invoice' })
   @ApiResponse({ status: 200, description: 'Payment intent created successfully' })

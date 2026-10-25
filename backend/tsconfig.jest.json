@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.json",
+  "//": "Used by ts-jest only (jest.config.js, test/jest-e2e.json). tsconfig.json has no include, so ts-jest would make every project file a root and type-check the whole program in each worker (~2 GB heap even for an empty spec). With no roots, ts-jest type-checks each file it transforms and that file's imports. See docs/TESTING.md.",
+  "files": [],
+  "include": []
+}

@@ -132,13 +132,14 @@ export class InvoicesService {
       },
     });
 
-    // Calculate total paid amount
-    const totalPaid = payments.reduce((sum, payment) => {
-      return sum + parseFloat(payment.amount.toString());
-    }, 0);
+    // Calculate total paid amount, counting only payments in the invoice's
+    // currency (same rule as PaymentsService.markInvoicePaidIfCovered)
+    const paidCents = payments
+      .filter((payment) => payment.currency.toLowerCase() === invoice.currency.toLowerCase())
+      .reduce((sum, payment) => sum + Math.round(Number(payment.amount) * 100), 0);
 
     // Update status if fully paid
-    if (totalPaid >= parseFloat(invoice.total.toString())) {
+    if (paidCents >= Math.round(Number(invoice.total) * 100)) {
       invoice.status = InvoiceStatus.PAID;
       await this.invoiceRepository.save(invoice);
 

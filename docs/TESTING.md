@@ -86,7 +86,39 @@ Runs all `*.spec.ts` files (unit and controller tests).
 ```bash
 cd backend && npm run test:e2e
 ```
-Runs all `*.e2e-spec.ts` files with real database.
+Runs all `*.e2e-spec.ts` files in band against a real PostgreSQL. Set the
+same variables as CI (`.github/workflows/ci.yml`); `DB_TEST_*` is read by the
+tests, `DB_*` by the app's own `DatabaseModule`, and `DB_SYNCHRONIZE=true`
+builds the schema from the entities:
+
+```bash
+export NODE_ENV=test DB_SYNCHRONIZE=true \
+  JWT_SECRET=local-test-jwt-secret-minimum-32-characters \
+  JWT_REFRESH_SECRET=local-test-refresh-secret-minimum-32-chars
+for p in TEST_ ""; do
+  export DB_${p}HOST=localhost DB_${p}PORT=5432 DB_${p}USERNAME=postgres \
+         DB_${p}PASSWORD=postgres DB_${p}DATABASE=invoiceme_test
+done
+npm run test:e2e
+```
+
+Use a disposable database with synthetic data only. A throwaway cluster that
+needs no system service (PostgreSQL 14+ binaries; run as a non-root user):
+
+```bash
+initdb -D /tmp/invoiceme-pg -U postgres --auth=trust
+pg_ctl -D /tmp/invoiceme-pg -o "-p 5432 -c unix_socket_directories=/tmp" -l /tmp/invoiceme-pg.log start
+psql -h localhost -U postgres -c "ALTER USER postgres PASSWORD 'postgres'" -c "CREATE DATABASE invoiceme_test"
+# ... run the tests ...
+pg_ctl -D /tmp/invoiceme-pg stop && rm -rf /tmp/invoiceme-pg
+```
+
+`test/verify-restore.e2e-spec.ts` includes "identifies the same database over a
+Unix socket and over TCP", which runs only when a socket file
+`.s.PGSQL.<DB_TEST_PORT>` exists in `/tmp` or `/var/run/postgresql` on the
+machine running Jest, and is reported as skipped otherwise (a database in a
+container exposes TCP only). The cluster above puts its socket in `/tmp`. CI
+runs it in the `restore-socket` job and fails if it is skipped.
 
 ### Coverage
 ```bash
@@ -113,9 +145,10 @@ Runs tests with Node debugger attached.
 **File:** `backend/jest.config.js`
 
 **Settings:**
-- Uses `ts-jest` for TypeScript support
-- 10s timeout per test
-- Coverage thresholds configured
+- `ts-jest` with `backend/tsconfig.jest.json` (type-checks each test file and
+  what it imports; see [Memory](#memory))
+- Jest's default 5 s timeout per test
+- No coverage thresholds
 - Test environment: `node`
 
 ### E2E Test Config
@@ -123,9 +156,39 @@ Runs tests with Node debugger attached.
 **File:** `backend/test/jest-e2e.json`
 
 **Settings:**
+- `ts-jest` with `backend/tsconfig.jest.json`, like the unit tests
 - 30s timeout per test (longer for database operations)
 - Separate coverage configuration
 - Uses test database
+
+### Memory
+
+Neither suite needs `--max-old-space-size`; both pass at Node's default heap
+limit (2096 MB on the machines measured, Node 20.20.2 and 22.22.0).
+
+`backend/tsconfig.json` has no `include`, so ts-jest used to take every project
+file as a root and type-check the whole program in every Jest worker: about
+2 GB per worker even for an empty spec, and `npx jest` crashed with
+"JavaScript heap out of memory" in every suite. `backend/tsconfig.jest.json`
+(the same compiler options, no root files) makes ts-jest type-check only the
+files it transforms and their imports. Type errors in a spec or in an
+imported `src/` file still fail the run.
+
+Measured with `--logHeapUsage` (`--no-cache`, i.e. cold ts-jest cache; Node 22
+unless noted):
+
+| Run | Before | After |
+|---|---|---|
+| Empty spec, no imports | 2043 MB | 221 MB |
+| `invoice-number-formatter.service.spec.ts` | 2088 MB (fails below 2560 MB) | 298 MB |
+| `npx jest` (21 suites, 3 workers) | every suite OOM after 270 s | 372 tests pass, 21 s; peak 1282 MB per worker |
+| Unit, in band, forced GC between suites | not run | 1138-1173 MB after every suite (flat: no leak between suites) |
+| `npm run test:e2e`, Node 20 | OOM in the first suite | 158 tests pass, 51 s; 1256-1542 MB |
+
+With a warm ts-jest cache the numbers are lower (E2E peak 428 MB). If a run
+does hit the heap limit, first check that `jest.config.js` and
+`test/jest-e2e.json` still point at `tsconfig.jest.json`; raising
+`NODE_OPTIONS=--max-old-space-size` only hides a regression.
 
 ### Test Database Setup
 
@@ -134,13 +197,12 @@ Runs tests with Node debugger attached.
 createdb invoiceme_test
 ```
 
-**Configure Environment Variables:**
-Create `.env.test` or set environment variables:
-- `DB_TEST_HOST` - Database host (default: localhost)
-- `DB_TEST_PORT` - Database port (default: 5432)
-- `DB_TEST_USER` - Database user
+**Configure Environment Variables** (see [E2E Tests](#e2e-tests) for the full set CI uses):
+- `DB_TEST_HOST` - Database host
+- `DB_TEST_PORT` - Database port
+- `DB_TEST_USERNAME` - Database user
 - `DB_TEST_PASSWORD` - Database password
-- `DB_TEST_NAME` - Database name (e.g., `invoiceme_test`)
+- `DB_TEST_DATABASE` - Database name (e.g., `invoiceme_test`)
 
 **Note:** E2E tests use a real database but clean up after each test suite by truncating tables.
 
@@ -240,12 +302,29 @@ Tests run automatically on every PR via GitHub Actions.
 
 **Configuration:** `.github/workflows/ci.yml`
 
-**Features:**
-- Matrix testing: Node 18 and 20
-- PostgreSQL service container for e2e tests
-- Coverage reports uploaded as artifacts
-- PRs blocked if tests fail
-- Automated runs on push and pull requests
+**`backend` job** (Node 20, PostgreSQL 15 service container):
+1. `npm ci` (no Puppeteer browser download: `backend/.puppeteerrc.cjs`), then a
+   check that `~/.cache/puppeteer` was not created
+2. `npm run lint:ci`: fails only on lint findings above the recorded baseline
+   (see `docs/DEVELOPER_GUIDE.md`, Linting)
+3. `npm test`, `npm run migration:run -- -d migrations/data-source.ts`, `npm run test:e2e`, `npm run build`
+4. `docker build` and the container PDF smoke test
+   (`backend/test/container/pdf-smoke.sh`), which renders a real invoice PDF
+   with the image's Chromium
+
+**`restore-socket` job**: the runner's own PostgreSQL (socket in
+`/var/run/postgresql`), `test/verify-restore.e2e-spec.ts`, and a check that the
+Unix-socket identity test passed rather than being skipped.
+
+**`mobile` job**: Flutter service, utility and coverage tests.
+
+`.github/workflows/update-bundle.yml` builds the on-site update bundle on Node
+20 and installs it on Linux and Windows (migrations, start, health check, HTTPS
+enforcement, integrity report, restore verification, PDFs with the system
+browser).
+
+Runs on pushes to `main` and on pull requests against it. No coverage
+artifacts are uploaded.
 
 ## Adding New Tests
 
@@ -381,6 +460,22 @@ describe('MyFeature (e2e)', () => {
 2. Verify tables can be truncated (permissions)
 3. Ensure cleanup runs in `afterAll` hooks
 4. Check for foreign key constraints preventing truncation
+
+### JavaScript heap out of memory
+
+**Problem:** Jest crashes with `FATAL ERROR: ... JavaScript heap out of memory`.
+
+**Solution:** see [Memory](#memory). Check that `backend/jest.config.js` and
+`backend/test/jest-e2e.json` pass `tsconfig.jest.json` to ts-jest. The measured
+peak is about 1.3 GB per worker cold, 1.5 GB for E2E in band.
+
+### Unix-socket test skipped
+
+**Problem:** `verify-restore.e2e-spec.ts` reports one skipped test.
+
+**Solution:** expected when PostgreSQL is reached over TCP only (e.g. in a
+container). To run it, give the server a socket directory of `/tmp` or
+`/var/run/postgresql` on the machine running Jest (see [E2E Tests](#e2e-tests)).
 
 ### Port Conflicts
 

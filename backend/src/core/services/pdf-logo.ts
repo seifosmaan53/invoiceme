@@ -165,6 +165,8 @@ export function fetchLogoAsDataUri(rawUrl: string, options: FetchLogoOptions = {
 
   return new Promise<string>((resolvePromise, reject) => {
     let settled = false;
+    // Assigned below; fail() is created first and must see the request.
+    // eslint-disable-next-line prefer-const
     let req: ReturnType<typeof https.request> | undefined;
     const fail = (err: Error) => {
       if (settled) return;

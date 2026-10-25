@@ -12,10 +12,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import * as request from 'supertest';
-import { TypeOrmModule, getRepositoryToken } from '@nestjs/typeorm';
+import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { randomUUID, randomBytes } from 'crypto';
 import { AppModule } from '../src/app.module';
 import { GlobalExceptionFilter } from '../src/core/filters/global-exception.filter';
@@ -98,7 +98,8 @@ describe('Non-disclosing responses for records of another user (E2E)', () => {
 
   /** Body without the per-request fields, with the id replaced by a placeholder. */
   const normalise = (body: any, id: string) => {
-    const { timestamp, path, requestId, ...rest } = body ?? {};
+    const rest = { ...(body ?? {}) };
+    for (const perRequest of ['timestamp', 'path', 'requestId']) delete rest[perRequest];
     return JSON.parse(JSON.stringify(rest).split(id).join('<id>'));
   };
 

@@ -93,7 +93,7 @@ It reads the schema first. A check whose tables/columns are missing, or whose
 query fails, is `[NOT CHECKED]`; exit code 3 means **not verified**, never
 clean. Exit codes: 0 every check ran, no findings; 1 findings that need
 review; 2 could not run; 3 not verified. The **schema fingerprint** it prints
-(markers for migrations 001-017, origin guessed from index names) is a
+(markers for migrations 001-018, origin guessed from index names) is a
 diagnostic clue, not a migration history. The info line
 `encrypted_client_fields` lists clients whose fields look encrypted; if it
 lists any, or if it is NOT CHECKED, keep `ENCRYPTION_KEY` exactly as it is.

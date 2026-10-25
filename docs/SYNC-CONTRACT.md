@@ -320,8 +320,8 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
 - Rollback: the previous server version ignores the column and the index, so
   they can stay. A client sending `change_id` must then be held back, because
   the old server rejects the field.
-- The schema fingerprint in the integrity report knows migrations 001-017
-  only and does not yet detect 018.
+- The integrity report's schema fingerprint includes a marker for migration 018
+  (`device_changes.change_id`).
 
 ## Known gaps
 

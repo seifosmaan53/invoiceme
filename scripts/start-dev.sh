@@ -37,7 +37,7 @@ BACKEND_DIR="$(dirname "$0")/../backend"
 cd "$BACKEND_DIR"
 
 # Check if backend is already running
-if curl -s http://localhost:3000/api/health > /dev/null 2>&1; then
+if curl -s http://localhost:3000/api/v1/health > /dev/null 2>&1; then
     echo -e "${GREEN}✅ Backend is already running${NC}"
 else
     echo -e "${YELLOW}⚠️  Backend is not running. Starting it...${NC}"
@@ -48,7 +48,7 @@ else
     # Wait for backend to start (max 30 seconds)
     echo -n "   Waiting for backend to start"
     for i in {1..30}; do
-        if curl -s http://localhost:3000/api/health > /dev/null 2>&1; then
+        if curl -s http://localhost:3000/api/v1/health > /dev/null 2>&1; then
             echo ""
             echo -e "${GREEN}✅ Backend started successfully${NC}"
             break
@@ -57,7 +57,7 @@ else
         sleep 1
     done
     
-    if ! curl -s http://localhost:3000/api/health > /dev/null 2>&1; then
+    if ! curl -s http://localhost:3000/api/v1/health > /dev/null 2>&1; then
         echo ""
         echo -e "${RED}❌ Backend failed to start. Check logs: tail -f /tmp/backend.log${NC}"
         exit 1
@@ -67,7 +67,7 @@ fi
 # Step 3: Verify Backend Health
 echo ""
 echo "🏥 Step 3: Verifying Backend Health..."
-HEALTH_RESPONSE=$(curl -s http://localhost:3000/api/health)
+HEALTH_RESPONSE=$(curl -s http://localhost:3000/api/v1/health)
 if echo "$HEALTH_RESPONSE" | grep -q '"status":"ok"'; then
     echo -e "${GREEN}✅ Backend is healthy${NC}"
     echo "   Database: $(echo "$HEALTH_RESPONSE" | grep -o '"database":"[^"]*"' | cut -d'"' -f4)"
@@ -90,7 +90,7 @@ echo -e "${GREEN}✅ All services are ready!${NC}"
 echo ""
 echo "💡 Tips:"
 echo "   - Backend logs: tail -f /tmp/backend.log"
-echo "   - Backend health: curl http://localhost:3000/api/health"
+echo "   - Backend health: curl http://localhost:3000/api/v1/health"
 echo "   - Hard refresh browser: Cmd+Shift+R (Mac) or Ctrl+Shift+R (Windows/Linux)"
 echo ""
 

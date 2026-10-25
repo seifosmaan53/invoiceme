@@ -313,7 +313,7 @@ ENABLE_SWAGGER=false
 ### Health Check
 
 ```bash
-curl https://api.yourdomain.com/api/health
+curl https://api.yourdomain.com/api/v1/health
 ```
 
 ### Verify Services
@@ -386,7 +386,7 @@ Automated backups via `scripts/backup-database.sh` and `scripts/setup-cron-backu
 
 Manifests in `/k8s` split by resource:
 
-- `k8s/deployment.yaml` — Deployment (3 replicas, liveness/readiness probes on `/api/health`)
+- `k8s/deployment.yaml` — Deployment (3 replicas, liveness/readiness probes on `/api/v1/health`)
 - `k8s/service.yaml` — LoadBalancer Service exposing port 80 → container port 3000
 - `k8s/hpa.yaml` — HorizontalPodAutoscaler (2–10 replicas, scales on CPU/memory utilization)
 

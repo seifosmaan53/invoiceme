@@ -43,9 +43,9 @@ check_issue() {
 # 1. Backend Health
 echo "1. BACKEND HEALTH"
 echo "----------------"
-check_issue "Backend running on port 3000" "curl -s http://localhost:3000/api/health" '"status":"ok"'
-check_issue "Backend database connected" "curl -s http://localhost:3000/api/health | grep -q '\"database\":\"connected\"'"
-check_issue "Backend cache connected" "curl -s http://localhost:3000/api/health | grep -q '\"cache\":\"connected\"'"
+check_issue "Backend running on port 3000" "curl -s http://localhost:3000/api/v1/health" '"status":"ok"'
+check_issue "Backend database connected" "curl -s http://localhost:3000/api/v1/health | grep -q '\"database\":\"connected\"'"
+check_issue "Backend cache connected" "curl -s http://localhost:3000/api/v1/health | grep -q '\"cache\":\"connected\"'"
 echo ""
 
 # 2. PostgreSQL

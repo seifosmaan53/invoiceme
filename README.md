@@ -146,6 +146,9 @@ Key environment variables the backend reads (see `backend/env.example`; `REDIS_*
 | `SENTRY_DSN` | Optional | Error tracking |
 | `ENABLE_SWAGGER` | Optional | Set `true` to expose `/api/docs` |
 | `SMTP_*` | For email | SMTP config for invoice delivery and password reset |
+| `TRUST_PROXY` | Behind a proxy | Which proxies may set `X-Forwarded-*` (default: none). See `backend/env.example` |
+| `PUBLIC_ORIGIN` / `TRUSTED_HOSTS` | Optional (production) | Where plain-HTTP GETs are redirected. With neither set they get 403 and no redirect; the `Host` header alone never chooses the destination |
+| `PUPPETEER_EXECUTABLE_PATH` | For PDFs outside Docker | Installed Chrome/Chromium; `npm ci` no longer downloads one |
 
 ---
 
@@ -174,6 +177,19 @@ invoiceme/
 ├── scripts/                Setup and utility scripts
 └── docker-compose.yml      Local development stack
 ```
+
+---
+
+## Upgrading an existing installation
+
+Changes merged on 2026-10-25 that an existing installation must account for:
+
+- **Database first.** Apply `backend/migrations/018_add_device_change_change_id.sql` before starting the new server; without it every sync push fails. It is idempotent and refuses to run if existing rows would violate the new index. `docs/operations/customer-update.md` is the full procedure.
+- **HTTPS redirects.** In production, plain-HTTP GETs are redirected only to `PUBLIC_ORIGIN` or a listed `TRUSTED_HOSTS` entry; otherwise they get 403. Health probes still require a real 200.
+- **API keys with explicit permissions** need `write:invoices` for `/pay`, duplicate, convert, send, attachment upload and CSV import; `read:invoices` for attachment lists, PDFs and CSV export; `delete:invoices` / `delete:clients` for bulk-archive. JWT logins and keys with no permission list are unaffected.
+- **Another user's records** return 404 instead of 403.
+- **PDF logos** must be `https` URLs on port 443 serving PNG, JPEG, GIF or WebP up to 1 MiB, without redirects. Other logos (including `http://` and SVG) are left out of the PDF. The server fetches them directly, not through a proxy.
+- **Sync clients** may send a `change_id` per change and receive per-change `results[]`; older clients keep working but get no replay protection until they send one. See [docs/SYNC-CONTRACT.md](docs/SYNC-CONTRACT.md).
 
 ---
 

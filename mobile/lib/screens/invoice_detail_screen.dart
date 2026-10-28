@@ -17,9 +17,11 @@ import '../core/widgets/copyable_error.dart';
 import '../models/invoice.dart';
 import '../models/invoice_item.dart';
 import '../models/attachment.dart';
+import '../models/payment_summary.dart';
 import '../widgets/invoice_timeline.dart';
 import '../widgets/attachment_list.dart';
 import '../widgets/attachment_viewer.dart';
+import '../widgets/payment_summary_card.dart';
 import 'edit_invoice_screen.dart';
 import 'payment_screen.dart';
 import 'attachment_upload_screen.dart';
@@ -35,6 +37,7 @@ class InvoiceDetailScreen extends ConsumerStatefulWidget {
 
 class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
   Invoice? _fullInvoice;
+  PaymentSummary? _paymentSummary;
   bool _isLoading = true;
   List<Attachment> _attachments = [];
   bool _attachmentsLoading = false;
@@ -54,6 +57,9 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
       if (mounted) {
         setState(() {
           _fullInvoice = Invoice.fromJson(response.data);
+          // Absent on servers without payment state: nothing is shown then.
+          _paymentSummary =
+              response.data is Map ? PaymentSummary.tryParse(response.data['paymentSummary']) : null;
           // Check if status should be updated based on due date (overdue check)
           if (_fullInvoice != null && _fullInvoice!.dueDate != null) {
             final now = DateTime.now();
@@ -74,6 +80,44 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
         setState(() => _isLoading = false);
         CopyableErrorSnackBar.show(context, 'Error loading invoice: $e');
       }
+    }
+  }
+
+  /// Reopen a paid invoice (explicit user action, confirmed first).
+  Future<void> _reopenInvoice() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Reopen invoice?'),
+        content: const Text(
+          'The invoice is no longer treated as paid. Payments and refunds already recorded stay as they are.',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Reopen')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final apiClient = ref.read(apiClientProvider);
+    try {
+      await apiClient.post('/invoices/${widget.invoice.id}/reopen');
+      apiClient.clearCache('/invoices');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Invoice reopened')));
+      await _loadFullInvoice();
+    } on DioException catch (e) {
+      if (!mounted) return;
+      final data = e.response?.data;
+      final message = data is Map && data['message'] is String
+          ? data['message'] as String
+          : (data is Map && data['message'] is List ? (data['message'] as List).join(', ') : null);
+      final code = e.response?.statusCode;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+          (code == 400 || code == 409) && message != null ? message : 'Could not reopen the invoice: ${message ?? e.message}',
+        ),
+      ));
     }
   }
 
@@ -1185,6 +1229,10 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
                   _ItemsCard(invoice: invoice),
                   const SizedBox(height: 16),
                   _TotalsCard(invoice: invoice),
+                  if (_paymentSummary?.stateLabel != null) ...[
+                    const SizedBox(height: 16),
+                    PaymentSummaryCard(summary: _paymentSummary, onReopen: _reopenInvoice),
+                  ],
                   if (invoice.notes != null && invoice.notes!.isNotEmpty) ...[
                     const SizedBox(height: 16),
                     _NotesCard(invoice: invoice),

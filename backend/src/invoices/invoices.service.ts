@@ -12,7 +12,7 @@ import { NotificationService } from '../core/services/notification.service';
 import { InvoiceNumberFormatterService } from '../core/services/invoice-number-formatter.service';
 import { ChangeObjectType } from '../entities/device-change.entity';
 import { ownedClient, withoutForeignClient, withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
-import { calendarDateParts, toCalendarDate } from '../common/calendar-date';
+import { businessToday, calendarDateParts, toCalendarDate } from '../common/calendar-date';
 import { paymentTotals } from '../payments/payment-state';
 
 // Shown when an invoice still points at a client of another user (a row
@@ -401,8 +401,9 @@ export class InvoicesService {
 
     try {
       // Generate new invoice number (same type as original)
-      // Duplicates are created with today's date
-      const invoiceNumber = await this.generateInvoiceNumber(userId, originalInvoice.type, new Date());
+      // Duplicates are created with today's date (business timezone)
+      const today = businessToday();
+      const invoiceNumber = await this.generateInvoiceNumber(userId, originalInvoice.type, today);
 
       // Create new invoice (clone of original)
       const invoice = this.invoiceRepository.create({
@@ -411,7 +412,7 @@ export class InvoicesService {
         type: originalInvoice.type,
         number: invoiceNumber,
         status: InvoiceStatus.SENT, // Start as sent (ready to send)
-        issueDate: new Date(), // Set to today
+        issueDate: today as unknown as Date,
         dueDate: originalInvoice.dueDate ? (toCalendarDate(originalInvoice.dueDate) as unknown as Date) : null,
         currency: originalInvoice.currency,
         subtotal: originalInvoice.subtotal,
@@ -549,7 +550,7 @@ export class InvoicesService {
       
       if (extractedSequence !== null) {
         // Check if it's from the same year (calendar years, as written)
-        const year = calendarDateParts(issueDate ?? new Date()).year;
+        const year = calendarDateParts(issueDate ?? businessToday()).year;
         let lastYear = year;
         if (lastInvoice.issueDate) {
           try {
@@ -660,8 +661,7 @@ export class InvoicesService {
     totalRevenue: number;
     monthlyRevenue: number;
   }> {
-    const year = new Date().getFullYear();
-    const month = new Date().getMonth() + 1;
+    const { year, month } = calendarDateParts(businessToday());
 
     const [raw] = await this.dataSource.query(
       `

@@ -36,7 +36,7 @@ import { S3Service } from '../core/services/s3.service';
 import { StripeService } from '../core/services/stripe.service';
 import { PaymentsService } from '../payments/payments.service';
 import { isOnlinePaymentCurrency, UnsupportedPaymentCurrencyError } from '../payments/payment-currency';
-import { calendarDateAsLocal } from '../common/calendar-date';
+import { calendarDateAsLocal, toCalendarDate } from '../common/calendar-date';
 import { AuditService } from '../core/services/audit.service';
 import { EmailService } from '../core/services/email.service';
 import { CsvService } from '../core/services/csv.service';
@@ -887,8 +887,8 @@ export class InvoicesController {
       clientName: invoice.client?.name || '',
       clientEmail: invoice.client?.email || '',
       // date columns come back from Postgres as 'YYYY-MM-DD' strings
-      issueDate: new Date(invoice.issueDate).toISOString().split('T')[0],
-      dueDate: invoice.dueDate ? new Date(invoice.dueDate).toISOString().split('T')[0] : '',
+      issueDate: toCalendarDate(invoice.issueDate),
+      dueDate: invoice.dueDate ? toCalendarDate(invoice.dueDate) : '',
       currency: invoice.currency,
       subtotal: invoice.subtotal.toString(),
       taxTotal: invoice.taxTotal.toString(),

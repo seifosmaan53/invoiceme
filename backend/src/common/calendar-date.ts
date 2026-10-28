@@ -6,8 +6,8 @@
  * the stored date and the invoice number shifted by a day (or a year).
  *
  * toCalendarDate keeps the date the client wrote: the leading YYYY-MM-DD of
- * a string, ignoring any time or offset. A Date (for example `new Date()`
- * for "today") is read in the server's local time, as before.
+ * a string, ignoring any time or offset. A Date is read in the server's
+ * local time; for "today" use businessToday() below.
  */
 const LEADING_DATE = /^(\d{4})-(\d{2})-(\d{2})/;
 
@@ -39,4 +39,65 @@ export function calendarDateAsLocal(value: Date | string): Date {
 export function toCalendarDate(value: Date | string): string {
   const { year, month, day } = calendarDateParts(value);
   return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+}
+
+/**
+ * "Today" for date-only invoice values (default issue date, recurring runs,
+ * overdue) is the calendar date in the business timezone: BUSINESS_TIMEZONE,
+ * an IANA identifier such as America/New_York. Unset, it is the process's
+ * local timezone (TZ of the process or container), as before. Stored dates
+ * are never shifted; absolute timestamps (createdAt, tokens, audit) stay UTC
+ * instants and do not use this.
+ */
+export function assertBusinessTimezone(raw: string | undefined): string | undefined {
+  const zone = (raw ?? '').trim();
+  if (!zone) return undefined;
+  // Intl also accepts UTC offsets such as +05:00; an offset is not a place
+  // and has no daylight-saving rules, so only named zones are allowed.
+  let valid = !/^[+-]/.test(zone);
+  if (valid) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: zone });
+    } catch {
+      valid = false;
+    }
+  }
+  if (!valid) {
+    throw new Error(`BUSINESS_TIMEZONE must be an IANA time zone such as America/New_York or UTC, got '${zone}'`);
+  }
+  return zone;
+}
+
+/** `YYYY-MM-DD` of `now` in the business timezone (see assertBusinessTimezone). */
+export function businessToday(now: Date = new Date()): string {
+  const zone = assertBusinessTimezone(process.env.BUSINESS_TIMEZONE);
+  if (!zone) return toCalendarDate(now);
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(now);
+  const part = (type: string) => parts.find((p) => p.type === type)!.value;
+  return `${part('year').padStart(4, '0')}-${part('month')}-${part('day')}`;
+}
+
+function fromUtcDay(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getUTCFullYear()).padStart(4, '0')}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+}
+
+/** Pure calendar arithmetic on `YYYY-MM-DD`: no timezone, no DST. */
+export function addCalendarDays(date: string, days: number): string {
+  const { year, month, day } = calendarDateParts(date);
+  return fromUtcDay(Date.UTC(year, month - 1, day + days));
+}
+
+/**
+ * Months on `YYYY-MM-DD`. A day past the end of the target month rolls over
+ * (Jan 31 + 1 month = Mar 3, or Mar 2 in a leap year), like Date#setMonth.
+ */
+export function addCalendarMonths(date: string, months: number): string {
+  const { year, month, day } = calendarDateParts(date);
+  return fromUtcDay(Date.UTC(year, month - 1 + months, day));
 }

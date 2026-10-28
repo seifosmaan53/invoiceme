@@ -70,6 +70,7 @@ export class SyncOwnershipError extends Error {}
 export interface ChangeObject {
   change_id?: string;
   base_revision?: number;
+  parent_revision?: number;
   object_type: ChangeObjectType;
   object_id: string;
   change_type: ChangeType;
@@ -101,6 +102,18 @@ export class ChangeObjectDto {
   @IsInt()
   @Min(0)
   base_revision?: number;
+
+  @ApiProperty({
+    description:
+      'Protocol 2, invoice_item changes: the revision of the item\'s invoice (the target invoice for a move) as the ' +
+      'device last saw it. Required for an item change on a sent, overdue or paid invoice to apply.',
+    example: 4,
+    required: false,
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  parent_revision?: number;
 
   @ApiProperty({ description: 'Type of object (client, invoice, etc.)', example: 'client' })
   @IsEnum(ChangeObjectType)
@@ -393,6 +406,7 @@ export class SyncService {
       changeJson: changeObj.data,
       changeType: changeObj.change_type,
       baseRevision: changeObj.base_revision ?? null,
+      parentRevision: changeObj.parent_revision ?? null,
     };
 
     if (!changeObj.change_id) {
@@ -412,6 +426,7 @@ export class SyncService {
       change.objectId === changeObj.object_id &&
       change.changeType === changeObj.change_type &&
       (change.baseRevision ?? null) === (changeObj.base_revision ?? null) &&
+      (change.parentRevision ?? null) === (changeObj.parent_revision ?? null) &&
       isDeepStrictEqual(change.changeJson, changeObj.data);
     if (!sameChange) {
       console.error(`Change ${changeObj.change_id} was already recorded with different contents`);
@@ -636,12 +651,24 @@ export class SyncService {
       return !!existing && PROTECTED_INVOICE_STATUSES.has(existing.status);
     }
     if (objectType === ChangeObjectType.INVOICE_ITEM) {
-      const invoiceIds = [...new Set([existing?.invoiceId, data.invoiceId].filter(Boolean))];
-      if (invoiceIds.length === 0) return false;
-      const invoices = await this.invoiceRepository.find({ where: { id: In(invoiceIds), userId }, select: ['id', 'status'] });
-      return invoices.some((invoice) => PROTECTED_INVOICE_STATUSES.has(invoice.status));
+      return (await this.itemInvoices(existing, data, userId)).some((invoice) => PROTECTED_INVOICE_STATUSES.has(invoice.status));
     }
     return false;
+  }
+
+  /**
+   * The user's invoices an item change touches (its current one and, for a
+   * move, the target), row-locked so a concurrent status change waits until
+   * this change is decided.
+   */
+  async itemInvoices(existing: any | null, data: Record<string, any>, userId: string): Promise<Array<{ id: string; status: string; revision: number }>> {
+    const invoiceIds = [...new Set([existing?.invoiceId, data.invoiceId].filter(Boolean))];
+    if (invoiceIds.length === 0) return [];
+    const rows = await this.manager.query(
+      'SELECT id::text AS id, status::text AS status, revision FROM invoices WHERE id::text = ANY($1) AND user_id::text = $2 ORDER BY id FOR UPDATE',
+      [invoiceIds.map(String), String(userId)],
+    );
+    return rows.map((row: any) => ({ id: row.id, status: row.status, revision: Number(row.revision) }));
   }
 
   /** The record's current revision, read after a write (the trigger sets it). */
@@ -791,6 +818,20 @@ export class SyncService {
     const base = change.baseRevision ?? 0;
     const serverState = existing ?? (tombstone?.lastState ? this.fromColumns(objectType, tombstone.lastState) : null);
     const serverRevision = existing?.revision ?? tombstone?.revision ?? null;
+
+    // An item's own revision does not move when its invoice is sent or paid,
+    // so an item change on such an invoice must show the device saw the
+    // invoice as it is now (parent_revision). A move into or out of one is
+    // always a conflict: one revision cannot prove both invoices were seen.
+    if (objectType === ChangeObjectType.INVOICE_ITEM && isProtected && !deleted) {
+      const parents = await this.itemInvoices(existing, data, userId);
+      const sawCurrent =
+        parents.length === 1 && change.parentRevision != null && change.parentRevision === parents[0].revision;
+      if (!sawCurrent) {
+        const conflictId = await this.recordConflict(change, userId, SyncConflictKind.PROTECTED_INVOICE, serverState, serverRevision, []);
+        return { status: 'conflict', conflictId };
+      }
+    }
 
     if (changeType === ChangeType.DELETE) {
       if (deleted || !existing) return { status: 'applied' };

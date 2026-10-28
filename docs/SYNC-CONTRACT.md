@@ -58,6 +58,16 @@ in between the check and the write.
 | Missing `change_id` / `base_revision` | `failed`, `reason: change_id_required` / `base_revision_required` | none |
 | Another user's record or reference, invalid data | `failed` (no reason, as before) | unchanged |
 
+**Items of sent, overdue or paid invoices.** An item's own revision does not
+move when its invoice is sent or paid, so every protocol-2 item change (create,
+update, delete) carries `parent_revision`: the invoice's revision as the device
+last saw it (for a move, the target invoice's). On a sent, overdue or paid
+invoice the change applies only if `parent_revision` equals the invoice's
+current revision; otherwise, or when it is missing, it is a
+`protected_invoice` conflict. A move into or out of such an invoice is always
+a conflict. The invoice rows are row-locked while this is decided, so a
+concurrent status change waits.
+
 "Sent or paid" means status `sent`, `overdue` (a sent invoice past its due
 date) or `paid`. There is no other server-side restriction on editing
 invoices; this release adds none beyond the conflict rules above.
@@ -477,3 +487,14 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
 5. **No batch size limit** on `changes`.
 6. **Records deleted before migration 019** have no tombstone; devices learn
    about them only on a full resync.
+7. **REST invoice edits replace all items** (delete and recreate), so a
+   device's offline edit of one of those items becomes an
+   `edit_after_delete` conflict; restoring it can duplicate a line, and
+   invoice totals are not recalculated by sync or by a restore.
+8. **Pull uses server timestamps** (`updatedAt > since`). A write that commits
+   just after a pull, with a timestamp before `lastSyncTimestamp`, is missed
+   until a later change touches the record or a full resync.
+9. **The startup check** confirms the trigger names exist, not the bodies of
+   the trigger functions; a hand-edited function would not be detected.
+10. **Items removed by hard-deleting an invoice row** get no tombstone of
+    their own; devices remove them together with the invoice's tombstone.

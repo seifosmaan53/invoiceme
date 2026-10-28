@@ -196,13 +196,61 @@ describe('Sync protocol 2 (E2E)', () => {
     it('a stale edit of an item of a paid invoice is a protected conflict', async () => {
       const { invoiceId } = await seed(InvoiceStatus.PAID);
       const itemId = uuidv4();
-      await push2(tokenA, [change('invoice_item', itemId, 'create', { invoiceId, description: 'Line', quantity: 1, unitPrice: 100, lineTotal: 100 })]);
+      // Created by a device that saw the paid invoice (parent_revision current)
+      const created = await push2(tokenA, [
+        { ...change('invoice_item', itemId, 'create', { invoiceId, description: 'Line', quantity: 1, unitPrice: 100, lineTotal: 100 }), parent_revision: await revisionOf(invoices, invoiceId) },
+      ]);
+      expect(created.body.results[0].status).toBe('applied');
       await items.update({ id: itemId }, { description: 'Line (server)' });
 
       const res = await push2(tokenA, [change('invoice_item', itemId, 'update', { quantity: 2 }, 1)]);
       expect(res.body.results[0].status).toBe('conflict');
       expect((await conflicts.findOneByOrFail({ id: res.body.results[0].conflict_id })).kind).toBe('protected_invoice');
       expect(Number((await items.findOneByOrFail({ id: itemId })).quantity)).toBe(1);
+    });
+
+    it('an item change made while the invoice was a draft conflicts once the invoice is paid; one that saw it paid applies', async () => {
+      const { invoiceId } = await seed();
+      const itemId = uuidv4();
+      const otherItem = uuidv4();
+      await push2(tokenA, [
+        { ...change('invoice_item', itemId, 'create', { invoiceId, description: 'Line', quantity: 1, unitPrice: 100, lineTotal: 100 }), parent_revision: 1 },
+        { ...change('invoice_item', otherItem, 'create', { invoiceId, description: 'Other', quantity: 1, unitPrice: 5, lineTotal: 5 }), parent_revision: 1 },
+      ]);
+      // Paid elsewhere: the invoice moves to revision 2; the items do not change.
+      await invoices.update({ id: invoiceId }, { status: InvoiceStatus.PAID });
+      const paidRevision = await revisionOf(invoices, invoiceId);
+
+      // Offline changes made while it was a draft (item base is still current)
+      const stale = await push2(tokenA, [
+        { ...change('invoice_item', itemId, 'update', { quantity: 5 }, 1), parent_revision: 1 },
+        change('invoice_item', otherItem, 'delete', {}, 1),
+        { ...change('invoice_item', uuidv4(), 'create', { invoiceId, description: 'Added offline' }), parent_revision: 1 },
+      ]);
+      expect(stale.body.results.map((r: any) => r.status)).toEqual(['conflict', 'conflict', 'conflict']);
+      expect(Number((await items.findOneByOrFail({ id: itemId })).quantity)).toBe(1);
+      expect(await items.existsBy({ id: otherItem })).toBe(true);
+      expect(await items.count({ where: { invoiceId } })).toBe(2);
+      const kinds = await conflicts.find();
+      expect(kinds.every((c) => c.kind === 'protected_invoice')).toBe(true);
+
+      // Positive control: a device that saw the paid invoice can still edit (no new restriction)
+      const current = await push2(tokenA, [{ ...change('invoice_item', itemId, 'update', { quantity: 5 }, 1), parent_revision: paidRevision }]);
+      expect(current.body.results[0].status).toBe('applied');
+      expect(Number((await items.findOneByOrFail({ id: itemId })).quantity)).toBe(5);
+    });
+
+    it('moving an item into or out of a paid invoice is a conflict', async () => {
+      const draft = await seed();
+      const paid = await seed(InvoiceStatus.PAID);
+      const itemId = uuidv4();
+      await push2(tokenA, [{ ...change('invoice_item', itemId, 'create', { invoiceId: draft.invoiceId, description: 'Line' }), parent_revision: 1 }]);
+      const paidRevision = await revisionOf(invoices, paid.invoiceId);
+      const move = await push2(tokenA, [
+        { ...change('invoice_item', itemId, 'update', { invoiceId: paid.invoiceId }, 1), parent_revision: paidRevision },
+      ]);
+      expect(move.body.results[0].status).toBe('conflict');
+      expect((await items.findOneByOrFail({ id: itemId })).invoiceId).toBe(draft.invoiceId);
     });
 
     it('a stale delete of a paid invoice is refused (conflict), the invoice stays', async () => {

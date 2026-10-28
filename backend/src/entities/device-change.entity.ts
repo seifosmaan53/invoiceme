@@ -58,6 +58,10 @@ export class DeviceChange {
   @Column({ name: 'base_revision', type: 'bigint', nullable: true, transformer: BIGINT_AS_NUMBER })
   baseRevision: number | null;
 
+  /** Protocol 2, invoice items: the invoice revision the device saw (migration 019). */
+  @Column({ name: 'parent_revision', type: 'bigint', nullable: true, transformer: BIGINT_AS_NUMBER })
+  parentRevision: number | null;
+
   /** How the change was processed: applied, merged or conflict (null while not processed). */
   @Column({ type: 'varchar', length: 20, nullable: true })
   outcome: string | null;

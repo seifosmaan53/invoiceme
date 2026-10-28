@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../core/providers/providers.dart';
+import '../core/utils/attachment_url.dart';
 import '../core/widgets/copyable_text.dart';
 import '../core/widgets/copyable_error.dart';
 import '../models/invoice.dart';
@@ -918,7 +919,13 @@ class _InvoiceDetailScreenState extends ConsumerState<InvoiceDetailScreen> {
                 );
               },
               onDownload: (attachment) async {
-                final uri = Uri.parse(attachment.url);
+                final uri = openableAttachmentUri(attachment.url);
+                if (uri == null) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('This attachment link cannot be opened.')),
+                  );
+                  return;
+                }
                 if (await canLaunchUrl(uri)) {
                   await launchUrl(uri, mode: LaunchMode.externalApplication);
                 }

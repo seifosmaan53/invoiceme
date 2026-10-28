@@ -8,6 +8,9 @@ import 'package:url_launcher/url_launcher.dart';
 // Local imports - Models
 import '../models/attachment.dart';
 
+// Local imports - Core
+import '../core/utils/attachment_url.dart';
+
 /// Widget to view attachments (images, PDFs, etc.)
 class AttachmentViewer extends StatelessWidget {
   final Attachment attachment;
@@ -18,6 +21,9 @@ class AttachmentViewer extends StatelessWidget {
   });
 
   bool get isImage => attachment.contentType.contains('image');
+
+  /// Null for any URL that must not be opened or loaded (see attachment_url.dart)
+  Uri? get _uri => openableAttachmentUri(attachment.url);
   bool get isPdf => attachment.contentType.contains('pdf');
 
   @override
@@ -58,12 +64,16 @@ class AttachmentViewer extends StatelessWidget {
   }
 
   Widget _buildImageViewer(BuildContext context) {
+    final uri = _uri;
+    if (uri == null) {
+      return const Text('This attachment link cannot be opened.');
+    }
     return InteractiveViewer(
       minScale: 0.5,
       maxScale: 4.0,
       child: Center(
         child: Image.network(
-          attachment.url,
+          uri.toString(),
           fit: BoxFit.contain,
           loadingBuilder: (context, child, loadingProgress) {
             if (loadingProgress == null) return child;
@@ -208,8 +218,8 @@ class AttachmentViewer extends StatelessWidget {
 
   Future<void> _openInBrowser(BuildContext context) async {
     try {
-      final uri = Uri.parse(attachment.url);
-      if (await canLaunchUrl(uri)) {
+      final uri = _uri;
+      if (uri != null && await canLaunchUrl(uri)) {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
       } else {
         if (context.mounted) {
@@ -237,8 +247,8 @@ class AttachmentViewer extends StatelessWidget {
     // On web, opening the URL will trigger download
     // On mobile, we'd need a download manager plugin
     try {
-      final uri = Uri.parse(attachment.url);
-      if (await canLaunchUrl(uri)) {
+      final uri = _uri;
+      if (uri != null && await canLaunchUrl(uri)) {
         await launchUrl(uri, mode: LaunchMode.externalApplication);
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(

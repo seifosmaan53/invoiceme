@@ -7,6 +7,7 @@ import { InvoiceItem } from '../../entities/invoice-item.entity';
 import { Client } from '../../entities/client.entity';
 import { PDF_BROWSER_ARGS, lockDownPage } from './pdf-render-sandbox';
 import { checkPdfLogoUrl, fetchLogoAsDataUri } from './pdf-logo';
+import { calendarDateAsLocal } from '../../common/calendar-date';
 
 // Values that end up inside CSS. Anything else falls back to the default, so
 // historical rows saved before input validation cannot inject CSS.
@@ -531,7 +532,9 @@ export class PdfService {
   }
 
   private formatDate(date: Date | string): string {
-    const d = typeof date === 'string' ? new Date(date) : date;
+    // Calendar date as written; new Date('YYYY-MM-DD') is UTC midnight and
+    // would print the day before on a server west of UTC
+    const d = calendarDateAsLocal(date);
     return d.toLocaleDateString('en-US', {
       year: 'numeric',
       month: 'long',

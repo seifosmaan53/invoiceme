@@ -106,9 +106,10 @@ export class ApiKeysService {
    * Check if API key has permission
    */
   hasPermission(apiKey: ApiKey, permission: string): boolean {
-    // If no permissions specified, allow all (backward compatibility)
+    // No permissions means no access. Full access must be granted explicitly
+    // with '*'.
     if (!apiKey.permissionsJson || apiKey.permissionsJson.length === 0) {
-      return true;
+      return false;
     }
 
     // Check for exact permission

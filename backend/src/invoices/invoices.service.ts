@@ -12,6 +12,7 @@ import { NotificationService } from '../core/services/notification.service';
 import { InvoiceNumberFormatterService } from '../core/services/invoice-number-formatter.service';
 import { ChangeObjectType } from '../entities/device-change.entity';
 import { ownedClient, withoutForeignClient, withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
+import { calendarDateParts, toCalendarDate } from '../common/calendar-date';
 
 // Shown when an invoice still points at a client of another user (a row
 // written before ownership was enforced). That client is never returned.
@@ -222,7 +223,7 @@ export class InvoicesService {
 
     try {
       // Generate invoice number
-      const issueDate = new Date(createInvoiceDto.issueDate);
+      const issueDate = toCalendarDate(createInvoiceDto.issueDate);
       const invoiceNumber = await this.generateInvoiceNumber(userId, createInvoiceDto.type || InvoiceType.INVOICE, issueDate);
 
       // Calculate totals
@@ -237,8 +238,10 @@ export class InvoicesService {
         type: createInvoiceDto.type || InvoiceType.INVOICE,
         number: invoiceNumber,
         status: createInvoiceDto.status || InvoiceStatus.SENT,
-        issueDate: new Date(createInvoiceDto.issueDate),
-        dueDate: createInvoiceDto.dueDate ? new Date(createInvoiceDto.dueDate) : null,
+        // Calendar dates as written (common/calendar-date.ts); TypeORM stores
+        // a YYYY-MM-DD string in a date column unchanged
+        issueDate: issueDate as unknown as Date,
+        dueDate: createInvoiceDto.dueDate ? (toCalendarDate(createInvoiceDto.dueDate) as unknown as Date) : null,
         currency: createInvoiceDto.currency || 'USD',
         subtotal: totals.subtotal,
         taxTotal: totals.taxTotal,
@@ -354,10 +357,10 @@ export class InvoicesService {
         }
       }
       if (updateInvoiceDto.issueDate) {
-        invoice.issueDate = new Date(updateInvoiceDto.issueDate);
+        invoice.issueDate = toCalendarDate(updateInvoiceDto.issueDate) as unknown as Date;
       }
       if (updateInvoiceDto.dueDate) {
-        invoice.dueDate = new Date(updateInvoiceDto.dueDate);
+        invoice.dueDate = toCalendarDate(updateInvoiceDto.dueDate) as unknown as Date;
       }
       if (updateInvoiceDto.currency) {
         invoice.currency = updateInvoiceDto.currency;
@@ -409,7 +412,7 @@ export class InvoicesService {
         number: invoiceNumber,
         status: InvoiceStatus.SENT, // Start as sent (ready to send)
         issueDate: new Date(), // Set to today
-        dueDate: originalInvoice.dueDate ? new Date(originalInvoice.dueDate) : null,
+        dueDate: originalInvoice.dueDate ? (toCalendarDate(originalInvoice.dueDate) as unknown as Date) : null,
         currency: originalInvoice.currency,
         subtotal: originalInvoice.subtotal,
         taxTotal: originalInvoice.taxTotal,
@@ -523,7 +526,7 @@ export class InvoicesService {
     }
   }
 
-  private async generateInvoiceNumber(userId: string, type: InvoiceType, issueDate?: Date): Promise<string> {
+  private async generateInvoiceNumber(userId: string, type: InvoiceType, issueDate?: Date | string): Promise<string> {
     // Get user's invoice number format preference
     const user = await this.userRepository.findOne({ where: { id: userId } });
     const format = user?.invoiceNumberFormat;
@@ -545,18 +548,14 @@ export class InvoicesService {
       );
       
       if (extractedSequence !== null) {
-        // Check if it's from the same year/month (depending on format).
-        // issueDate may arrive as an ISO string from the DTO, so normalize.
-        const date = issueDate ? new Date(issueDate) : new Date();
-        const year = date.getFullYear();
-        // Convert lastInvoice.issueDate to Date if it's a string
+        // Check if it's from the same year (calendar years, as written)
+        const year = calendarDateParts(issueDate ?? new Date()).year;
         let lastYear = year;
         if (lastInvoice.issueDate) {
-          const lastDate = lastInvoice.issueDate instanceof Date 
-            ? lastInvoice.issueDate 
-            : new Date(lastInvoice.issueDate);
-          if (!isNaN(lastDate.getTime())) {
-            lastYear = lastDate.getFullYear();
+          try {
+            lastYear = calendarDateParts(lastInvoice.issueDate).year;
+          } catch {
+            // unreadable stored date: keep counting in the current year
           }
         }
         

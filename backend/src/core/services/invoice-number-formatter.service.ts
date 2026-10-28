@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InvoiceType } from '../../entities/invoice.entity';
+import { calendarDateParts } from '../../common/calendar-date';
 
 @Injectable()
 export class InvoiceNumberFormatterService {
@@ -14,23 +15,24 @@ export class InvoiceNumberFormatterService {
    * @param format - The format pattern (e.g., "INV-{YYYY}-{####}")
    * @param type - Invoice type (invoice or estimate)
    * @param sequence - Sequence number
-   * @param issueDate - Issue date (optional, defaults to today)
+   * @param issueDate - Issue date (optional, defaults to today). A YYYY-MM-DD
+   *   string is used as written; see common/calendar-date.ts
    * @returns Formatted invoice number
    */
   format(
     format: string | null | undefined,
     type: InvoiceType,
     sequence: number,
-    issueDate?: Date,
+    issueDate?: Date | string,
   ): string {
     // Use default format if user hasn't configured one
     const pattern = format || (type === InvoiceType.INVOICE ? this.DEFAULT_INVOICE_FORMAT : this.DEFAULT_ESTIMATE_FORMAT);
 
-    // issueDate may arrive as an ISO string at runtime, so normalize to Date.
-    const date = issueDate ? new Date(issueDate) : new Date();
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
+    // The calendar date as written, never shifted by the server's timezone
+    const parts = calendarDateParts(issueDate ?? new Date());
+    const year = parts.year;
+    const month = String(parts.month).padStart(2, '0');
+    const day = String(parts.day).padStart(2, '0');
 
     // Replace placeholders
     let formatted = pattern

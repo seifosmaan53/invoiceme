@@ -250,7 +250,8 @@ describeWithBrowser('PDF rendering makes no network requests (real Chromium)', (
     });
 
     it('browser flags alone (page without interception): no connection for any kind', async () => {
-      await render(await (await cache.getBrowser()).newPage(), page(interceptedKinds(loopback()) + uninterceptedKinds(loopback())));
+      // Measures layer 1 alone, so it opens a page directly on the private browser
+      await render(await (await (cache as any).getBrowser()).newPage(), page(interceptedKinds(loopback()) + uninterceptedKinds(loopback())));
       expect(listener.connections).toBe(0);
     });
 
@@ -259,7 +260,7 @@ describeWithBrowser('PDF rendering makes no network requests (real Chromium)', (
       Object.assign(process.env, { http_proxy: loopback(), https_proxy: loopback(), HTTP_PROXY: loopback(), HTTPS_PROXY: loopback(), all_proxy: loopback() });
       const proxied = new PdfCacheService({ get: async () => null, set: async () => undefined } as any);
       try {
-        const p = await (await proxied.getBrowser()).newPage();
+        const p = await (await (proxied as any).getBrowser()).newPage();
         await render(p, page(interceptedKinds('http://example.invalid') + uninterceptedKinds('http://example.invalid')));
       } finally {
         await proxied.closeBrowser();

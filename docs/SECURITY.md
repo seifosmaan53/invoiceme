@@ -297,6 +297,24 @@ unless `PUBLIC_ORIGIN` or `TRUSTED_HOSTS` is set. API clients that already
 use HTTPS, requests through a TLS proxy marked `https`, and the local health
 check are unaffected. Nothing new is required for the backend to start.
 
+## API-key access
+
+API keys fail closed:
+
+- Only the invoice and client controllers accept API keys (`ApiKeyOrJwtGuard` + `PermissionGuard`). Every route there names the permission a key needs with `@RequirePermission`; a unit test fails if a route on either controller lacks one, and the guard refuses API keys (403) on any key-accepting route that names none.
+- A key's permissions are an explicit list. `*` grants everything, `read:*`/`write:*`/`delete:*` grant one action on every resource, and an empty list grants nothing. Keys cannot be created without at least one permission.
+- Keys act as their owner: another owner's records return 404 exactly as for JWT sessions.
+
+| Routes | Authentication |
+|---|---|
+| `GET /v1/health`, `/v1/health/db`, `/v1/health/cache`; `GET /v1/config/stripe-public-key`; `POST /v1/auth/register`, `/refresh`, `/password-reset`, `/password-reset/confirm` | Public |
+| `POST /v1/auth/login` | Email and password |
+| `POST /v1/webhooks/stripe` | Stripe signature on the raw body |
+| `/v1/invoices/**`, `/v1/clients/**` | JWT, or an API key with the named permission |
+| `/v1/sync/**`, `/v1/user-settings`, `/v1/api-keys/**`, `/v1/invoice-templates/**`, `/v1/feedback/**`, `/v1/gdpr/**`, `/v1/auth/2fa/*`, `/v1/auth/change-password`, `PATCH /v1/auth/profile` | JWT only; API keys get 401 |
+
+Permissions in use: `read:invoices`, `write:invoices`, `delete:invoices`, `read:clients`, `write:clients`, `delete:clients`, and `read:dashboard` (for `GET /v1/invoices/stats`). The mobile app also offers permissions for payments, settings and reports; no route accepts API keys for those areas, so those permissions grant nothing today.
+
 ## Reviews of 2026-10-25 and known gaps
 
 Each report records what was proven with a failing test, what was fixed, how it was verified, and what was not checked. They describe specific checks, not a guarantee that the application is secure.
@@ -312,10 +330,8 @@ Each report records what was proven with a failing test, what was fixed, how it 
 Known gaps, not fixed:
 
 - The attachment URL check validates format only; the server does not fetch attachment URLs, and the mobile app does not yet re-check cached URLs before opening them (needs a mobile release).
-- The permission guard admits API keys on routes without a `@RequirePermission` decorator. Unit tests fail if the invoices or clients controller gains such a route; other controllers rely on review.
 - Offline-sync conflicts: the server applies changes to the latest state and does not detect concurrent edits of the same field. A protocol is proposed in [proposals/sync-conflicts.md](proposals/sync-conflicts.md) and waits on the owner's decisions; it is not implemented.
 - Payments: refunds and disputes are not handled; a refunded or disputed invoice stays `paid` (decision needed: [proposals/payments-refunds-disputes.md](proposals/payments-refunds-disputes.md)). Each `/pay` call creates a new PaymentIntent. Online payment is limited to USD, EUR, GBP, CAD and AUD, because amounts are converted as total × 100. `client_secret` is no longer stored, but rows created before that change still hold it (the proposal has a count query and an optional cleanup).
-- `PdfCacheService.getBrowser()` returns a browser whose pages are not locked down (no caller in the application today).
 - Per-IP rate limiting is in memory, so it is approximate across replicas.
 
 ---

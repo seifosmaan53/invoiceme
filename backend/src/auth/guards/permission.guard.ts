@@ -17,18 +17,18 @@ export class PermissionGuard implements CanActivate {
       context.getClass(),
     ]);
 
-    // If no permission required, allow access
-    if (!requiredPermission) {
-      return true;
-    }
-
     const request = context.switchToHttp().getRequest<Request>();
     const apiKey = (request as any).apiKey;
 
-    // If authenticated via JWT (not API key), allow access
-    // API keys are the only ones that need permission checks
+    // JWT sessions are not scoped; only API keys need permission checks
     if (!apiKey) {
       return true;
+    }
+
+    // Fail closed: an API key reaches only routes that name the permission it
+    // needs. A route without @RequirePermission is not open to API keys.
+    if (!requiredPermission) {
+      throw new ForbiddenException('API keys are not accepted on this route');
     }
 
     // Check if API key has required permission

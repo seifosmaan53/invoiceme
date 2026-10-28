@@ -48,9 +48,14 @@ export interface E2eApp {
   createUser(email: string): Promise<{ user: User; token: string }>;
 }
 
-export async function createE2eApp(): Promise<E2eApp> {
+export async function createE2eApp(options: { controllers?: any[]; imports?: any[] } = {}): Promise<E2eApp> {
   const moduleFixture = await Test.createTestingModule({
-    imports: [ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env.test', '.env'] }), AppModule],
+    imports: [
+      ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env.test', '.env'] }),
+      AppModule,
+      ...(options.imports ?? []),
+    ],
+    controllers: options.controllers ?? [],
   })
     .overrideModule(TypeOrmModule)
     .useModule(

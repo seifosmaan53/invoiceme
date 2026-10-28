@@ -290,10 +290,11 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       expect(payments[0].currency).toBe('USD');
     });
 
-    it('requires write:invoices for API keys; JWT, unrestricted and write keys still work', async () => {
+    it('requires write:invoices for API keys; JWT, full-access and write keys still work', async () => {
       const { key: readOnlyKey } = await apiKeysService.generateApiKey(userA.id, 'read only', ['read:invoices']);
       const { key: writeKey } = await apiKeysService.generateApiKey(userA.id, 'writer', ['write:invoices']);
-      const { key: allKey } = await apiKeysService.generateApiKey(userA.id, 'legacy, unrestricted', []);
+      const { key: allKey } = await apiKeysService.generateApiKey(userA.id, 'full access', ['*']);
+      const { key: emptyKey } = await apiKeysService.generateApiKey(userA.id, 'no permissions', []);
 
       const denied = await request(app.getHttpServer())
         .post(`/api/v1/invoices/${invoiceA.id}/pay`)
@@ -302,6 +303,10 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       expect(denied.body.message).toContain('API key does not have required permission: write:invoices');
       expect(createPaymentIntent).not.toHaveBeenCalled();
       expect(await paymentRepository.count()).toBe(0);
+
+      // A key with no permissions has no access
+      await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/pay`).set('X-API-Key', emptyKey).expect(403);
+      expect(createPaymentIntent).not.toHaveBeenCalled();
 
       // The read-only key is otherwise valid
       await request(app.getHttpServer()).get(`/api/v1/invoices/${invoiceA.id}`).set('X-API-Key', readOnlyKey).expect(200);

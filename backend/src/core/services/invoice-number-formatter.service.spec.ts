@@ -18,7 +18,8 @@ describe('InvoiceNumberFormatterService', () => {
   });
 
   describe('format', () => {
-    const testDate = new Date('2025-01-15');
+    // Production passes the calendar date as written (YYYY-MM-DD)
+    const testDate = '2025-01-15';
 
     it('should use default format for invoices when no format provided', () => {
       const result = service.format(null, InvoiceType.INVOICE, 1, testDate);
@@ -57,6 +58,20 @@ describe('InvoiceNumberFormatterService', () => {
     it('should replace date placeholders', () => {
       const result = service.format('INV-{YYYY}-{MM}-{DD}-{####}', InvoiceType.INVOICE, 1, testDate);
       expect(result).toBe('INV-2025-01-15-0001');
+    });
+
+    it('uses the calendar date as written, whatever the server timezone', () => {
+      // new Date('2025-01-01') is UTC midnight: 2024-12-31 west of UTC
+      expect(service.format('INV-{YYYY}-{MM}-{DD}-{####}', InvoiceType.INVOICE, 1, '2025-01-01')).toBe('INV-2025-01-01-0001');
+      expect(service.format('INV-{YYYY}-{MM}-{DD}-{####}', InvoiceType.INVOICE, 1, '2025-12-31T23:30:00-05:00')).toBe(
+        'INV-2025-12-31-0001',
+      );
+    });
+
+    it('reads a Date in local time (today on the server)', () => {
+      expect(service.format('INV-{YYYY}-{MM}-{DD}-{####}', InvoiceType.INVOICE, 1, new Date(2025, 0, 1, 23, 30))).toBe(
+        'INV-2025-01-01-0001',
+      );
     });
 
     it('should support 2-digit year', () => {

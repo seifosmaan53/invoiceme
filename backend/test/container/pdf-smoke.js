@@ -2,7 +2,7 @@
  * Runs INSIDE the built backend image (piped to `node -` by pdf-smoke.sh).
  *
  * Renders a synthetic invoice through the compiled PdfService and a page
- * through PdfCacheService.getBrowser(), i.e. both browser launch paths of the
+ * through PdfCacheService.newPage(), i.e. both browser launch paths of the
  * application. All data is fake; nothing touches a database or the network.
  *
  * stdout carries exactly one JSON line with the results (PDFs base64-encoded);
@@ -54,16 +54,17 @@ async function main() {
     user: { companyName: 'Smoke Test Co' },
   });
 
-  // PdfCacheService only needs CacheService for templates, not for getBrowser().
+  // PdfCacheService only needs CacheService for templates, not for newPage().
   const cacheService = new PdfCacheService({ get: async () => null, set: async () => undefined });
-  const browser = await cacheService.getBrowser();
   let cachePdf;
   let browserVersion;
   let cacheExecutable;
   try {
+    // newPage() is the only public way to a page: network blocked, no JavaScript
+    const page = await cacheService.newPage();
+    const browser = page.browser();
     browserVersion = await browser.version();
     cacheExecutable = browser.process() ? browser.process().spawnfile : null;
-    const page = await browser.newPage();
     await page.setContent(`<html><body><h1>Invoice ${INVOICE_NUMBER}</h1><p>PdfCacheService launch path</p></body></html>`);
     cachePdf = await page.pdf({ format: 'A4' });
   } finally {

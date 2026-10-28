@@ -35,6 +35,7 @@ import { S3Service } from '../core/services/s3.service';
 import { StripeService } from '../core/services/stripe.service';
 import { PaymentsService } from '../payments/payments.service';
 import { isOnlinePaymentCurrency, UnsupportedPaymentCurrencyError } from '../payments/payment-currency';
+import { calendarDateAsLocal } from '../common/calendar-date';
 import { AuditService } from '../core/services/audit.service';
 import { EmailService } from '../core/services/email.service';
 import { CsvService } from '../core/services/csv.service';
@@ -379,7 +380,7 @@ export class InvoicesController {
           currency: invoice.currency,
           clientName,
           companyName,
-          dueDate: invoice.dueDate ? new Date(invoice.dueDate).toLocaleDateString() : undefined,
+          dueDate: invoice.dueDate ? calendarDateAsLocal(invoice.dueDate).toLocaleDateString() : undefined,
         },
         pdfUrl,
       );

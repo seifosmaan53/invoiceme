@@ -12,9 +12,10 @@ export class PdfCacheService {
   constructor(private cacheService: CacheService) {}
 
   /**
-   * Get or create browser instance (reuse for performance)
+   * Get or create the shared browser. Private: a page opened directly on it
+   * has no request interception and runs JavaScript. Callers use newPage().
    */
-  async getBrowser(): Promise<Browser> {
+  private async getBrowser(): Promise<Browser> {
     if (!this.browserInstance) {
       this.browserInstance = await puppeteer.launch({
         headless: true,

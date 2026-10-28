@@ -1,4 +1,4 @@
-import { calendarDateParts, toCalendarDate } from './calendar-date';
+import { calendarDateAsLocal, calendarDateParts, toCalendarDate } from './calendar-date';
 
 describe('calendar dates', () => {
   it('keeps the date written in a string, ignoring time and offset', () => {
@@ -11,6 +11,11 @@ describe('calendar dates', () => {
   it('reads a Date in local time', () => {
     expect(toCalendarDate(new Date(2025, 0, 1, 0, 0))).toBe('2025-01-01');
     expect(toCalendarDate(new Date(2025, 0, 1, 23, 59))).toBe('2025-01-01');
+  });
+
+  it('gives local midnight of the written date for display', () => {
+    const d = calendarDateAsLocal('2025-01-01');
+    expect([d.getFullYear(), d.getMonth(), d.getDate(), d.getHours()]).toEqual([2025, 0, 1, 0]);
   });
 
   it('refuses something that is not a date', () => {

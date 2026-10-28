@@ -29,6 +29,12 @@ export function calendarDateParts(value: Date | string): CalendarDateParts {
   return { year: value.getFullYear(), month: value.getMonth() + 1, day: value.getDate() };
 }
 
+/** Local midnight of the calendar date, for display with toLocaleDateString. */
+export function calendarDateAsLocal(value: Date | string): Date {
+  const { year, month, day } = calendarDateParts(value);
+  return new Date(year, month - 1, day);
+}
+
 /** `YYYY-MM-DD` for a `date` column, without a timezone shift. */
 export function toCalendarDate(value: Date | string): string {
   const { year, month, day } = calendarDateParts(value);

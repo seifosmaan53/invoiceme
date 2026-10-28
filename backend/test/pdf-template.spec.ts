@@ -47,6 +47,16 @@ describe('PdfService.renderTemplate', () => {
     expect(html).not.toContain('{{formatCurrency');
   });
 
+  it('prints the issue and due dates as written, whatever the server timezone', async () => {
+    const html = await render([{ description: 'x', quantity: 1, unitPrice: 1, taxRate: 0, discountRate: 0, lineTotal: 1 }], {
+      issueDate: '2025-01-01',
+      dueDate: '2025-01-31',
+    });
+    expect(html).toContain('January 1, 2025');
+    expect(html).toContain('January 31, 2025');
+    expect(html).not.toContain('December 31, 2024');
+  });
+
   it('keeps $& and $1 in user text as written', async () => {
     const html = await render(
       [{ description: 'Costs $& fees $1 and $$', quantity: 1, unitPrice: 5, taxRate: 0, discountRate: 0, lineTotal: 5 }],

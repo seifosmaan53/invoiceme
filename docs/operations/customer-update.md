@@ -253,6 +253,42 @@ restore and verification, dependency install, the rehearsed migrations and
 checks, using the timings measured in section 5.4, plus a margin. For a small
 database this is typically 30-60 minutes.
 
+### Removing stored Stripe client secrets (once, after the update)
+
+Releases before the payment fix stored each Stripe PaymentIntent's
+`client_secret` in `payments.metadata_json` (from `/pay`, and from the webhook,
+which merged the whole PaymentIntent into it). The new release stops storing
+it; rows written earlier keep it until this tool removes it. Run it once,
+after section 7 has passed, in the maintenance window or later.
+
+1. **Prerequisite: a verified backup** taken after the update: the window
+   backup from step 6.2 qualifies if no payment was made since; otherwise take
+   a new one and prove it with `verify-restore` exactly as in step 6.3. The
+   tool keeps no rollback file: removed values cannot be restored by it, only
+   from that backup.
+2. **Dry run** (the default; read-only session, counts only):
+   `node dist/ops/scrub-payment-secrets.js` (checkout: `npm run payments:scrub-secrets`),
+   with the app's `DB_HOST`/`DB_PORT`/`DB_USERNAME`/`DB_PASSWORD`/`DB_DATABASE`
+   (`DB_SSL=true` for TLS). It reports rows scanned, rows and fields
+   containing `client_secret`/`clientSecret` (at any depth), and rows whose
+   metadata is not a JSON object, which are never changed (those that mention
+   a secret key name are counted for review by hand). Exit 0 = nothing to do,
+   2 = rows to clean, 1 = error. Values are never printed; `--list-ids` adds
+   the payment ids.
+3. **Apply:** `node dist/ops/scrub-payment-secrets.js --apply --i-have-a-verified-backup`
+   (needs a role that may `UPDATE payments`). It removes only those keys and
+   leaves every other key, value and column as stored. Batches of 500
+   (`--batch-size N`), each committed on its own, skip rows another session
+   has locked instead of waiting, so the backend may keep running. Exit 0 =
+   done; exit 1 with "rows still containing a secret" means some rows were
+   locked: run it again. Running it again at any time is safe; an interrupted
+   run is resumed the same way. A final dry run must exit 0.
+4. **Older copies still contain the values.** Database backups, dumps, WAL
+   archives, replicas and retained logs taken before the run are not touched
+   by this tool. Handle them under the customer's retention policy (expire or
+   destroy them when no longer needed); keep the backup from step 1 encrypted
+   and only as long as the recovery plan requires.
+
 ### The update package
 
 The shipping bundle is built by CI (`.github/workflows/update-bundle.yml`) on

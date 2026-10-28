@@ -97,7 +97,7 @@ jobs:
       # suite also runs there so a timezone-dependent test fails here first.
       - name: Dates and unit tests west of UTC
         run: |
-          TZ=America/New_York npx jest --config ./test/jest-e2e.json --runInBand test/invoice-dates.e2e-spec.ts
+          TZ=America/New_York npx jest --config ./test/jest-e2e.json --runInBand test/invoice-dates.e2e-spec.ts test/business-timezone.e2e-spec.ts
           TZ=America/New_York npm test
         env:
           NODE_ENV: test

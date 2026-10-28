@@ -311,9 +311,9 @@ API keys fail closed:
 | `POST /v1/auth/login` | Email and password |
 | `POST /v1/webhooks/stripe` | Stripe signature on the raw body |
 | `/v1/invoices/**`, `/v1/clients/**` | JWT, or an API key with the named permission |
-| `/v1/sync/**`, `/v1/user-settings`, `/v1/api-keys/**`, `/v1/invoice-templates/**`, `/v1/feedback/**`, `/v1/gdpr/**`, `/v1/auth/2fa/*`, `/v1/auth/change-password` | JWT only; API keys get 401 |
+| `/v1/sync/**`, `/v1/user-settings`, `/v1/api-keys/**`, `/v1/invoice-templates/**`, `/v1/feedback/**`, `/v1/gdpr/**`, `/v1/auth/2fa/*`, `/v1/auth/change-password`, `PATCH /v1/auth/profile` | JWT only; API keys get 401 |
 
-The mobile app also offers `read:`/`write:` permissions for payments, settings, dashboard and reports. No route accepts API keys for those areas today, so those permissions have no effect.
+Permissions in use: `read:invoices`, `write:invoices`, `delete:invoices`, `read:clients`, `write:clients`, `delete:clients`, and `read:dashboard` (for `GET /v1/invoices/stats`). The mobile app also offers permissions for payments, settings and reports; no route accepts API keys for those areas, so those permissions grant nothing today.
 
 ## Reviews of 2026-10-25 and known gaps
 

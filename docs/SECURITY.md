@@ -311,7 +311,7 @@ Each report records what was proven with a failing test, what was fixed, how it 
 
 Known gaps, not fixed:
 
-- The attachment URL check validates format only; the server does not fetch attachment URLs, and the mobile app does not yet re-check cached URLs before opening them (needs a mobile release).
+- The attachment URL check validates format only; the server does not fetch attachment URLs. The mobile app source now re-checks every attachment URL (including rows cached on the device) before opening or loading it, but installed apps get this only from a new app build; the server cannot fix URLs already cached on a device.
 - The permission guard admits API keys on routes without a `@RequirePermission` decorator. Unit tests fail if the invoices or clients controller gains such a route; other controllers rely on review.
 - Offline-sync conflicts: the server applies changes to the latest state and does not detect concurrent edits of the same field. A protocol is proposed in [proposals/sync-conflicts.md](proposals/sync-conflicts.md) and waits on the owner's decisions; it is not implemented.
 - Payments: refunds and disputes are not handled; zero-decimal currencies (such as JPY) are multiplied by 100; the full PaymentIntent, including `client_secret`, is copied into payment metadata; each `/pay` call creates a new PaymentIntent.

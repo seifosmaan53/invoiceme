@@ -15,7 +15,7 @@ class DatabaseHelper {
 
   /// 3: sync protocol 2 (record revisions; base revision, status and conflict
   /// id on queued changes).
-  static const int schemaVersion = 3;
+  static const int schemaVersion = 4;
 
   static Future<Database> getDatabase() async {
     if (_database != null) return _database!;
@@ -145,7 +145,9 @@ class DatabaseHelper {
     if (oldVersion < 2) {
       await _addColumnIfMissing(db, 'clients_local', 'avatar_url', 'TEXT');
     }
-    if (oldVersion < 3) {
+    // Version 4 repeats the version-3 steps: builds of the unreleased protocol-2
+    // branch created version 3 before every pending_changes column existed.
+    if (oldVersion < 4) {
       for (final table in ['clients_local', 'invoices_local', 'invoice_items_local']) {
         await _addColumnIfMissing(db, table, 'revision', 'INTEGER');
       }

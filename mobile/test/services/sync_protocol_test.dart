@@ -284,6 +284,73 @@ void main() {
     });
   });
 
+  group('rebase of rows already sent (new change_id)', () {
+    test('reviewer scenario: item before its invoice in one batch, item failed, invoice applied', () {
+      final item = row('i1', type: 'invoice_item', objectId: 'it1', base: 2, parentId: 'inv', parentBase: 3);
+      final invoice = row('v1', type: 'invoice', objectId: 'inv', base: 3);
+      final batch = selectPushBatch([item, invoice]);
+      expect(batch.map((r) => r['id']), ['i1', 'v1']);
+
+      final plan = planPushResults(batch, {
+        'results': [
+          {'index': 0, 'change_id': 'i1', 'status': 'failed', 'reason': 'rejected'},
+          {'index': 1, 'change_id': 'v1', 'status': 'applied', 'revision': 4},
+        ],
+      });
+      // As stored after the round: the item failed (not applied).
+      final itemNow = {...item, 'last_result': sentFailed, 'attempts': plan.actions[0].attempts};
+      final updates = planRebases([(plan.actions[1], invoice)], [itemNow]);
+      expect(updates.single.rowId, 'i1');
+      expect(updates.single.values, {'parent_base_revision': 4});
+      expect(updates.single.newChangeId, isTrue);
+
+      // The resend carries the new parent_revision under a new change_id.
+      final resent = {...itemNow, ...updates.single.values, 'id': 'i1-new', 'last_result': null};
+      final change = pendingRowToChange(resent);
+      expect(change['change_id'], 'i1-new');
+      expect(change['parent_revision'], 4);
+    });
+
+    test('never-sent rows keep their change_id', () {
+      final invoice = row('v1', type: 'invoice', objectId: 'inv', base: 3);
+      final item = row('i1', type: 'invoice_item', objectId: 'it1', parentId: 'inv', parentBase: 3);
+      final plan = planPushResults([invoice], {
+        'results': [
+          {'index': 0, 'change_id': 'v1', 'status': 'applied', 'revision': 4},
+        ],
+      });
+      final u = planRebases([(plan.actions.single, invoice)], [item]).single;
+      expect((u.rowId, u.newChangeId), ('i1', false));
+    });
+
+    test('base_revision rebase of a sent-and-failed row also gets a new change_id', () {
+      final first = row('a1', objectId: 'A', base: 3);
+      final later = {...row('a2', objectId: 'A', base: 3), 'last_result': sentFailed};
+      final plan = planPushResults([first], {
+        'results': [
+          {'index': 0, 'change_id': 'a1', 'status': 'applied', 'revision': 4},
+        ],
+      });
+      final u = planRebases([(plan.actions.single, first)], [later]).single;
+      expect(u.values, {'base_revision': 4});
+      expect(u.newChangeId, isTrue);
+    });
+
+    test('rows whose last send has no result are not rebased', () {
+      final invoice = row('v1', type: 'invoice', objectId: 'inv', base: 3);
+      final item = {
+        ...row('i1', type: 'invoice_item', objectId: 'it1', parentId: 'inv', parentBase: 3),
+        'last_result': sentUnknown,
+      };
+      final plan = planPushResults([invoice], {
+        'results': [
+          {'index': 0, 'change_id': 'v1', 'status': 'applied', 'revision': 4},
+        ],
+      });
+      expect(planRebases([(plan.actions.single, invoice)], [item]), isEmpty);
+    });
+  });
+
   group('failed changes (give up)', () {
     Map<String, dynamic> failedWith(String id, String? reason) => {
           'results': [
@@ -311,7 +378,23 @@ void main() {
       }
     });
 
-    test('failed without a reason (server error) is not counted', () {
+    test('"rejected" is counted and given up at the third failure', () {
+      final a1 = planPushResults([row('c')], failedWith('c', 'rejected')).actions.single;
+      expect((a1.kind, a1.attempts), (PushActionKind.keepPending, 1));
+      final a3 = planPushResults([row('c', attempts: 2)], failedWith('c', 'rejected')).actions.single;
+      expect((a3.kind, a3.attempts), (PushActionKind.giveUp, 3));
+      expect(failureReasonText('rejected'), contains('refused'));
+    });
+
+    test('a failure counts at most once per sync (later rounds do not count)', () {
+      final a = planPushResults([row('c', attempts: 2)], failedWith('c', 'rejected'), countedThisSync: {'c'}).actions.single;
+      expect((a.kind, a.attempts), (PushActionKind.keepPending, 2));
+      // A non-retryable reason still gives up at once.
+      final b = planPushResults([row('c', attempts: 1)], failedWith('c', 'not_found'), countedThisSync: {'c'}).actions.single;
+      expect(b.kind, PushActionKind.giveUp);
+    });
+
+    test('failed without a reason (older server, server error) is not counted', () {
       final a = planPushResults([row('c', attempts: 2)], failedWith('c', null)).actions.single;
       expect((a.kind, a.attempts), (PushActionKind.keepPending, 2));
     });

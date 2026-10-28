@@ -133,7 +133,8 @@ class DatabaseHelper {
         last_reason TEXT,
         attempts INTEGER NOT NULL DEFAULT 0,
         parent_id TEXT,
-        parent_base_revision INTEGER
+        parent_base_revision INTEGER,
+        last_result TEXT
       );
     ''');
   }
@@ -165,6 +166,8 @@ class DatabaseHelper {
     // Invoice items: the item's invoice and its revision when queued (sent as parent_revision).
     'parent_id': 'TEXT',
     'parent_base_revision': 'INTEGER',
+    // What is known about the last send (see sync_protocol.dart rebaseModeOf).
+    'last_result': 'TEXT',
   };
 
   static Future<void> _addColumnIfMissing(Database db, String table, String column, String definition) async {

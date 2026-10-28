@@ -174,11 +174,18 @@ class SyncService implements FailedChangesStore {
     var state = SyncState.ok;
     var synced = 0, conflicts = 0, failed = 0;
     String? message;
+    // Rows whose failure was counted in this sync (at most once per sync).
+    final counted = <String>{};
 
     for (var round = 0; round < maxPushRounds; round++) {
       final pending = await _pendingRows(db);
       final batch = selectPushBatch(pending);
       if (batch.isEmpty) break;
+
+      // Until a result arrives, the server may or may not have applied them.
+      for (final row in batch) {
+        await db.update('pending_changes', {'last_result': sentUnknown}, where: 'id = ?', whereArgs: [row['id']]);
+      }
 
       Map<String, dynamic> response;
       try {
@@ -194,7 +201,7 @@ class SyncService implements FailedChangesStore {
         rethrow;
       }
 
-      final plan = planPushResults(batch, response);
+      final plan = planPushResults(batch, response, countedThisSync: counted);
       if (plan.resultsMissing) {
         debugPrint('Sync push: response without per-change results; nothing marked');
         return _PushOutcome(SyncState.serverUpdateRequired, synced, conflicts, failed, plan.message);
@@ -202,7 +209,13 @@ class SyncService implements FailedChangesStore {
       if (plan.state == SyncState.appUpdateRequired) state = SyncState.appUpdateRequired;
       message ??= plan.message;
 
-      await _applyPushPlan(db, batch, plan, pending);
+      for (final a in plan.actions) {
+        if (a.status == 'failed' && a.reason != null) counted.add(a.changeId);
+      }
+      final renamed = await _applyPushPlan(db, batch, plan);
+      for (final entry in renamed.entries) {
+        if (counted.remove(entry.key)) counted.add(entry.value);
+      }
       synced += plan.count(PushActionKind.synced);
       conflicts += plan.count(PushActionKind.conflict);
       failed += plan.count(PushActionKind.keepPending) + plan.count(PushActionKind.giveUp);
@@ -217,49 +230,51 @@ class SyncService implements FailedChangesStore {
     return _PushOutcome(state, synced, conflicts, failed, message);
   }
 
-  Future<void> _applyPushPlan(
+  /// Stores the round's results, then rebases queued rows. Returns renamed
+  /// rows (old change_id -> new change_id).
+  Future<Map<String, String>> _applyPushPlan(
     Database db,
     List<Map<String, Object?>> batch,
     PushPlan plan,
-    List<Map<String, Object?>> pending,
   ) async {
+    final settled = <(PushAction, Map<String, Object?>)>[];
     for (var i = 0; i < plan.actions.length; i++) {
       final action = plan.actions[i];
       switch (action.kind) {
         case PushActionKind.synced:
-          await db.update('pending_changes', {'synced': 1, 'last_reason': null},
+          await db.update('pending_changes', {'synced': 1, 'last_reason': null, 'last_result': null},
               where: 'id = ?', whereArgs: [action.changeId]);
           final table = localTableFor[action.objectType];
           if (action.revision != null && table != null && versionedObjectTypes.contains(action.objectType)) {
             await db.update(table, {'revision': action.revision}, where: 'id = ?', whereArgs: [action.objectId]);
           }
-          final rebased = rebasedBaseRevisions(action, batch[i], pending);
-          for (final entry in rebased.entries) {
-            await db.update('pending_changes', {'base_revision': entry.value},
-                where: 'id = ?', whereArgs: [entry.key]);
-          }
-          final reparented = rebasedParentRevisions(action, batch[i], pending);
-          for (final entry in reparented.entries) {
-            await db.update('pending_changes', {'parent_base_revision': entry.value},
-                where: 'id = ?', whereArgs: [entry.key]);
-          }
+          settled.add((action, batch[i]));
           break;
         case PushActionKind.conflict:
           await db.update(
             'pending_changes',
-            {'status': conflictStatus, 'conflict_id': action.conflictId, 'last_reason': action.reason},
+            {'status': conflictStatus, 'conflict_id': action.conflictId, 'last_reason': action.reason, 'last_result': null},
             where: 'id = ?',
             whereArgs: [action.changeId],
           );
           break;
         case PushActionKind.keepPending:
-          await db.update('pending_changes', {'last_reason': action.reason, 'attempts': action.attempts},
-              where: 'id = ?', whereArgs: [action.changeId]);
+          await db.update(
+            'pending_changes',
+            {
+              'last_reason': action.reason,
+              'attempts': action.attempts,
+              // A failed result means not applied; no result leaves it unknown.
+              'last_result': action.status == 'failed' ? sentFailed : sentUnknown,
+            },
+            where: 'id = ?',
+            whereArgs: [action.changeId],
+          );
           break;
         case PushActionKind.giveUp:
           await db.update(
             'pending_changes',
-            {'status': failedStatus, 'last_reason': action.reason, 'attempts': action.attempts},
+            {'status': failedStatus, 'last_reason': action.reason, 'attempts': action.attempts, 'last_result': sentFailed},
             where: 'id = ?',
             whereArgs: [action.changeId],
           );
@@ -267,6 +282,20 @@ class SyncService implements FailedChangesStore {
           break;
       }
     }
+
+    final renamed = <String, String>{};
+    if (settled.isEmpty) return renamed;
+    for (final update in planRebases(settled, await _pendingRows(db))) {
+      final values = <String, Object?>{...update.values};
+      if (update.newChangeId) {
+        final newId = const Uuid().v4();
+        values['id'] = newId;
+        values['last_result'] = null;
+        renamed[update.rowId] = newId;
+      }
+      await db.update('pending_changes', values, where: 'id = ?', whereArgs: [update.rowId]);
+    }
+    return renamed;
   }
 
   /// Pull server changes into the local cache; returns the open conflict count.
@@ -385,6 +414,13 @@ class SyncService implements FailedChangesStore {
     final rows = await db.query('pending_changes',
         where: 'synced = ? AND status = ?', whereArgs: [0, failedStatus], orderBy: 'created_at ASC');
     return rows.map(FailedChange.fromRow).toList();
+  }
+
+  @override
+  Future<void> retry(String id) async {
+    final db = await DatabaseHelper.getDatabase();
+    await db.update('pending_changes', {'status': pendingStatus, 'attempts': 0, 'last_reason': null},
+        where: 'id = ? AND status = ?', whereArgs: [id, failedStatus]);
   }
 
   @override

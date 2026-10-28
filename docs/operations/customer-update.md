@@ -93,7 +93,7 @@ It reads the schema first. A check whose tables/columns are missing, or whose
 query fails, is `[NOT CHECKED]`; exit code 3 means **not verified**, never
 clean. Exit codes: 0 every check ran, no findings; 1 findings that need
 review; 2 could not run; 3 not verified. The **schema fingerprint** it prints
-(markers for migrations 001-018, origin guessed from index names) is a
+(markers for migrations 001-020, origin guessed from index names) is a
 diagnostic clue, not a migration history. The info line
 `encrypted_client_fields` lists clients whose fields look encrypted; if it
 lists any, or if it is NOT CHECKED, keep `ENCRYPTION_KEY` exactly as it is.
@@ -106,7 +106,16 @@ migration `018_add_device_change_change_id.sql` (additive, idempotent, no
 data change) **before** the new server starts; if it stops with
 `migration 018: device_changes has N duplicate (user_id, change_id)
 group(s)`, do not edit data on your own: record the output and ask the owner
-(see `docs/SYNC-CONTRACT.md`, "Compatibility and rollout"). Other migrations
+(see `docs/SYNC-CONTRACT.md`, "Compatibility and rollout"). Sync protocol 2
+then needs migration `019_sync_revisions_conflicts.sql` (additive,
+idempotent; adds revision columns, three sync tables and the revision and
+tombstone triggers) **before** the new server starts; the server reads the
+new columns on every client, invoice and item query. After applying it, the
+server checks the triggers itself at startup and refuses sync writes (503) if
+they are missing; a fingerprint marker alone does not prove the triggers
+exist. Then migration `020_payment_events_and_state.sql` (additive,
+idempotent; refund and dispute columns on `payments`, `payment_events`)
+before the new server starts. Keep `DB_SYNCHRONIZE` unset for upgrades. Other migrations
 may be needed, depending on how this installation's schema was created (some SQL files run
 by hand, TypeORM synchronize, or later edits). Decide from the actual schema:
 
@@ -245,6 +254,42 @@ Expected downtime: from step 6.1 to section 7, i.e. the window backup, its
 restore and verification, dependency install, the rehearsed migrations and
 checks, using the timings measured in section 5.4, plus a margin. For a small
 database this is typically 30-60 minutes.
+
+### Removing stored Stripe client secrets (once, after the update)
+
+Releases before the payment fix stored each Stripe PaymentIntent's
+`client_secret` in `payments.metadata_json` (from `/pay`, and from the webhook,
+which merged the whole PaymentIntent into it). The new release stops storing
+it; rows written earlier keep it until this tool removes it. Run it once,
+after section 7 has passed, in the maintenance window or later.
+
+1. **Prerequisite: a verified backup** taken after the update: the window
+   backup from step 6.2 qualifies if no payment was made since; otherwise take
+   a new one and prove it with `verify-restore` exactly as in step 6.3. The
+   tool keeps no rollback file: removed values cannot be restored by it, only
+   from that backup.
+2. **Dry run** (the default; read-only session, counts only):
+   `node dist/ops/scrub-payment-secrets.js` (checkout: `npm run payments:scrub-secrets`),
+   with the app's `DB_HOST`/`DB_PORT`/`DB_USERNAME`/`DB_PASSWORD`/`DB_DATABASE`
+   (`DB_SSL=true` for TLS). It reports rows scanned, rows and fields
+   containing `client_secret`/`clientSecret` (at any depth), and rows whose
+   metadata is not a JSON object, which are never changed (those that mention
+   a secret key name are counted for review by hand). Exit 0 = nothing to do,
+   2 = rows to clean, 1 = error. Values are never printed; `--list-ids` adds
+   the payment ids.
+3. **Apply:** `node dist/ops/scrub-payment-secrets.js --apply --i-have-a-verified-backup`
+   (needs a role that may `UPDATE payments`). It removes only those keys and
+   leaves every other key, value and column as stored. Batches of 500
+   (`--batch-size N`), each committed on its own, skip rows another session
+   has locked instead of waiting, so the backend may keep running. Exit 0 =
+   done; exit 1 with "rows still containing a secret" means some rows were
+   locked: run it again. Running it again at any time is safe; an interrupted
+   run is resumed the same way. A final dry run must exit 0.
+4. **Older copies still contain the values.** Database backups, dumps, WAL
+   archives, replicas and retained logs taken before the run are not touched
+   by this tool. Handle them under the customer's retention policy (expire or
+   destroy them when no longer needed); keep the backup from step 1 encrypted
+   and only as long as the recovery plan requires.
 
 ### The update package
 

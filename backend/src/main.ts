@@ -11,6 +11,7 @@ import * as compression from 'compression';
 import helmet from 'helmet';
 import { applyHttpSecurity } from './core/https-enforcement';
 import { createRateLimiters } from './core/rate-limit';
+import { assertBusinessTimezone } from './common/calendar-date';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -19,6 +20,12 @@ async function bootstrap() {
   });
   const configService = app.get(ConfigService);
   const nodeEnv = configService.get<string>('NODE_ENV') || 'development';
+
+  // "Today" for issue/due dates, recurring runs and overdue checks is taken in
+  // BUSINESS_TIMEZONE (IANA name); unset = the process's local timezone (TZ).
+  // A misspelt zone stops startup here. See common/calendar-date.ts.
+  const businessTimezone = assertBusinessTimezone(configService.get<string>('BUSINESS_TIMEZONE'));
+  console.log(`📅 Business timezone: ${businessTimezone ?? `process local (${Intl.DateTimeFormat().resolvedOptions().timeZone})`}`);
 
   // Security: one trusted-proxy policy (TRUST_PROXY) for req.ip, req.protocol,
   // req.secure, HTTPS enforcement, rate-limit keys and logs; then, in

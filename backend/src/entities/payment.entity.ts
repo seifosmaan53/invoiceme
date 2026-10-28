@@ -45,6 +45,24 @@ export class Payment {
   @Column({ type: 'enum', enum: PaymentStatus, default: PaymentStatus.PENDING })
   status: PaymentStatus;
 
+  /** Amount returned to the customer (provider state, migration 020). The payment stays completed. */
+  @Column({ name: 'refunded_amount', type: 'numeric', precision: 12, scale: 2, default: 0 })
+  refundedAmount: number;
+
+  /** Provider dispute status (e.g. needs_response, under_review, won, lost); null when never disputed. */
+  @Column({ name: 'dispute_status', type: 'varchar', length: 30, nullable: true })
+  disputeStatus: string | null;
+
+  @Column({ name: 'disputed_amount', type: 'numeric', precision: 12, scale: 2, default: 0 })
+  disputedAmount: number;
+
+  @Column({ name: 'provider_charge_id', type: 'varchar', length: 255, nullable: true })
+  providerChargeId: string | null;
+
+  /** Key sent to the provider when this attempt was created (no secrets). */
+  @Column({ name: 'idempotency_key', type: 'varchar', length: 120, nullable: true })
+  idempotencyKey: string | null;
+
   @Column({ name: 'metadata_json', type: 'jsonb', nullable: true })
   metadataJson: Record<string, any>;
 

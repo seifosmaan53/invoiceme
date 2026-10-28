@@ -83,15 +83,15 @@ describe('Integrity report: schema compatibility (E2E)', () => {
     }
   });
 
-  it('the SQL migration chain 001-018 applies cleanly to a fresh schema', async () => {
+  it('the SQL migration chain 001-020 applies cleanly to a fresh schema', async () => {
     // Regression: 012 used an invoice_status value ('unpaid') that does not
     // exist, so the chain stopped there on every fresh database.
-    const { client } = await schemaWith(range(1, 18));
+    const { client } = await schemaWith(range(1, 20));
     await client.end();
   });
 
-  it('a full install (migrations 001-018) runs every check and is reported clean', async () => {
-    const { client } = await schemaWith(range(1, 18));
+  it('a full install (migrations 001-020) runs every check and is reported clean', async () => {
+    const { client } = await schemaWith(range(1, 20));
     try {
       const report = await runIntegrityReport(client);
       expect(report.results.every((r) => r.status === 'checked')).toBe(true);
@@ -106,7 +106,7 @@ describe('Integrity report: schema compatibility (E2E)', () => {
   });
 
   it('lists clients whose fields look encrypted, as information only', async () => {
-    const { name, client } = await schemaWith(range(1, 18));
+    const { name, client } = await schemaWith(range(1, 20));
     await admin.query(`INSERT INTO ${name}.users (id, email, password_hash, name) VALUES ('11111111-1111-1111-1111-111111111111','o@enc.invalid','x','Owner')`);
     await admin.query(`INSERT INTO ${name}.clients (id, user_id, name, email) VALUES
       ('22222222-2222-2222-2222-222222222222','11111111-1111-1111-1111-111111111111','Plain Ltd','plain@enc.invalid'),
@@ -124,7 +124,7 @@ describe('Integrity report: schema compatibility (E2E)', () => {
   });
 
   it('a check whose query fails is NOT CHECKED, the remaining checks still run, and the transaction stays read-only', async () => {
-    const { name, client } = await schemaWith(range(1, 18));
+    const { name, client } = await schemaWith(range(1, 20));
     // Same column, incompatible type: the ->> operator in two checks fails on text.
     await admin.query(`ALTER TABLE ${name}.device_changes ALTER COLUMN change_json TYPE text USING change_json::text`);
     try {

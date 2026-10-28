@@ -98,7 +98,8 @@ export class SyncConflictsService {
   ) {}
 
   static label(conflict: SyncConflict): string {
-    const fields = { ...(conflict.serverFields ?? {}), ...conflict.clientFields };
+    // The record as the server knows it identifies it best; the device's values are the fallback.
+    const fields = { ...conflict.clientFields, ...(conflict.serverFields ?? {}) };
     switch (conflict.objectType) {
       case ChangeObjectType.INVOICE:
         return fields.number ? `Invoice ${fields.number}` : 'Invoice';

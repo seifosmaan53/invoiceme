@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, IsNull } from 'typeorm';
 import { Invoice, InvoiceType, InvoiceStatus } from '../entities/invoice.entity';
 import { InvoiceItem } from '../entities/invoice-item.entity';
 import { Client } from '../entities/client.entity';
@@ -12,7 +12,8 @@ import { NotificationService } from '../core/services/notification.service';
 import { InvoiceNumberFormatterService } from '../core/services/invoice-number-formatter.service';
 import { ChangeObjectType } from '../entities/device-change.entity';
 import { ownedClient, withoutForeignClient, withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
-import { calendarDateParts, toCalendarDate } from '../common/calendar-date';
+import { businessToday, calendarDateParts, toCalendarDate } from '../common/calendar-date';
+import { paymentTotals } from '../payments/payment-state';
 
 // Shown when an invoice still points at a client of another user (a row
 // written before ownership was enforced). That client is never returned.
@@ -133,11 +134,10 @@ export class InvoicesService {
       },
     });
 
-    // Calculate total paid amount, counting only payments in the invoice's
-    // currency (same rule as PaymentsService.markInvoicePaidIfCovered)
-    const paidCents = payments
-      .filter((payment) => payment.currency.toLowerCase() === invoice.currency.toLowerCase())
-      .reduce((sum, payment) => sum + Math.round(Number(payment.amount) * 100), 0);
+    // Net received in the invoice's currency, after refunds and disputes
+    // (same rule as PaymentsService.markInvoicePaidIfCovered): an old
+    // successful payment that was refunded does not make the invoice paid.
+    const paidCents = paymentTotals(payments, invoice.currency).netCents;
 
     // Update status if fully paid
     if (paidCents >= Math.round(Number(invoice.total) * 100)) {
@@ -189,7 +189,7 @@ export class InvoicesService {
     // Scoped to the owner: another user's invoice is answered exactly like a
     // missing one, so the response does not reveal that the id exists.
     const invoice = await this.invoiceRepository.findOne({
-      where: { id, userId, deletedAt: null },
+      where: { id, userId, deletedAt: IsNull() },
       relations: ['client', 'items'],
     });
 
@@ -202,7 +202,7 @@ export class InvoicesService {
 
     // Reload invoice to get updated status
     return this.invoiceRepository.findOne({
-      where: { id, userId, deletedAt: null },
+      where: { id, userId, deletedAt: IsNull() },
       relations: ['client', 'items'],
     }) as Promise<Invoice>;
   }
@@ -210,7 +210,7 @@ export class InvoicesService {
   async create(createInvoiceDto: CreateInvoiceDto, userId: string): Promise<Invoice> {
     // Verify client belongs to user
     const client = await this.clientRepository.findOne({
-      where: { id: createInvoiceDto.clientId, userId, deletedAt: null },
+      where: { id: createInvoiceDto.clientId, userId, deletedAt: IsNull() },
     });
 
     if (!client) {
@@ -285,7 +285,7 @@ export class InvoicesService {
 
     if (updateInvoiceDto.clientId) {
       const client = await this.clientRepository.findOne({
-        where: { id: updateInvoiceDto.clientId, userId, deletedAt: null },
+        where: { id: updateInvoiceDto.clientId, userId, deletedAt: IsNull() },
       });
       if (!client) {
         throw new NotFoundException('Client not found');
@@ -401,8 +401,9 @@ export class InvoicesService {
 
     try {
       // Generate new invoice number (same type as original)
-      // Duplicates are created with today's date
-      const invoiceNumber = await this.generateInvoiceNumber(userId, originalInvoice.type, new Date());
+      // Duplicates are created with today's date (business timezone)
+      const today = businessToday();
+      const invoiceNumber = await this.generateInvoiceNumber(userId, originalInvoice.type, today);
 
       // Create new invoice (clone of original)
       const invoice = this.invoiceRepository.create({
@@ -411,7 +412,7 @@ export class InvoicesService {
         type: originalInvoice.type,
         number: invoiceNumber,
         status: InvoiceStatus.SENT, // Start as sent (ready to send)
-        issueDate: new Date(), // Set to today
+        issueDate: today as unknown as Date,
         dueDate: originalInvoice.dueDate ? (toCalendarDate(originalInvoice.dueDate) as unknown as Date) : null,
         currency: originalInvoice.currency,
         subtotal: originalInvoice.subtotal,
@@ -549,7 +550,7 @@ export class InvoicesService {
       
       if (extractedSequence !== null) {
         // Check if it's from the same year (calendar years, as written)
-        const year = calendarDateParts(issueDate ?? new Date()).year;
+        const year = calendarDateParts(issueDate ?? businessToday()).year;
         let lastYear = year;
         if (lastInvoice.issueDate) {
           try {
@@ -623,7 +624,7 @@ export class InvoicesService {
    */
   async findAllForExport(userId: string): Promise<Invoice[]> {
     const invoices = await this.invoiceRepository.find({
-      where: { userId, deletedAt: null },
+      where: { userId, deletedAt: IsNull() },
       relations: ['client'],
       order: { issueDate: 'DESC' },
     });
@@ -638,8 +639,7 @@ export class InvoicesService {
     totalRevenue: number;
     monthlyRevenue: number;
   }> {
-    const year = new Date().getFullYear();
-    const month = new Date().getMonth() + 1;
+    const { year, month } = calendarDateParts(businessToday());
 
     const [raw] = await this.dataSource.query(
       `

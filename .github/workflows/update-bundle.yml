@@ -185,7 +185,7 @@ jobs:
           VERIFY_ACCEPT_EQUIVALENT=true node dist/ops/verify-restore.js | tee "$RUNNER_TEMP/quiet.txt"
           grep -q "^OK: all" "$RUNNER_TEMP/quiet.txt"
           grep -qE "\[MATCH\] clients: source 2 rows, restored 2 rows" "$RUNNER_TEMP/quiet.txt"
-          grep -qE "\[MATCH\] sequences: source 1, restored 1" "$RUNNER_TEMP/quiet.txt"
+          grep -qE "\[MATCH\] sequences: source 2, restored 2" "$RUNNER_TEMP/quiet.txt"
 
       - name: Render PDFs with the system browser
         working-directory: ${{ env.BUNDLE }}

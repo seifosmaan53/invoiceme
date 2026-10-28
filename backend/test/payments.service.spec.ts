@@ -6,6 +6,9 @@ import { Payment, PaymentStatus } from '../src/entities/payment.entity';
 import { Invoice, InvoiceStatus } from '../src/entities/invoice.entity';
 import { User } from '../src/entities/user.entity';
 import { NotificationService } from '../src/core/services/notification.service';
+import { StripeService } from '../src/core/services/stripe.service';
+import { PaymentEvent } from '../src/entities/payment-event.entity';
+import { DataSource } from 'typeorm';
 
 describe('PaymentsService', () => {
   let service: PaymentsService;
@@ -53,6 +56,10 @@ describe('PaymentsService', () => {
           provide: NotificationService,
           useValue: mockNotificationService,
         },
+        // Refund/dispute processing and checkout are covered by payments-state.e2e-spec.ts
+        { provide: getRepositoryToken(PaymentEvent), useValue: { findOne: jest.fn(), createQueryBuilder: jest.fn() } },
+        { provide: StripeService, useValue: {} },
+        { provide: DataSource, useValue: {} },
       ],
     }).compile();
 

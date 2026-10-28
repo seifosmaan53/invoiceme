@@ -35,7 +35,7 @@ import { S3Service } from '../core/services/s3.service';
 import { StripeService } from '../core/services/stripe.service';
 import { PaymentsService } from '../payments/payments.service';
 import { isOnlinePaymentCurrency, UnsupportedPaymentCurrencyError } from '../payments/payment-currency';
-import { calendarDateAsLocal } from '../common/calendar-date';
+import { calendarDateAsLocal, toCalendarDate } from '../common/calendar-date';
 import { AuditService } from '../core/services/audit.service';
 import { EmailService } from '../core/services/email.service';
 import { CsvService } from '../core/services/csv.service';
@@ -198,7 +198,9 @@ export class InvoicesController {
       { invoiceNumber: invoice.number },
       req.ip,
     );
-    return invoice;
+    // Payment state beside the invoice's own status (refunds and disputes do
+    // not change the status; see docs/PAYMENTS.md).
+    return { ...invoice, paymentSummary: await this.paymentsService.summaryFor(invoice) };
   }
 
   @Post()
@@ -777,19 +779,12 @@ export class InvoicesController {
       );
     }
 
-    // Create Stripe PaymentIntent
-    let paymentIntent;
+    // Reuses an open attempt for the same amount, refuses a second charge
+    // while one is processing or succeeded, and charges only what is still
+    // due (payments.service.ts startCheckout; docs/PAYMENTS.md).
+    let attempt;
     try {
-      paymentIntent = await this.stripeService.createPaymentIntent(
-        // invoice.total is a Postgres numeric (string); Stripe needs a number.
-        Number(invoice.total),
-        invoice.currency,
-        {
-          invoice_id: invoice.id,
-          user_id: user.userId,
-          invoice_number: invoice.number,
-        },
-      );
+      attempt = await this.paymentsService.startCheckout(invoice);
     } catch (error: any) {
       // Provide user-friendly error messages
       if (error?.message?.includes('Invalid Stripe API key')) {
@@ -801,34 +796,68 @@ export class InvoicesController {
       throw error;
     }
 
-    // Create payment record in database
-    await this.paymentsService.createPayment(
-      invoice.id,
-      paymentIntent.id,
-      invoice.total,
-      invoice.currency,
-      // client_secret goes only to the caller below; it is not stored
-      {
-        payment_intent_id: paymentIntent.id,
-        status: paymentIntent.status,
-      },
-    );
-
     await this.auditService.log(
       user.userId,
       AuditAction.UPDATE,
       AuditResource.INVOICE,
       id,
-      { invoiceNumber: invoice.number, action: 'create_payment_intent', paymentIntentId: paymentIntent.id },
+      {
+        invoiceNumber: invoice.number,
+        action: attempt.reused ? 'reuse_payment_intent' : 'create_payment_intent',
+        paymentIntentId: attempt.paymentIntentId,
+      },
       req.ip,
     );
 
     return {
-      clientSecret: paymentIntent.client_secret,
-      paymentIntentId: paymentIntent.id,
-      amount: invoice.total,
-      currency: invoice.currency,
+      clientSecret: attempt.clientSecret,
+      paymentIntentId: attempt.paymentIntentId,
+      amount: attempt.amount.toFixed(2),
+      currency: attempt.currency,
+      reused: attempt.reused,
     };
+  }
+
+  @Get(':id/payments')
+  @RequirePermission('read:invoices')
+  @ApiOperation({
+    summary: 'Payments of an invoice with their refund, dispute and provider event history',
+    description: 'Amounts are per payment: gross amount, refunded amount and disputed amount are separate figures, not one total.',
+  })
+  @ApiNotFoundResponse({ description: 'Invoice not found (also returned for another user\'s invoice)' })
+  async payments(@Param('id') id: string, @CurrentUser() user: any) {
+    const invoice = await this.invoicesService.findOne(id, user.userId);
+    return {
+      summary: await this.paymentsService.summaryFor(invoice),
+      payments: await this.paymentsService.historyFor(invoice.id),
+    };
+  }
+
+  @Post(':id/reopen')
+  @RequirePermission('write:invoices')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Reopen a paid invoice after a refund or dispute',
+    description: 'Explicit owner action; refunds and disputes never reopen an invoice by themselves. Online payment then asks only for the amount still due.',
+  })
+  @ApiResponse({ status: 400, description: 'The invoice is not paid' })
+  @ApiResponse({ status: 409, description: 'The payments received still cover the invoice' })
+  async reopen(@Param('id') id: string, @CurrentUser() user: any, @Req() req: any) {
+    // Ownership first (another user's invoice answers 404), then the decision
+    // under the per-invoice payment lock (PaymentsService.reopenInvoice).
+    const invoice = await this.invoicesService.findOne(id, user.userId);
+    await this.paymentsService.reopenInvoice(invoice.id, user.userId);
+    const reopened = await this.invoicesService.findOne(id, user.userId);
+    const paymentSummary = await this.paymentsService.summaryFor(reopened);
+    await this.auditService.log(
+      user.userId,
+      AuditAction.UPDATE,
+      AuditResource.INVOICE,
+      id,
+      { invoiceNumber: invoice.number, action: 'reopen', paymentState: paymentSummary.state },
+      req.ip,
+    );
+    return { ...reopened, paymentSummary };
   }
 
   @Get('export/csv')
@@ -856,8 +885,8 @@ export class InvoicesController {
       clientName: invoice.client?.name || '',
       clientEmail: invoice.client?.email || '',
       // date columns come back from Postgres as 'YYYY-MM-DD' strings
-      issueDate: new Date(invoice.issueDate).toISOString().split('T')[0],
-      dueDate: invoice.dueDate ? new Date(invoice.dueDate).toISOString().split('T')[0] : '',
+      issueDate: toCalendarDate(invoice.issueDate),
+      dueDate: invoice.dueDate ? toCalendarDate(invoice.dueDate) : '',
       currency: invoice.currency,
       subtotal: invoice.subtotal.toString(),
       taxTotal: invoice.taxTotal.toString(),

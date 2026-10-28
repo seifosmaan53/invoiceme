@@ -66,6 +66,7 @@ CREATE INDEX IF NOT EXISTS idx_sync_conflicts_object ON sync_conflicts (object_t
 
 -- Outcome of each recorded change, so a replayed change_id gets the same answer.
 ALTER TABLE device_changes ADD COLUMN IF NOT EXISTS base_revision bigint;
+ALTER TABLE device_changes ADD COLUMN IF NOT EXISTS parent_revision bigint;
 ALTER TABLE device_changes ADD COLUMN IF NOT EXISTS outcome varchar(20);
 ALTER TABLE device_changes ADD COLUMN IF NOT EXISTS conflict_id uuid;
 

@@ -311,7 +311,8 @@ describe('Sync protocol 2 (E2E)', () => {
       expect(await items.existsBy({ id: itemId })).toBe(false);
 
       const other = await push2(tokenB, [change('invoice_item', itemId, 'create', { invoiceId, description: 'x' })]);
-      expect(other.body.results[0].status).toBe('failed');
+      // Another user's id: the same generic reason as any unexplained failure
+      expect(other.body.results[0]).toMatchObject({ status: 'failed', reason: 'rejected' });
 
       const conflictId = again.body.results[0].conflict_id;
       const detail = await http().get(`/api/v1/sync/conflicts/${conflictId}`).set('Authorization', `Bearer ${tokenA}`).expect(200);

@@ -96,6 +96,14 @@ class FakeFailedStore implements FailedChangesStore {
   @override
   Future<List<FailedChange>> listFailed() async => List.of(rows);
 
+  final retried = <String>[];
+
+  @override
+  Future<void> retry(String id) async {
+    retried.add(id);
+    rows.removeWhere((r) => r.id == id);
+  }
+
   @override
   Future<void> discard(String id) async {
     discarded.add(id);
@@ -268,6 +276,21 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Discard'));
     await tester.pumpAndSettle();
     expect(store.discarded, ['p1']);
+    expect(find.text('Changes that could not be synced'), findsNothing);
+  });
+
+  testWidgets('Retry queues the change again without a confirmation', (tester) async {
+    final api = FakeConflictsApi(list: [], detail: {});
+    final store = FakeFailedStore([
+      const FailedChange(id: 'p1', objectType: 'client', objectId: 'c1', changeType: 'update', reason: 'rejected', attempts: 3),
+    ]);
+    await tester.pumpWidget(MaterialApp(home: SyncConflictsScreen(api: api, failedChanges: store)));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('refused'), findsOneWidget);
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+    expect(store.retried, ['p1']);
+    expect(store.discarded, isEmpty);
     expect(find.text('Changes that could not be synced'), findsNothing);
   });
 

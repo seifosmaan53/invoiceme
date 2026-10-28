@@ -61,6 +61,8 @@ String failureReasonText(String? reason) {
       return 'The record does not exist on the server.';
     case 'record_deleted':
       return 'The record was deleted on the server.';
+    case 'rejected':
+      return 'The server refused the change (for example invalid data, or a record that is not yours).';
     case 'open_conflict':
       return 'The record has an unresolved sync conflict.';
     case upgradeRequiredReason:
@@ -268,7 +270,14 @@ class PushPlan {
 ///
 /// A response without `results` (an older server that only counts) marks
 /// nothing: no change is treated as synced or as a conflict.
-PushPlan planPushResults(List<Map<String, Object?>> sent, Map<String, dynamic> response) {
+///
+/// [countedThisSync]: rows whose failure was already counted in an earlier
+/// round of the same sync; a failure counts at most once per sync.
+PushPlan planPushResults(
+  List<Map<String, Object?>> sent,
+  Map<String, dynamic> response, {
+  Set<String> countedThisSync = const {},
+}) {
   final notice = response['notice'] as String?;
   final message = response['message'] is String ? response['message'] as String : null;
   final results = response['results'];
@@ -284,8 +293,10 @@ PushPlan planPushResults(List<Map<String, Object?>> sent, Map<String, dynamic> r
       );
 
   PushAction failure(Map<String, Object?> row, String reason) {
-    final attempts = (parseRevision(row['attempts']) ?? 0) + 1;
-    final giveUp = nonRetryableReasons.contains(reason) || attempts >= maxFailedAttempts;
+    final previous = parseRevision(row['attempts']) ?? 0;
+    final counted = countedThisSync.contains(row['id']);
+    final attempts = counted ? previous : previous + 1;
+    final giveUp = nonRetryableReasons.contains(reason) || (!counted && attempts >= maxFailedAttempts);
     return PushAction(
       kind: giveUp ? PushActionKind.giveUp : PushActionKind.keepPending,
       changeId: row['id'] as String,
@@ -417,6 +428,76 @@ Map<String, int> rebasedParentRevisions(
   return rebased;
 }
 
+/// pending_changes.last_result: what is known about the row's last send.
+/// null = never sent; [sentUnknown] = sent, no result (the server may have
+/// applied it); [sentFailed] = the server answered `failed` (not applied).
+const String sentUnknown = 'unknown';
+const String sentFailed = 'failed';
+
+/// How a row may be rebased.
+enum RebaseMode {
+  /// Never sent: change the revision, keep the change_id.
+  keepId,
+
+  /// Sent and failed: the server stored the old revision with the old
+  /// change_id, so the rebased row needs a new change_id.
+  newChangeId,
+
+  /// Outcome of the last send unknown: leave the row as it is, so a resend is
+  /// answered from the stored outcome (`duplicate` if it was applied).
+  skip,
+}
+
+RebaseMode rebaseModeOf(Map<String, Object?> row) {
+  switch (row['last_result']) {
+    case null:
+      return RebaseMode.keepId;
+    case sentFailed:
+      return RebaseMode.newChangeId;
+    default:
+      return RebaseMode.skip;
+  }
+}
+
+/// One rebase to write: new revision values for row [rowId], under a new
+/// change_id when [newChangeId].
+class RebaseUpdate {
+  final String rowId;
+  final Map<String, int> values;
+  final bool newChangeId;
+
+  const RebaseUpdate(this.rowId, this.values, this.newChangeId);
+
+  @override
+  String toString() => 'RebaseUpdate($rowId, $values, newChangeId: $newChangeId)';
+}
+
+/// Rebases after a push round: [settled] are the synced actions with the row
+/// each was sent from; [rowsNow] are the queued rows as stored after the
+/// round's results (so `last_result` reflects this round).
+List<RebaseUpdate> planRebases(
+  List<(PushAction, Map<String, Object?>)> settled,
+  List<Map<String, Object?>> rowsNow,
+) {
+  final values = <String, Map<String, int>>{};
+  for (final (action, sentRow) in settled) {
+    rebasedBaseRevisions(action, sentRow, rowsNow)
+        .forEach((id, rev) => (values[id] ??= {})['base_revision'] = rev);
+    rebasedParentRevisions(action, sentRow, rowsNow)
+        .forEach((id, rev) => (values[id] ??= {})['parent_base_revision'] = rev);
+  }
+  final byId = {for (final r in rowsNow) r['id'] as String: r};
+  final updates = <RebaseUpdate>[];
+  values.forEach((id, v) {
+    final row = byId[id];
+    if (row == null) return;
+    final mode = rebaseModeOf(row);
+    if (mode == RebaseMode.skip) return;
+    updates.add(RebaseUpdate(id, v, mode == RebaseMode.newChangeId));
+  });
+  return updates;
+}
+
 /// The invoice an item change names in its data (create, or a move).
 String? itemInvoiceIdFromData(Map<String, dynamic> data) {
   final v = data['invoiceId'] ?? data['invoice_id'];
@@ -541,4 +622,7 @@ abstract class FailedChangesStore {
 
   /// Removes the queued change from this device; nothing is sent.
   Future<void> discard(String id);
+
+  /// Queues the change again (status pending, attempts 0).
+  Future<void> retry(String id);
 }

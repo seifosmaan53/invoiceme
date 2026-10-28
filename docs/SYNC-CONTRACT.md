@@ -466,17 +466,24 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   is kept in `pending_changes.parent_id`. An item change waits while a change
   of its invoice is sent first; after an `applied` or `merged` invoice result,
   queued item changes on the same invoice version move to the returned
-  revision.
+  revision. A rebase of a row that was already sent and answered `failed`
+  gives it a new `change_id` (the server stored the old revisions with the
+  old one, and a failed change was not applied); a row never sent keeps its
+  id; a row whose last send got no answer is not rebased (its resend is
+  answered from the stored outcome).
 - A change that keeps failing is given up (`status` `failed`, reason and
   `attempts` kept) after 3 failed attempts, or at once for
   `base_revision_required`, `change_id_required`, `change_id_reused`,
   `invalid_object_id`, `invalid_base_revision`, `not_found`,
-  `record_deleted`. A `failed` result without a reason, a network error or a
-  5xx is not counted. A given-up change is not sent and blocks neither later
+  `record_deleted`. `rejected` (a refusal the server does not explain
+  further) counts. A `failed` result without a reason (older server), a
+  network error or a 5xx is not counted, and a row counts at most one
+  failure per sync. A given-up change is not sent and blocks neither later
   changes of the record nor pull refreshes; the next pull is a full one
   (no `since`), because earlier pulls skipped the record. The conflicts
   screen lists these under "Changes that could not be synced", with
-  "Discard this change" (local only, confirmed).
+  "Retry" (back to pending, attempts reset) and "Discard this change"
+  (local only, confirmed).
 - No fallback to protocol 1: a `400` on push, or a response without
   `results`, stops the sync, keeps the whole queue and shows "Sync needs a
   server update".

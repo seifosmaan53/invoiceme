@@ -87,6 +87,17 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
     if (mounted) await _load();
   }
 
+  Future<void> _retry(FailedChange change) async {
+    final store = widget.failedChanges;
+    if (store == null) return;
+    await store.retry(change.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('The change will be sent again on the next sync.')),
+    );
+    await _load();
+  }
+
   Future<void> _discard(FailedChange change) async {
     final store = widget.failedChanges;
     if (store == null) return;
@@ -157,12 +168,26 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
                   key: ValueKey('failed-${f.id}'),
                   leading: const Icon(Icons.error_outline, color: Colors.red),
                   title: Text(f.label),
-                  subtitle: Text(f.reasonText),
-                  isThreeLine: true,
-                  trailing: TextButton(
-                    key: ValueKey('discard-${f.id}'),
-                    onPressed: () => _discard(f),
-                    child: const Text('Discard this change'),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(f.reasonText),
+                      Wrap(
+                        spacing: 8,
+                        children: [
+                          TextButton(
+                            key: ValueKey('retry-${f.id}'),
+                            onPressed: () => _retry(f),
+                            child: const Text('Retry'),
+                          ),
+                          TextButton(
+                            key: ValueKey('discard-${f.id}'),
+                            onPressed: () => _discard(f),
+                            child: const Text('Discard this change'),
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
                 ),
             ],

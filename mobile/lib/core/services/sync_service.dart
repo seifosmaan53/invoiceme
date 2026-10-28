@@ -11,6 +11,7 @@ import 'package:uuid/uuid.dart';
 // Local imports - Core
 import '../database/database_helper.dart';
 import '../services/api_client.dart';
+import 'sync_protocol.dart';
 
 // Local imports - Models
 import '../../models/attachment.dart';
@@ -18,15 +19,25 @@ import '../../models/client.dart';
 import '../../models/invoice.dart';
 import '../../models/invoice_item.dart';
 
+export 'sync_protocol.dart';
+
 enum ChangeType { create, update, delete }
 
 enum ChangeObjectType { client, invoice, invoice_item, attachment }
 
-/// Change object format: {change_id?, object_type, object_id, change_type, data, device_id, updated_at}
+/// SharedPreferences keys.
+const String lastSyncTimestampKey = 'last_sync_timestamp';
+const String syncStateKey = 'sync_state';
+const String syncOpenConflictsKey = 'sync_open_conflicts';
+
+/// Change object format (protocol 2):
+/// {change_id, base_revision?, object_type, object_id, change_type, data, device_id, updated_at}
 class ChangeObject {
-  /// Idempotency key: the local pending_changes row id. Servers before the
-  /// sync contract change reject it (400); see SyncService._pushChanges.
+  /// Idempotency key: the local pending_changes row id.
   final String? changeId;
+
+  /// Revision of the record this change was based on; update and delete only.
+  final int? baseRevision;
   final ChangeObjectType objectType;
   final String objectId;
   final ChangeType changeType;
@@ -36,6 +47,7 @@ class ChangeObject {
 
   ChangeObject({
     this.changeId,
+    this.baseRevision,
     required this.objectType,
     required this.objectId,
     required this.changeType,
@@ -47,6 +59,7 @@ class ChangeObject {
   Map<String, dynamic> toJson() {
     return {
       if (changeId != null) 'change_id': changeId,
+      if (changeType != ChangeType.create && baseRevision != null) 'base_revision': baseRevision,
       'object_type': objectType.name,
       'object_id': objectId,
       'change_type': changeType.name,
@@ -57,245 +70,341 @@ class ChangeObject {
   }
 }
 
-/// Ids of the pending changes the server acknowledged in a push [result].
-///
-/// Uses the per-change `results` (status `applied` or `duplicate`) when the
-/// server sends them. Older servers return only counts; then the first
-/// `synced` changes are taken, which is wrong when a change in the middle
-/// failed, but is all such a server allows.
+/// Ids of the pending changes the server acknowledged (applied, merged or
+/// duplicate) in a push [result]. A response without per-change `results`
+/// acknowledges nothing: the changes stay pending.
 List<String> acknowledgedChangeIds(List<Map<String, Object?>> pendingChanges, Map<String, dynamic> result) {
-  final results = result['results'];
-  if (results is List) {
-    final ids = <String>[];
-    for (final entry in results) {
-      if (entry is! Map) continue;
-      final index = entry['index'];
-      final status = entry['status'];
-      if (index is int &&
-          index >= 0 &&
-          index < pendingChanges.length &&
-          (status == 'applied' || status == 'duplicate')) {
-        ids.add(pendingChanges[index]['id'] as String);
-      }
-    }
-    return ids;
-  }
-  final synced = result['synced'] as int? ?? 0;
-  return pendingChanges.take(synced).map((c) => c['id'] as String).toList();
+  return planPushResults(pendingChanges, result)
+      .actions
+      .where((a) => a.kind == PushActionKind.synced)
+      .map((a) => a.changeId)
+      .toList();
 }
 
+/// Outcome of one [SyncService.sync].
+class SyncReport {
+  final SyncState state;
+  final int synced;
+  final int conflicts;
+  final int failed;
+  final int openConflicts;
+
+  /// Server message (for example with `client_upgrade_required`).
+  final String? message;
+
+  const SyncReport({
+    this.state = SyncState.ok,
+    this.synced = 0,
+    this.conflicts = 0,
+    this.failed = 0,
+    this.openConflicts = 0,
+    this.message,
+  });
+
+  /// What to show the user when the sync could not complete normally.
+  String? get userMessage => syncStateMessage(state);
+}
+
+class _PushOutcome {
+  final SyncState state;
+  final int synced;
+  final int conflicts;
+  final int failed;
+  final String? message;
+
+  const _PushOutcome(this.state, this.synced, this.conflicts, this.failed, this.message);
+}
+
+/// Sync protocol 2 client (docs/SYNC-CONTRACT.md).
 class SyncService {
   final ApiClient _apiClient;
+  // ignore: unused_field
   final DatabaseHelper _dbHelper;
   final String _deviceId;
 
+  /// Push rounds per sync. A record with several queued changes sends one per
+  /// round, so each is based on the revision the previous one produced.
+  static const int maxPushRounds = 10;
+
   SyncService(this._apiClient, this._dbHelper) : _deviceId = const Uuid().v4();
 
-  /// Perform full sync: push pending changes, then pull server updates
-  Future<void> sync() async {
+  /// Push pending changes, then pull server updates.
+  ///
+  /// When the server does not speak protocol 2, nothing is pushed or pulled,
+  /// the queue is kept and the report's state is [SyncState.serverUpdateRequired].
+  Future<SyncReport> sync() async {
+    final prefs = await SharedPreferences.getInstance();
     try {
-      // Push pending changes
-      await _pushChanges();
-
-      // Pull server changes
-      await _pullChanges();
+      final push = await _pushChanges();
+      if (push.state == SyncState.serverUpdateRequired) {
+        await prefs.setString(syncStateKey, push.state.name);
+        return SyncReport(state: push.state, message: push.message);
+      }
+      final openConflicts = await _pullChanges();
+      await prefs.setString(syncStateKey, push.state.name);
+      return SyncReport(
+        state: push.state,
+        synced: push.synced,
+        conflicts: push.conflicts,
+        failed: push.failed,
+        openConflicts: openConflicts,
+        message: push.message,
+      );
     } catch (e) {
       debugPrint('Sync error: $e');
       rethrow;
     }
   }
 
-  /// Push pending changes from local database to server
-  Future<void> _pushChanges() async {
-    final db = await DatabaseHelper.getDatabase();
-
-    // Get unsynced changes
-    final pendingChanges = await db.query(
-      'pending_changes',
-      where: 'synced = ?',
-      whereArgs: [0],
-      orderBy: 'created_at ASC',
-    );
-
-    if (pendingChanges.isEmpty) return;
-
-    // Convert to ChangeObject format
-    List<Map<String, dynamic>> toChanges({required bool withChangeId}) => pendingChanges.map((change) {
-      return ChangeObject(
-        changeId: withChangeId ? change['id'] as String : null,
-        objectType: ChangeObjectType.values.firstWhere(
-          (e) => e.name == change['object_type'] as String,
-        ),
-        objectId: change['object_id'] as String,
-        changeType: ChangeType.values.firstWhere(
-          (e) => e.name == change['change_type'] as String,
-        ),
-        data: jsonDecode(change['change_json'] as String),
-        deviceId: change['device_id'] as String,
-        updatedAt: change['created_at'] as String,
-      ).toJson();
-    }).toList();
-
-    Future<Map<String, dynamic>> push({required bool withChangeId}) async {
-      final response = await _apiClient.post('/sync/push', data: {
-        'deviceId': _deviceId,
-        'changes': toChanges(withChangeId: withChangeId),
-      });
-      return response.data as Map<String, dynamic>;
-    }
-
-    try {
-      Map<String, dynamic> result;
-      try {
-        result = await push(withChangeId: true);
-      } on DioException catch (e) {
-        // A server older than the sync contract change rejects change_id
-        // with 400 and applied nothing; resend in the old format.
-        if (e.response?.statusCode != 400) rethrow;
-        debugPrint('Sync push: server rejected change_id, resending without it');
-        result = await push(withChangeId: false);
-      }
-
-      final synced = result['synced'] as int? ?? 0;
-      final failed = result['failed'] as int? ?? 0;
-
-      debugPrint('Sync push: $synced synced, $failed failed');
-
-      // Mark acknowledged changes; failed ones stay pending and are resent.
-      final syncedIds = acknowledgedChangeIds(pendingChanges, result);
-      if (syncedIds.isNotEmpty) {
-        for (final id in syncedIds) {
-          await db.update(
-            'pending_changes',
-            {'synced': 1},
-            where: 'id = ?',
-            whereArgs: [id],
-          );
-        }
-      }
-    } catch (e) {
-      debugPrint('Push changes error: $e');
-      rethrow;
-    }
-  }
-
-  /// Pull changes from server and update local database
-  Future<void> _pullChanges() async {
-    try {
-      final prefs = await SharedPreferences.getInstance();
-      final lastSync = prefs.getString('last_sync_timestamp');
-
-      final response = await _apiClient.get(
-        '/sync/pull',
-        queryParameters: lastSync != null ? {'since': lastSync} : null,
+  Future<List<Map<String, Object?>>> _pendingRows(Database db) => db.query(
+        'pending_changes',
+        where: 'synced = ? AND status = ?',
+        whereArgs: [0, pendingStatus],
+        orderBy: 'created_at ASC',
       );
 
-      final data = response.data as Map<String, dynamic>;
-      final db = await DatabaseHelper.getDatabase();
+  /// Push the queue, at most one change per record per round.
+  Future<_PushOutcome> _pushChanges() async {
+    final db = await DatabaseHelper.getDatabase();
+    var state = SyncState.ok;
+    var synced = 0, conflicts = 0, failed = 0;
+    String? message;
 
-      // Update clients
-      if (data['clients'] != null) {
-        final clients = (data['clients'] as List).map((json) => Client.fromJson(json)).toList();
-        for (final client in clients) {
-          await _upsertClient(db, client);
+    for (var round = 0; round < maxPushRounds; round++) {
+      final pending = await _pendingRows(db);
+      final batch = selectPushBatch(pending);
+      if (batch.isEmpty) break;
+
+      Map<String, dynamic> response;
+      try {
+        final res = await _apiClient.post('/sync/push', data: buildPushBody(_deviceId, batch));
+        response = res.data as Map<String, dynamic>;
+      } on DioException catch (e) {
+        // A server without protocol 2 rejects the `protocol` field (400) and
+        // applies nothing. Do not fall back to protocol 1: keep the queue.
+        if (e.response?.statusCode == 400) {
+          debugPrint('Sync push: server rejected protocol 2 (400): ${e.response?.data}');
+          return const _PushOutcome(SyncState.serverUpdateRequired, 0, 0, 0, null);
         }
-        debugPrint('Pulled ${clients.length} clients');
+        rethrow;
       }
 
-      // Update invoices
-      if (data['invoices'] != null) {
-        final invoices = (data['invoices'] as List).map((json) => Invoice.fromJson(json)).toList();
-        for (final invoice in invoices) {
-          await _upsertInvoice(db, invoice);
-        }
-        debugPrint('Pulled ${invoices.length} invoices');
+      final plan = planPushResults(batch, response);
+      if (plan.resultsMissing) {
+        debugPrint('Sync push: response without per-change results; nothing marked');
+        return _PushOutcome(SyncState.serverUpdateRequired, synced, conflicts, failed, plan.message);
       }
+      if (plan.state == SyncState.appUpdateRequired) state = SyncState.appUpdateRequired;
+      message ??= plan.message;
 
-      // Update invoice items
-      if (data['invoiceItems'] != null) {
-        final items = (data['invoiceItems'] as List).map((json) => InvoiceItem.fromJson(json)).toList();
-        for (final item in items) {
-          await _upsertInvoiceItem(db, item);
-        }
-        debugPrint('Pulled ${items.length} invoice items');
+      await _applyPushPlan(db, batch, plan, pending);
+      synced += plan.count(PushActionKind.synced);
+      conflicts += plan.count(PushActionKind.conflict);
+      failed += plan.count(PushActionKind.keepPending);
+      debugPrint('Sync push round $round: ${plan.count(PushActionKind.synced)} synced, '
+          '${plan.count(PushActionKind.conflict)} conflicts, ${plan.count(PushActionKind.keepPending)} pending');
+
+      // Stop when this round acknowledged nothing new: the rest is failing.
+      if (plan.count(PushActionKind.synced) + plan.count(PushActionKind.conflict) == 0) break;
+    }
+    return _PushOutcome(state, synced, conflicts, failed, message);
+  }
+
+  Future<void> _applyPushPlan(
+    Database db,
+    List<Map<String, Object?>> batch,
+    PushPlan plan,
+    List<Map<String, Object?>> pending,
+  ) async {
+    for (var i = 0; i < plan.actions.length; i++) {
+      final action = plan.actions[i];
+      switch (action.kind) {
+        case PushActionKind.synced:
+          await db.update('pending_changes', {'synced': 1, 'last_reason': null},
+              where: 'id = ?', whereArgs: [action.changeId]);
+          final table = localTableFor[action.objectType];
+          if (action.revision != null && table != null && versionedObjectTypes.contains(action.objectType)) {
+            await db.update(table, {'revision': action.revision}, where: 'id = ?', whereArgs: [action.objectId]);
+          }
+          final rebased = rebasedBaseRevisions(action, batch[i], pending);
+          for (final entry in rebased.entries) {
+            await db.update('pending_changes', {'base_revision': entry.value},
+                where: 'id = ?', whereArgs: [entry.key]);
+          }
+          break;
+        case PushActionKind.conflict:
+          await db.update(
+            'pending_changes',
+            {'status': conflictStatus, 'conflict_id': action.conflictId, 'last_reason': action.reason},
+            where: 'id = ?',
+            whereArgs: [action.changeId],
+          );
+          break;
+        case PushActionKind.keepPending:
+          await db.update('pending_changes', {'last_reason': action.reason},
+              where: 'id = ?', whereArgs: [action.changeId]);
+          break;
       }
-
-      // Update attachments
-      if (data['attachments'] != null) {
-        final attachments = (data['attachments'] as List).map((json) => Attachment.fromJson(json)).toList();
-        for (final attachment in attachments) {
-          await _upsertAttachment(db, attachment);
-        }
-        debugPrint('Pulled ${attachments.length} attachments');
-      }
-
-      // Update last sync timestamp
-      await prefs.setString('last_sync_timestamp', data['lastSyncTimestamp'] as String);
-      debugPrint('Sync completed at ${data['lastSyncTimestamp']}');
-    } catch (e) {
-      debugPrint('Pull changes error: $e');
-      rethrow;
     }
   }
 
-  Future<void> _upsertClient(Database db, Client client) async {
-    await db.insert(
-      'clients_local',
-      client.toDatabaseMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+  /// Pull server changes into the local cache; returns the open conflict count.
+  Future<int> _pullChanges() async {
+    final prefs = await SharedPreferences.getInstance();
+    final db = await DatabaseHelper.getDatabase();
+    final lastSync = prefs.getString(lastSyncTimestampKey);
+
+    var data = await _pull(lastSync);
+    if (pullStep(data, sentSince: lastSync != null) == PullStep.fullResync) {
+      debugPrint('Sync pull: full resync required');
+      await _clearLocalCache(db);
+      await prefs.remove(lastSyncTimestampKey);
+      data = await _pull(null);
+    }
+
+    await _applyPull(db, data);
+
+    final openConflicts = openConflictsOf(data);
+    await prefs.setInt(syncOpenConflictsKey, openConflicts);
+    await prefs.setString(lastSyncTimestampKey, data['lastSyncTimestamp'] as String);
+    debugPrint('Sync completed at ${data['lastSyncTimestamp']}');
+    return openConflicts;
   }
 
-  Future<void> _upsertInvoice(Database db, Invoice invoice) async {
-    await db.insert(
-      'invoices_local',
-      invoice.toDatabaseMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
+  Future<Map<String, dynamic>> _pull(String? since) async {
+    final response = await _apiClient.get(
+      '/sync/pull',
+      queryParameters: since != null ? {'since': since} : null,
+      useCache: false,
     );
+    return response.data as Map<String, dynamic>;
   }
 
-  Future<void> _upsertInvoiceItem(Database db, InvoiceItem item) async {
-    await db.insert(
-      'invoice_items_local',
-      item.toDatabaseMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+  /// Drop the local cache (not the queue). Records with a change still
+  /// waiting to be sent are kept: the pull does not overwrite them, so they
+  /// would otherwise disappear until the next full resync.
+  Future<void> _clearLocalCache(Database db) async {
+    final keep = pendingObjectKeys(await _pendingRows(db));
+    for (final entry in localTableFor.entries) {
+      final ids = keep
+          .where((key) => key.startsWith('${entry.key}:'))
+          .map((key) => key.substring(entry.key.length + 1))
+          .toList();
+      if (ids.isEmpty) {
+        await db.delete(entry.value);
+      } else {
+        await db.delete(entry.value,
+            where: 'id NOT IN (${List.filled(ids.length, '?').join(', ')})', whereArgs: ids);
+      }
+    }
   }
 
-  Future<void> _upsertAttachment(Database db, Attachment attachment) async {
-    await db.insert(
-      'attachments_local',
-      attachment.toDatabaseMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+  Future<void> _applyPull(Database db, Map<String, dynamic> data) async {
+    final pending = pendingObjectKeys(await _pendingRows(db));
+    bool hasPending(String type, String id) => pending.contains('$type:$id');
+
+    if (data['clients'] != null) {
+      final clients = (data['clients'] as List).map((json) => Client.fromJson(json)).toList();
+      for (final client in clients) {
+        if (hasPending('client', client.id)) continue;
+        await _upsert(db, 'clients_local', client.toDatabaseMap());
+      }
+      debugPrint('Pulled ${clients.length} clients');
+    }
+
+    if (data['invoices'] != null) {
+      final invoices = (data['invoices'] as List).map((json) => Invoice.fromJson(json)).toList();
+      for (final invoice in invoices) {
+        if (hasPending('invoice', invoice.id)) continue;
+        await _upsert(db, 'invoices_local', invoice.toDatabaseMap());
+      }
+      debugPrint('Pulled ${invoices.length} invoices');
+    }
+
+    if (data['invoiceItems'] != null) {
+      final items = (data['invoiceItems'] as List).map((json) => InvoiceItem.fromJson(json)).toList();
+      for (final item in items) {
+        if (hasPending('invoice_item', item.id)) continue;
+        await _upsert(db, 'invoice_items_local', item.toDatabaseMap());
+      }
+      debugPrint('Pulled ${items.length} invoice items');
+    }
+
+    if (data['attachments'] != null) {
+      final attachments = (data['attachments'] as List).map((json) => Attachment.fromJson(json)).toList();
+      for (final attachment in attachments) {
+        if (hasPending('attachment', attachment.id)) continue;
+        await _upsert(db, 'attachments_local', attachment.toDatabaseMap());
+      }
+      debugPrint('Pulled ${attachments.length} attachments');
+    }
+
+    // Deletions last: a record deleted on the server is removed even if it
+    // was also returned above.
+    final deletes = tombstoneDeletes(data['tombstones']);
+    for (final d in deletes) {
+      await db.delete(d.table, where: d.where, whereArgs: d.whereArgs);
+    }
+    if (deletes.isNotEmpty) debugPrint('Applied ${deletes.length} local deletes from tombstones');
   }
 
-  /// Queue a change for sync
-  /// Format: {object_type, object_id, change_type, data, device_id, updated_at}
-  Future<void> queueChange({
+  Future<void> _upsert(Database db, String table, Map<String, dynamic> row) =>
+      db.insert(table, row, conflictAlgorithm: ConflictAlgorithm.replace);
+
+  /// Queue a change for sync.
+  ///
+  /// [baseRevision] is the revision the change is based on; for update and
+  /// delete it is read from the local record when not given (create has none).
+  /// For an update, pass the record's [previous] values (same keys and format
+  /// as [data]) and only the changed fields are queued; an update that changes
+  /// nothing is not queued. Returns the queued row id, or null.
+  Future<String?> queueChange({
     required ChangeObjectType objectType,
     required String objectId,
     required ChangeType changeType,
     required Map<String, dynamic> data,
+    Map<String, dynamic>? previous,
+    int? baseRevision,
   }) async {
     final db = await DatabaseHelper.getDatabase();
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
 
+    var payload = data;
+    if (changeType == ChangeType.update && previous != null) {
+      payload = changedFields(previous, data);
+      if (payload.isEmpty) return null;
+    }
+
+    int? base;
+    if (changeType != ChangeType.create && versionedObjectTypes.contains(objectType.name)) {
+      base = baseRevision ?? await _localRevision(db, objectType.name, objectId);
+    }
+
+    final id = const Uuid().v4();
     await db.insert('pending_changes', {
-      'id': const Uuid().v4(),
+      'id': id,
       'user_id': userId,
       'device_id': _deviceId,
       'object_type': objectType.name,
       'object_id': objectId,
-      'change_json': jsonEncode(data),
+      'change_json': jsonEncode(payload),
       'change_type': changeType.name,
       'synced': 0,
       'created_at': DateTime.now().toIso8601String(),
+      'base_revision': base,
+      'status': pendingStatus,
     });
+    return id;
+  }
+
+  Future<int?> _localRevision(Database db, String objectType, String objectId) async {
+    final table = localTableFor[objectType];
+    if (table == null) return null;
+    final rows = await db.query(table, columns: ['revision'], where: 'id = ?', whereArgs: [objectId], limit: 1);
+    return rows.isEmpty ? null : parseRevision(rows.first['revision']);
   }
 
   /// Get device ID
   String get deviceId => _deviceId;
 }
-

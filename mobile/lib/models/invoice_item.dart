@@ -11,6 +11,9 @@ class InvoiceItem {
   final double lineTotal;
   final DateTime createdAt;
 
+  /// Server revision (sync protocol 2); null until the record was pulled or synced.
+  final int? revision;
+
   InvoiceItem({
     required this.id,
     required this.invoiceId,
@@ -21,6 +24,7 @@ class InvoiceItem {
     required this.discountRate,
     required this.lineTotal,
     required this.createdAt,
+    this.revision,
   });
 
   Map<String, dynamic> toJson() {
@@ -34,6 +38,7 @@ class InvoiceItem {
       'discount_rate': discountRate,
       'line_total': lineTotal,
       'created_at': createdAt.toIso8601String(),
+      if (revision != null) 'revision': revision,
     };
   }
 
@@ -48,7 +53,15 @@ class InvoiceItem {
       discountRate: _parseDouble(json['discount_rate'] ?? json['discountRate']),
       lineTotal: _parseDouble(json['line_total'] ?? json['lineTotal']),
       createdAt: DateTime.parse(json['created_at'] ?? json['createdAt']),
+      revision: _parseRevision(json['revision']),
     );
+  }
+
+  static int? _parseRevision(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
   }
 
   static double _parseDouble(dynamic value) {
@@ -73,6 +86,7 @@ class InvoiceItem {
       'discount_rate': discountRate,
       'line_total': lineTotal,
       'created_at': createdAt.toIso8601String(),
+      'revision': revision,
     };
   }
 
@@ -87,6 +101,7 @@ class InvoiceItem {
       discountRate: map['discount_rate']?.toDouble() ?? 0,
       lineTotal: map['line_total']?.toDouble() ?? 0,
       createdAt: DateTime.parse(map['created_at']),
+      revision: _parseRevision(map['revision']),
     );
   }
 }

@@ -1,11 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
+import { IsNull, Repository, LessThan } from 'typeorm';
 import { Invoice, InvoiceStatus } from '../entities/invoice.entity';
 import { NotificationService } from '../core/services/notification.service';
 import { User } from '../entities/user.entity';
 import { ownedClient } from '../core/utils/cross-owner.util';
+import { businessToday, toCalendarDate } from '../common/calendar-date';
 
 /**
  * Service to automatically update invoice statuses
@@ -32,15 +33,16 @@ export class InvoiceStatusService {
     this.logger.log('Starting overdue invoice check...');
 
     try {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
+      // Calendar comparison: overdue once the due date is before today in
+      // the business timezone (common/calendar-date.ts).
+      const today = businessToday() as unknown as Date;
 
       // Find invoices that need to be marked as overdue
       const overdueInvoices = await this.invoiceRepository.find({
         where: {
           dueDate: LessThan(today),
           status: InvoiceStatus.SENT,
-          deletedAt: null,
+          deletedAt: IsNull(),
         },
         relations: ['client', 'user'],
       });
@@ -51,7 +53,7 @@ export class InvoiceStatusService {
           {
             dueDate: LessThan(today),
             status: InvoiceStatus.SENT,
-            deletedAt: null,
+            deletedAt: IsNull(),
           },
           {
             status: InvoiceStatus.OVERDUE,
@@ -71,7 +73,7 @@ export class InvoiceStatusService {
                 clientName: ownedClient(invoice)?.name || 'Unknown',
                 amount: parseFloat(invoice.total.toString()),
                 currency: invoice.currency,
-                dueDate: invoice.dueDate ? new Date(invoice.dueDate).toISOString().split('T')[0] : undefined,
+                dueDate: invoice.dueDate ? toCalendarDate(invoice.dueDate) : undefined,
               });
             }
           } catch (error) {
@@ -92,14 +94,13 @@ export class InvoiceStatusService {
    */
   async runOverdueCheck(): Promise<number> {
     this.logger.log('Manually triggering overdue invoice check...');
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    const today = businessToday() as unknown as Date;
 
     const result = await this.invoiceRepository.update(
       {
         dueDate: LessThan(today),
         status: InvoiceStatus.SENT,
-        deletedAt: null,
+        deletedAt: IsNull(),
       },
       {
         status: InvoiceStatus.OVERDUE,

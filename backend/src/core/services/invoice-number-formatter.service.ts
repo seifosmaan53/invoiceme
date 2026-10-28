@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InvoiceType } from '../../entities/invoice.entity';
-import { calendarDateParts } from '../../common/calendar-date';
+import { businessToday, calendarDateParts } from '../../common/calendar-date';
 
 @Injectable()
 export class InvoiceNumberFormatterService {
@@ -29,7 +29,7 @@ export class InvoiceNumberFormatterService {
     const pattern = format || (type === InvoiceType.INVOICE ? this.DEFAULT_INVOICE_FORMAT : this.DEFAULT_ESTIMATE_FORMAT);
 
     // The calendar date as written, never shifted by the server's timezone
-    const parts = calendarDateParts(issueDate ?? new Date());
+    const parts = calendarDateParts(issueDate ?? businessToday());
     const year = parts.year;
     const month = String(parts.month).padStart(2, '0');
     const day = String(parts.day).padStart(2, '0');

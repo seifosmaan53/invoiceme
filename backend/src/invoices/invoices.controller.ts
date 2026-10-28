@@ -34,6 +34,7 @@ import { PdfService } from '../core/services/pdf.service';
 import { S3Service } from '../core/services/s3.service';
 import { StripeService } from '../core/services/stripe.service';
 import { PaymentsService } from '../payments/payments.service';
+import { isOnlinePaymentCurrency, UnsupportedPaymentCurrencyError } from '../payments/payment-currency';
 import { calendarDateAsLocal } from '../common/calendar-date';
 import { AuditService } from '../core/services/audit.service';
 import { EmailService } from '../core/services/email.service';
@@ -763,6 +764,12 @@ export class InvoicesController {
       throw new BadRequestException('Invoice total must be greater than zero');
     }
 
+    // Amounts go to Stripe as total * 100: only right for the listed
+    // two-decimal currencies (payments/payment-currency.ts)
+    if (!isOnlinePaymentCurrency(invoice.currency)) {
+      throw new BadRequestException(new UnsupportedPaymentCurrencyError(invoice.currency).message);
+    }
+
     // Check if Stripe is configured
     if (!this.stripeService.isAvailable()) {
       throw new BadRequestException(
@@ -800,9 +807,9 @@ export class InvoicesController {
       paymentIntent.id,
       invoice.total,
       invoice.currency,
+      // client_secret goes only to the caller below; it is not stored
       {
         payment_intent_id: paymentIntent.id,
-        client_secret: paymentIntent.client_secret,
         status: paymentIntent.status,
       },
     );

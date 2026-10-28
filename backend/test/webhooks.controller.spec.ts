@@ -559,14 +559,15 @@ describe('WebhooksController', () => {
       consoleErrorSpy.mockRestore();
     });
 
-    it('should log error to console.error', async () => {
+    it('should log only the error message, not the payload it may carry', async () => {
       const rawBody = Buffer.from('test body');
       const signature = 'stripe-signature-header';
       const mockRequest = {
         rawBody: rawBody,
       };
 
-      const error = new Error('Test error');
+      // stripe-node signature errors carry the raw payload
+      const error = Object.assign(new Error('Test error'), { payload: '{"client_secret":"pi_1_secret_x"}' });
       stripeService.verifyWebhookSignature.mockImplementation(() => {
         throw error;
       });
@@ -579,7 +580,8 @@ describe('WebhooksController', () => {
         // Expected
       }
 
-      expect(consoleErrorSpy).toHaveBeenCalledWith('Webhook error:', error);
+      expect(consoleErrorSpy).toHaveBeenCalledWith('Webhook error:', 'Test error');
+      expect(JSON.stringify(consoleErrorSpy.mock.calls)).not.toContain('secret');
 
       consoleErrorSpy.mockRestore();
     });

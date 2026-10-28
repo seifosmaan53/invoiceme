@@ -43,7 +43,8 @@ export class WebhooksController {
     try {
       event = this.stripeService.verifyWebhookSignature(rawBody, signature);
     } catch (error) {
-      console.error('Webhook error:', error);
+      // Message only: the error object can carry the raw payload (client_secret)
+      console.error('Webhook error:', error?.message);
       throw new BadRequestException(`Webhook signature verification failed: ${error.message}`);
     }
 

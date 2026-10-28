@@ -26,6 +26,53 @@ const String serverUpdateRequiredMessage =
 const String pendingStatus = 'pending';
 const String conflictStatus = 'conflict';
 
+/// Given up after [maxFailedAttempts] failures or a non-retryable reason;
+/// no longer sent, until the user discards it.
+const String failedStatus = 'failed';
+
+/// Failed attempts (with a server reason) before a change is given up.
+const int maxFailedAttempts = 3;
+
+/// Server reasons that cannot succeed on a resend: the change is given up at once.
+const Set<String> nonRetryableReasons = {
+  'base_revision_required',
+  'change_id_required',
+  'change_id_reused',
+  'invalid_object_id',
+  'invalid_base_revision',
+  'not_found',
+  'record_deleted',
+};
+
+/// A failure reason in plain words.
+String failureReasonText(String? reason) {
+  switch (reason) {
+    case 'base_revision_required':
+      return 'The change was saved by an older version of the app and does not say which version of the record it was based on.';
+    case 'change_id_required':
+      return 'The change has no identifier, so the server cannot accept it.';
+    case 'change_id_reused':
+      return 'A different change with the same identifier was already received by the server.';
+    case 'invalid_object_id':
+      return 'The record identifier is not valid.';
+    case 'invalid_base_revision':
+      return 'The change refers to a version of the record the server does not have.';
+    case 'not_found':
+      return 'The record does not exist on the server.';
+    case 'record_deleted':
+      return 'The record was deleted on the server.';
+    case 'open_conflict':
+      return 'The record has an unresolved sync conflict.';
+    case upgradeRequiredReason:
+      return 'The server needs a newer version of the app for this change.';
+    case null:
+    case 'failed':
+      return 'The server did not accept the change.';
+    default:
+      return 'The server did not accept the change ($reason).';
+  }
+}
+
 /// Object types that have a server revision (attachments do not).
 const Set<String> versionedObjectTypes = {'client', 'invoice', 'invoice_item'};
 
@@ -90,9 +137,11 @@ Map<String, dynamic> changedFields(Map<String, dynamic> previous, Map<String, dy
 Map<String, dynamic> pendingRowToChange(Map<String, Object?> row) {
   final changeType = row['change_type'] as String;
   final base = parseRevision(row['base_revision']);
+  final parent = parseRevision(row['parent_base_revision']);
   return {
     'change_id': row['id'] as String,
     if (changeType != 'create' && base != null) 'base_revision': base,
+    if (row['object_type'] == 'invoice_item' && parent != null) 'parent_revision': parent,
     'object_type': row['object_type'] as String,
     'object_id': row['object_id'] as String,
     'change_type': changeType,
@@ -115,7 +164,9 @@ Map<String, dynamic> buildPushBody(String deviceId, List<Map<String, Object?>> r
 /// A second change of the same record waits for the next round, after the
 /// first one's new revision is known ([rebasedBaseRevisions]); sending both
 /// with the same base would make the server compare the device against its
-/// own earlier change.
+/// own earlier change. For the same reason an item change waits when a
+/// change of its invoice is sent first (its `parent_revision` moves then).
+/// Rows given up ('failed') or in conflict block nothing.
 List<Map<String, Object?>> selectPushBatch(List<Map<String, Object?>> rows) {
   final seen = <String>{};
   final batch = <Map<String, Object?>>[];
@@ -123,6 +174,11 @@ List<Map<String, Object?>> selectPushBatch(List<Map<String, Object?>> rows) {
     if ((row['status'] ?? pendingStatus) != pendingStatus) continue;
     if ((row['synced'] ?? 0) != 0) continue;
     final key = '${row['object_type']}:${row['object_id']}';
+    final parent = row['parent_id'];
+    if (row['object_type'] == 'invoice_item' && parent is String && seen.contains('invoice:$parent')) {
+      seen.add(key);
+      continue;
+    }
     if (seen.add(key)) batch.add(row);
   }
   return batch;
@@ -137,6 +193,10 @@ enum PushActionKind {
 
   /// failed (or no usable result): stays pending and is resent next sync.
   keepPending,
+
+  /// failed with a non-retryable reason, or for the [maxFailedAttempts]th
+  /// time: status 'failed', no longer sent, does not block anything.
+  giveUp,
 }
 
 class PushAction {
@@ -151,6 +211,9 @@ class PushAction {
   final String? conflictId;
   final String? reason;
 
+  /// Failed attempts after this result (only for keepPending / giveUp).
+  final int attempts;
+
   const PushAction({
     required this.kind,
     required this.changeId,
@@ -160,11 +223,12 @@ class PushAction {
     this.revision,
     this.conflictId,
     this.reason,
+    this.attempts = 0,
   });
 
   @override
   String toString() => 'PushAction($kind, $changeId, status: $status, revision: $revision, '
-      'conflictId: $conflictId, reason: $reason)';
+      'conflictId: $conflictId, reason: $reason, attempts: $attempts)';
 }
 
 class PushPlan {
@@ -197,8 +261,10 @@ class PushPlan {
 ///
 /// - `applied`, `merged`, `duplicate` => synced (with the returned revision);
 /// - `conflict` => conflict (with `conflict_id`), never resent;
-/// - `failed` => stays pending, with its `reason`;
-/// - a missing or mismatched result => stays pending.
+/// - `failed` with a reason => one more attempt (row `attempts`); given up
+///   at [maxFailedAttempts] or at once for [nonRetryableReasons];
+/// - `failed` without a reason (server error, ownership check) and a missing
+///   or mismatched result => stays pending; not counted as an attempt.
 ///
 /// A response without `results` (an older server that only counts) marks
 /// nothing: no change is treated as synced or as a conflict.
@@ -214,7 +280,22 @@ PushPlan planPushResults(List<Map<String, Object?>> sent, Map<String, dynamic> r
         objectId: row['object_id'] as String,
         status: status,
         reason: reason,
+        attempts: parseRevision(row['attempts']) ?? 0,
       );
+
+  PushAction failure(Map<String, Object?> row, String reason) {
+    final attempts = (parseRevision(row['attempts']) ?? 0) + 1;
+    final giveUp = nonRetryableReasons.contains(reason) || attempts >= maxFailedAttempts;
+    return PushAction(
+      kind: giveUp ? PushActionKind.giveUp : PushActionKind.keepPending,
+      changeId: row['id'] as String,
+      objectType: row['object_type'] as String,
+      objectId: row['object_id'] as String,
+      status: 'failed',
+      reason: reason,
+      attempts: attempts,
+    );
+  }
 
   if (results is! List) {
     return PushPlan(
@@ -270,8 +351,11 @@ PushPlan planPushResults(List<Map<String, Object?>> sent, Map<String, dynamic> r
           reason: reason,
         ));
         break;
+      case 'failed':
+        actions.add(reason != null ? failure(row, reason) : pending(row, status: status));
+        break;
       default:
-        actions.add(pending(row, status: status, reason: reason ?? (status == 'failed' ? 'failed' : null)));
+        actions.add(pending(row, status: status, reason: reason));
     }
   }
   return PushPlan(actions: actions, notice: notice, message: message);
@@ -306,6 +390,42 @@ Map<String, int> rebasedBaseRevisions(
   }
   return rebased;
 }
+
+/// New `parent_base_revision` for queued item changes after a change of
+/// their invoice was applied or merged: the items were edited on the
+/// invoice as this device had it, which is now the returned revision. Only
+/// items queued on the same invoice version as [sentRow] move.
+Map<String, int> rebasedParentRevisions(
+  PushAction action,
+  Map<String, Object?> sentRow,
+  List<Map<String, Object?>> laterRows,
+) {
+  if (action.kind != PushActionKind.synced ||
+      action.objectType != 'invoice' ||
+      (action.status != 'applied' && action.status != 'merged') ||
+      action.revision == null) {
+    return const {};
+  }
+  final sentBase = sentRow['change_type'] == 'create' ? null : parseRevision(sentRow['base_revision']);
+  final rebased = <String, int>{};
+  for (final row in laterRows) {
+    if (row['object_type'] != 'invoice_item' || row['parent_id'] != action.objectId) continue;
+    if ((row['status'] ?? pendingStatus) != pendingStatus || (row['synced'] ?? 0) != 0) continue;
+    if (parseRevision(row['parent_base_revision']) != sentBase) continue;
+    rebased[row['id'] as String] = action.revision!;
+  }
+  return rebased;
+}
+
+/// The invoice an item change names in its data (create, or a move).
+String? itemInvoiceIdFromData(Map<String, dynamic> data) {
+  final v = data['invoiceId'] ?? data['invoice_id'];
+  return v is String && v.isNotEmpty ? v : null;
+}
+
+/// `since` for the next pull: none (everything) after a change was given up
+/// or discarded, because pulls skipped that record while it was queued.
+String? pullSince(String? lastSync, {required bool fullPullNeeded}) => fullPullNeeded ? null : lastSync;
 
 /// A local delete: `DELETE FROM table WHERE where`.
 class LocalDelete {
@@ -374,3 +494,51 @@ Set<String> pendingObjectKeys(List<Map<String, Object?>> rows) => {
         if ((row['status'] ?? pendingStatus) == pendingStatus && (row['synced'] ?? 0) == 0)
           '${row['object_type']}:${row['object_id']}',
     };
+
+/// A queued change that was given up (status 'failed').
+class FailedChange {
+  final String id;
+  final String objectType;
+  final String objectId;
+  final String changeType;
+  final String? reason;
+  final int attempts;
+  final DateTime? createdAt;
+
+  const FailedChange({
+    required this.id,
+    required this.objectType,
+    required this.objectId,
+    required this.changeType,
+    this.reason,
+    this.attempts = 0,
+    this.createdAt,
+  });
+
+  factory FailedChange.fromRow(Map<String, Object?> row) => FailedChange(
+        id: row['id'] as String,
+        objectType: row['object_type'] as String,
+        objectId: row['object_id'] as String,
+        changeType: row['change_type'] as String,
+        reason: row['last_reason'] as String?,
+        attempts: parseRevision(row['attempts']) ?? 0,
+        createdAt: DateTime.tryParse(row['created_at'] as String? ?? ''),
+      );
+
+  /// For example "Invoice item 1a2b3c4d (update)".
+  String get label {
+    const names = {'client': 'Client', 'invoice': 'Invoice', 'invoice_item': 'Invoice item', 'attachment': 'Attachment'};
+    final shortId = objectId.length > 8 ? objectId.substring(0, 8) : objectId;
+    return '${names[objectType] ?? objectType} $shortId ($changeType)';
+  }
+
+  String get reasonText => failureReasonText(reason);
+}
+
+/// Changes that could not be synced (local only).
+abstract class FailedChangesStore {
+  Future<List<FailedChange>> listFailed();
+
+  /// Removes the queued change from this device; nothing is sent.
+  Future<void> discard(String id);
+}

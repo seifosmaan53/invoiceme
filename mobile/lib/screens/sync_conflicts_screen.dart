@@ -9,6 +9,7 @@ import 'package:intl/intl.dart';
 
 // Local imports
 import '../core/services/sync_conflicts_api.dart';
+import '../core/services/sync_protocol.dart' show FailedChange, FailedChangesStore;
 import '../models/sync_conflict.dart';
 
 /// Labels of the resolve actions. Only actions the server lists in
@@ -22,12 +23,16 @@ const Map<String, String> conflictActionLabels = {
 String _formatDate(DateTime? date) =>
     date == null ? '' : DateFormat.yMMMd().add_jm().format(date.toLocal());
 
-/// Open sync conflicts of the signed-in user. Shows only what the API
-/// returns; nothing is stored on the device.
+/// Open sync conflicts of the signed-in user, and changes from this device
+/// that could not be synced. Conflicts show only what the API returns;
+/// nothing from it is stored on the device.
 class SyncConflictsScreen extends StatefulWidget {
   final SyncConflictsApi api;
 
-  const SyncConflictsScreen({super.key, required this.api});
+  /// Local queue of given-up changes; null where sync is not available.
+  final FailedChangesStore? failedChanges;
+
+  const SyncConflictsScreen({super.key, required this.api, this.failedChanges});
 
   @override
   State<SyncConflictsScreen> createState() => _SyncConflictsScreenState();
@@ -35,6 +40,7 @@ class SyncConflictsScreen extends StatefulWidget {
 
 class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
   List<SyncConflict>? _conflicts;
+  List<FailedChange> _failed = const [];
   String? _error;
   bool _loading = true;
 
@@ -49,16 +55,25 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
       _loading = true;
       _error = null;
     });
+    List<FailedChange> failed = const [];
+    try {
+      failed = await widget.failedChanges?.listFailed() ?? const [];
+    } catch (_) {
+      failed = const [];
+    }
     try {
       final conflicts = await widget.api.listOpen();
       if (!mounted) return;
       setState(() {
         _conflicts = conflicts;
+        _failed = failed;
         _loading = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
+        _conflicts = null;
+        _failed = failed;
         _error = e is SyncConflictsApiException ? e.message : 'Could not load conflicts.';
         _loading = false;
       });
@@ -72,41 +87,86 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
     if (mounted) await _load();
   }
 
+  Future<void> _discard(FailedChange change) async {
+    final store = widget.failedChanges;
+    if (store == null) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Discard this change?'),
+        content: Text('${change.label} will be removed from this device and never sent. '
+            'The record on the server stays as it is.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Discard')),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    await store.discard(change.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Change discarded. The record is refreshed on the next sync.')),
+    );
+    await _load();
+  }
+
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
     Widget body;
     if (_loading) {
       body = const Center(child: CircularProgressIndicator());
-    } else if (_error != null) {
-      body = Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            Text(_error!, textAlign: TextAlign.center),
-            const SizedBox(height: 12),
-            OutlinedButton(onPressed: _load, child: const Text('Try again')),
-          ]),
-        ),
-      );
-    } else if (_conflicts!.isEmpty) {
+    } else if (_error == null && _conflicts!.isEmpty && _failed.isEmpty) {
       body = const Center(child: Text('No sync conflicts to review.'));
     } else {
       body = RefreshIndicator(
         onRefresh: _load,
-        child: ListView.separated(
-          itemCount: _conflicts!.length,
-          separatorBuilder: (_, __) => const Divider(height: 1),
-          itemBuilder: (context, i) {
-            final c = _conflicts![i];
-            return ListTile(
-              key: ValueKey('conflict-${c.id}'),
-              leading: const Icon(Icons.sync_problem, color: Colors.orange),
-              title: Text(c.label),
-              subtitle: Text('${c.kindLabel} · ${_formatDate(c.createdAt)}\n${c.explanation}'),
-              isThreeLine: true,
-              onTap: () => _open(c),
-            );
-          },
+        child: ListView(
+          children: [
+            if (_error != null)
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(children: [
+                  Expanded(child: Text(_error!)),
+                  OutlinedButton(onPressed: _load, child: const Text('Try again')),
+                ]),
+              ),
+            for (final c in _conflicts ?? const <SyncConflict>[]) ...[
+              ListTile(
+                key: ValueKey('conflict-${c.id}'),
+                leading: const Icon(Icons.sync_problem, color: Colors.orange),
+                title: Text(c.label),
+                subtitle: Text('${c.kindLabel} · ${_formatDate(c.createdAt)}\n${c.explanation}'),
+                isThreeLine: true,
+                onTap: () => _open(c),
+              ),
+              const Divider(height: 1),
+            ],
+            if (_failed.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 24, 16, 4),
+                child: Text('Changes that could not be synced', style: theme.textTheme.titleMedium),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Text('These are no longer sent. They stay on this device until you discard them.'),
+              ),
+              for (final f in _failed)
+                ListTile(
+                  key: ValueKey('failed-${f.id}'),
+                  leading: const Icon(Icons.error_outline, color: Colors.red),
+                  title: Text(f.label),
+                  subtitle: Text(f.reasonText),
+                  isThreeLine: true,
+                  trailing: TextButton(
+                    key: ValueKey('discard-${f.id}'),
+                    onPressed: () => _discard(f),
+                    child: const Text('Discard this change'),
+                  ),
+                ),
+            ],
+          ],
         ),
       );
     }

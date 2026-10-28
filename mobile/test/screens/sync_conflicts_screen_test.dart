@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 // Local imports
 import 'package:invoiceme/core/services/sync_conflicts_api.dart';
+import 'package:invoiceme/core/services/sync_protocol.dart';
 import 'package:invoiceme/models/sync_conflict.dart';
 import 'package:invoiceme/screens/sync_conflicts_screen.dart';
 
@@ -83,6 +84,22 @@ class FakeConflictsApi implements SyncConflictsApi {
       ..['allowed_actions'] = <String>[];
     detail = resolved;
     return SyncConflictDetail.fromJson(resolved);
+  }
+}
+
+class FakeFailedStore implements FailedChangesStore {
+  final List<FailedChange> rows;
+  final discarded = <String>[];
+
+  FakeFailedStore(this.rows);
+
+  @override
+  Future<List<FailedChange>> listFailed() async => List.of(rows);
+
+  @override
+  Future<void> discard(String id) async {
+    discarded.add(id);
+    rows.removeWhere((r) => r.id == id);
   }
 }
 
@@ -217,4 +234,66 @@ void main() {
     expect(find.text('This conflict no longer exists.'), findsOneWidget);
     expect(find.text('Use my version'), findsNothing);
   });
+
+  testWidgets('changes that could not be synced: listed with plain reason, discard after confirmation', (tester) async {
+    final c = conflictJson();
+    final api = FakeConflictsApi(list: [c], detail: detailJson(c));
+    final store = FakeFailedStore([
+      const FailedChange(
+        id: 'p1',
+        objectType: 'client',
+        objectId: 'abcdef1234',
+        changeType: 'update',
+        reason: 'not_found',
+        attempts: 1,
+      ),
+    ]);
+    await tester.pumpWidget(MaterialApp(home: SyncConflictsScreen(api: api, failedChanges: store)));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Client Acme'), findsOneWidget);
+    expect(find.text('Changes that could not be synced'), findsOneWidget);
+    expect(find.text('Client abcdef12 (update)'), findsOneWidget);
+    expect(find.text('The record does not exist on the server.'), findsOneWidget);
+
+    await tester.tap(find.text('Discard this change'));
+    await tester.pumpAndSettle();
+    expect(find.text('Discard this change?'), findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(store.discarded, isEmpty);
+
+    await tester.tap(find.text('Discard this change'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Discard'));
+    await tester.pumpAndSettle();
+    expect(store.discarded, ['p1']);
+    expect(find.text('Changes that could not be synced'), findsNothing);
+  });
+
+  testWidgets('failed changes are shown even when the conflicts API fails', (tester) async {
+    final api = FakeConflictsApi(list: [], detail: {});
+    final store = FakeFailedStore([
+      const FailedChange(id: 'p1', objectType: 'invoice', objectId: 'i1', changeType: 'delete', reason: 'record_deleted'),
+    ]);
+    await tester.pumpWidget(MaterialApp(home: SyncConflictsScreen(api: _FailingApi(api), failedChanges: store)));
+    await tester.pumpAndSettle();
+    expect(find.text('offline'), findsOneWidget);
+    expect(find.text('Invoice i1 (delete)'), findsOneWidget);
+  });
+}
+
+class _FailingApi implements SyncConflictsApi {
+  final SyncConflictsApi inner;
+  _FailingApi(this.inner);
+
+  @override
+  Future<List<SyncConflict>> listOpen() async => throw const SyncConflictsApiException(null, 'offline');
+
+  @override
+  Future<SyncConflictDetail> get(String id) => inner.get(id);
+
+  @override
+  Future<SyncConflictDetail> resolve(String id, String action, {int? expectedRevision}) =>
+      inner.resolve(id, action, expectedRevision: expectedRevision);
 }

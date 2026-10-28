@@ -297,6 +297,24 @@ unless `PUBLIC_ORIGIN` or `TRUSTED_HOSTS` is set. API clients that already
 use HTTPS, requests through a TLS proxy marked `https`, and the local health
 check are unaffected. Nothing new is required for the backend to start.
 
+## API-key access
+
+API keys fail closed:
+
+- Only the invoice and client controllers accept API keys (`ApiKeyOrJwtGuard` + `PermissionGuard`). Every route there names the permission a key needs with `@RequirePermission`; a unit test fails if a route on either controller lacks one, and the guard refuses API keys (403) on any key-accepting route that names none.
+- A key's permissions are an explicit list. `*` grants everything, `read:*`/`write:*`/`delete:*` grant one action on every resource, and an empty list grants nothing. Keys cannot be created without at least one permission.
+- Keys act as their owner: another owner's records return 404 exactly as for JWT sessions.
+
+| Routes | Authentication |
+|---|---|
+| `GET /v1/health`, `/v1/health/db`, `/v1/health/cache`; `GET /v1/config/stripe-public-key`; `POST /v1/auth/register`, `/refresh`, `/password-reset`, `/password-reset/confirm` | Public |
+| `POST /v1/auth/login` | Email and password |
+| `POST /v1/webhooks/stripe` | Stripe signature on the raw body |
+| `/v1/invoices/**`, `/v1/clients/**` | JWT, or an API key with the named permission |
+| `/v1/sync/**`, `/v1/user-settings`, `/v1/api-keys/**`, `/v1/invoice-templates/**`, `/v1/feedback/**`, `/v1/gdpr/**`, `/v1/auth/2fa/*`, `/v1/auth/change-password` | JWT only; API keys get 401 |
+
+The mobile app also offers `read:`/`write:` permissions for payments, settings, dashboard and reports. No route accepts API keys for those areas today, so those permissions have no effect.
+
 ## Reviews of 2026-10-25 and known gaps
 
 Each report records what was proven with a failing test, what was fixed, how it was verified, and what was not checked. They describe specific checks, not a guarantee that the application is secure.
@@ -312,7 +330,6 @@ Each report records what was proven with a failing test, what was fixed, how it 
 Known gaps, not fixed:
 
 - The attachment URL check validates format only; the server does not fetch attachment URLs, and the mobile app does not yet re-check cached URLs before opening them (needs a mobile release).
-- The permission guard admits API keys on routes without a `@RequirePermission` decorator. Unit tests fail if the invoices or clients controller gains such a route; other controllers rely on review.
 - Offline-sync conflicts: the server applies changes to the latest state and does not detect concurrent edits of the same field. A protocol is proposed in [proposals/sync-conflicts.md](proposals/sync-conflicts.md) and waits on the owner's decisions; it is not implemented.
 - Payments: refunds and disputes are not handled; zero-decimal currencies (such as JPY) are multiplied by 100; the full PaymentIntent, including `client_secret`, is copied into payment metadata; each `/pay` call creates a new PaymentIntent.
 - `PdfCacheService.getBrowser()` returns a browser whose pages are not locked down (no caller in the application today).

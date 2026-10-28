@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, IsNull } from 'typeorm';
 import { Client } from '../entities/client.entity';
 import { CreateClientDto, UpdateClientDto } from './dto/client.dto';
 import { PaginatedResponse, PaginationDto } from '../core/dto/pagination.dto';
@@ -94,7 +94,7 @@ export class ClientsService {
     // Scoped to the owner: another user's client is answered exactly like a
     // missing one, so the response does not reveal that the id exists.
     const client = await this.clientRepository.findOne({
-      where: { id, userId, deletedAt: null },
+      where: { id, userId, deletedAt: IsNull() },
     });
 
     if (!client) {
@@ -147,7 +147,7 @@ export class ClientsService {
    */
   async findAllForExport(userId: string): Promise<Client[]> {
     return this.clientRepository.find({
-      where: { userId, deletedAt: null },
+      where: { userId, deletedAt: IsNull() },
       order: { createdAt: 'DESC' },
     });
   }

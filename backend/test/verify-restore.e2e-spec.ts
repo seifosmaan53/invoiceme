@@ -84,6 +84,9 @@ describe('Restore verification (read-only, E2E)', () => {
   });
 
   it('a changed value with the same row count is a data mismatch', async () => {
+    // Without the sync triggers (migration 019) for this session: they would
+    // also bump the revision, and the revert below must restore the row exactly.
+    await admin.query('SET session_replication_role = replica');
     await admin.query(`UPDATE ${copy}.clients SET name = 'Tampered' WHERE id = '22222222-2222-2222-2222-222222222222'`);
     try {
       const c = await compare();
@@ -91,6 +94,7 @@ describe('Restore verification (read-only, E2E)', () => {
       expect(c.tables.find((t) => t.table === 'clients')!.status).toBe('mismatch');
     } finally {
       await admin.query(`UPDATE ${copy}.clients SET name = 'Fictional Supplies Ltd' WHERE id = '22222222-2222-2222-2222-222222222222'`);
+      await admin.query('SET session_replication_role = origin');
     }
   });
 

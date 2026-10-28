@@ -1,5 +1,7 @@
+import { ApiProperty } from '@nestjs/swagger';
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { Invoice } from './invoice.entity';
+import { BIGINT_AS_NUMBER } from './bigint-transformer';
 
 @Entity('invoice_items')
 @Index(['invoiceId'])
@@ -31,6 +33,10 @@ export class InvoiceItem {
 
   @Column({ name: 'line_total', type: 'numeric', precision: 12, scale: 2, default: 0 })
   lineTotal: number;
+
+  @ApiProperty({ description: 'Server-controlled revision; increases on every change (sync protocol 2)', example: 1 })
+  @Column({ type: 'bigint', default: 1, transformer: BIGINT_AS_NUMBER })
+  revision: number;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

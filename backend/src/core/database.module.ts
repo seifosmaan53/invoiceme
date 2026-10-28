@@ -16,6 +16,9 @@ import { InvoiceTemplate } from '../entities/invoice-template.entity';
 import { RecurringInvoice } from '../entities/recurring-invoice.entity';
 import { ApiKey } from '../entities/api-key.entity';
 import { UserSettings } from '../entities/user-settings.entity';
+import { SyncConflict } from '../entities/sync-conflict.entity';
+import { SyncTombstone } from '../entities/sync-tombstone.entity';
+import { SyncRecordRevision } from '../entities/sync-record-revision.entity';
 
 @Module({
   imports: [
@@ -44,6 +47,9 @@ import { UserSettings } from '../entities/user-settings.entity';
           RecurringInvoice,
           ApiKey,
           UserSettings,
+          SyncConflict,
+          SyncTombstone,
+          SyncRecordRevision,
         ],
         // Never auto-sync in real environments. Opt-in only via
         // DB_SYNCHRONIZE=true (used by E2E CI to build the schema from

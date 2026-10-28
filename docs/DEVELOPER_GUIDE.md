@@ -435,6 +435,7 @@ Docker.)
 | Integrity report (read-only) | `npm run integrity:report` (ts-node) or `npm run integrity:report:prod` | `node dist/integrity/integrity-report.js` | `node dist/integrity/integrity-report.js` |
 | Restore verification | `npm run backup:verify-restore` or `npm run backup:verify-restore:prod` | `node dist/ops/verify-restore.js` | `node dist/ops/verify-restore.js` |
 | File/.env verification | `npm run backup:verify-files -- <a> <b>` or `npm run backup:verify-files:prod -- <a> <b>` | `node dist/ops/verify-files.js <a> <b>` | `node dist/ops/verify-files.js <a> <b>` |
+| Payment secret scrub | `npm run payments:scrub-secrets [-- --apply --i-have-a-verified-backup]` or `npm run payments:scrub-secrets:prod` | `node dist/ops/scrub-payment-secrets.js` | `node dist/ops/scrub-payment-secrets.js` |
 | Schema review | `scripts/schema-review.sh <restored-url> <scratch-url> backend/migrations <out>` (repository root) | `scripts/schema-review.sh <restored-url> <scratch-url> migrations <out>` | not shipped in the image; run it from a checkout or bundle |
 | Build a bundle | `scripts/make-update-bundle.sh [out-dir]` (repository root, clean tree) | n/a | n/a |
 

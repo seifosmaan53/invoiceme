@@ -190,6 +190,7 @@ Changes merged on 2026-10-25 that an existing installation must account for:
 - **`TRUST_PROXY=true`** now trusts only a proxy on the same machine (it used to trust any directly connected peer), and hop counts stop startup. A proxy on another machine must be listed by address, or clients get 403. See `docs/operations/customer-update.md`.
 - **Another user's records** return 404 instead of 403.
 - **PDF logos** must be `https` URLs on port 443 serving PNG, JPEG, GIF or WebP up to 1 MiB, without redirects. Saving a new `http://`, SVG or otherwise invalid logo URL is rejected with 400; stored values that fail these rules, logos on private addresses, and fetches over 5 s are left out of the PDF. The server fetches them directly, not through a proxy.
+- **Online payment** (`/pay`) is refused (400) for invoices in currencies other than USD, EUR, GBP, CAD and AUD; amounts are sent to Stripe as total × 100, which would overcharge zero-decimal currencies such as JPY 100 times. Invoices in other currencies can still be created and marked paid by hand. `client_secret` is no longer stored with payments.
 - **Sync clients** may send a `change_id` per change and receive per-change `results[]`; older clients keep working but get no replay protection until they send one. See [docs/SYNC-CONTRACT.md](docs/SYNC-CONTRACT.md).
 
 ---

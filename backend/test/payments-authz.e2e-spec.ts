@@ -318,6 +318,43 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
     });
   });
 
+  describe('currencies and stored secrets', () => {
+    it('refuses online payment in a currency the flow cannot convert; the same invoice in USD can be paid', async () => {
+      await invoiceRepository.update({ id: invoiceA.id }, { currency: 'JPY' });
+      const refused = await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/pay`).set('Authorization', `Bearer ${tokenA}`);
+      expect(refused.status).toBe(400);
+      expect(refused.body.message).toBe('Online payment is not available for JPY. Supported: USD, EUR, GBP, CAD, AUD.');
+      expect(createPaymentIntent).not.toHaveBeenCalled();
+      expect(await paymentRepository.count()).toBe(0);
+
+      // Positive control: same invoice, same caller, two-decimal currency
+      await invoiceRepository.update({ id: invoiceA.id }, { currency: 'usd' });
+      await pay(invoiceA, tokenA);
+      expect(createPaymentIntent).toHaveBeenCalledTimes(1);
+    });
+
+    it('StripeService refuses an unsupported currency even if a caller skips the route check', async () => {
+      // The real method (the instance is spied on), before any Stripe call
+      const real = StripeService.prototype.createPaymentIntent.bind(stripeService);
+      await expect(real(1000, 'JPY', {})).rejects.toThrow('Online payment is not available for JPY');
+    });
+
+    it('returns client_secret to the caller but never stores it', async () => {
+      const res = await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/pay`).set('Authorization', `Bearer ${tokenA}`).expect(200);
+      expect(res.body.clientSecret).toBe(`${res.body.paymentIntentId}_secret_e2e`);
+      const created = await paymentRepository.findOneByOrFail({ providerPaymentId: res.body.paymentIntentId });
+      expect(created.metadataJson).toEqual({ payment_intent_id: res.body.paymentIntentId, status: 'requires_payment_method' });
+
+      // The webhook's PaymentIntent carries client_secret too; it is dropped
+      const intent = succeededIntent(res.body.paymentIntentId, invoiceA, userA, { client_secret: 'pi_secret_from_stripe' });
+      await postWebhook(paymentIntentEvent('payment_intent.succeeded', intent)).expect(200);
+      const completed = await paymentRepository.findOneByOrFail({ providerPaymentId: res.body.paymentIntentId });
+      expect(completed.status).toBe(PaymentStatus.COMPLETED);
+      expect(JSON.stringify(completed.metadataJson)).not.toContain('secret');
+      expect(completed.metadataJson).toMatchObject({ id: res.body.paymentIntentId, status: 'succeeded', amount_received: 11000 });
+    });
+  });
+
   describe('POST /api/v1/webhooks/stripe', () => {
     it("marks only the paying owner's invoice paid and notifies only that owner", async () => {
       const piA = await pay(invoiceA, tokenA);

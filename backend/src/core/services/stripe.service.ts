@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import Stripe from 'stripe';
+import { isOnlinePaymentCurrency, UnsupportedPaymentCurrencyError } from '../../payments/payment-currency';
 
 @Injectable()
 export class StripeService {
@@ -65,6 +66,9 @@ export class StripeService {
 
   async createPaymentIntent(amount: number, currency: string, metadata: Record<string, string>): Promise<Stripe.PaymentIntent> {
     this.ensureAvailable();
+    if (!isOnlinePaymentCurrency(currency)) {
+      throw new UnsupportedPaymentCurrencyError(currency);
+    }
 
     try {
       return await this.stripe!.paymentIntents.create({

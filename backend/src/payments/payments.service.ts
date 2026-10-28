@@ -6,6 +6,7 @@ import { Invoice, InvoiceStatus } from '../entities/invoice.entity';
 import { NotificationService } from '../core/services/notification.service';
 import { User } from '../entities/user.entity';
 import { ownedClient } from '../core/utils/cross-owner.util';
+import { withoutClientSecret } from './payment-currency';
 
 /** What a provider event did to the stored payment. */
 export enum PaymentEventResult {
@@ -129,7 +130,8 @@ export class PaymentsService {
       return PaymentEventResult.STALE;
     }
 
-    const metadataJson = { ...payment.metadataJson, ...(paymentIntent || {}) };
+    // Keep the PaymentIntent for reference, without its client_secret
+    const metadataJson = { ...payment.metadataJson, ...(withoutClientSecret(paymentIntent) || {}) };
     const changes: Partial<Payment> = { status, metadataJson };
 
     if (status === PaymentStatus.COMPLETED) {

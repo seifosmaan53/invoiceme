@@ -33,6 +33,7 @@ describe('Payments E2E Tests', () => {
     isAvailable: jest.fn().mockReturnValue(true),
     createPaymentIntent: jest.fn(),
     verifyWebhookSignature: jest.fn(),
+    retrievePaymentIntent: jest.fn(),
   };
 
   beforeAll(async () => {
@@ -176,6 +177,8 @@ describe('Payments E2E Tests', () => {
           user_id: testUser.id,
           invoice_number: invoice.number,
         }),
+        // Provider idempotency key: invoice, attempt number, amount, currency; no secrets
+        `invoiceme-pay-${invoice.id}-1-11000-usd`,
       );
 
       // Verify payment record is created in database
@@ -371,30 +374,26 @@ describe('Payments E2E Tests', () => {
       expect(firstPayment).toBeDefined();
       expect(firstPayment.status).toBe(PaymentStatus.PENDING);
 
-      // Mock Stripe payment intent for second call (different payment intent ID)
-      const mockPaymentIntent2 = {
-        id: 'pi_second_456',
-        client_secret: 'pi_second_456_secret',
-        status: 'requires_payment_method',
-      };
-      mockStripeService.createPaymentIntent.mockResolvedValueOnce(mockPaymentIntent2);
+      // Second call while that attempt is still open and the amount is unchanged:
+      // Stripe reports it usable, so it is returned again instead of a second intent.
+      mockStripeService.retrievePaymentIntent.mockResolvedValueOnce({
+        ...mockPaymentIntent1,
+        amount: 11000,
+        currency: 'usd',
+        metadata: { invoice_id: invoice.id },
+      });
+      const createCalls = mockStripeService.createPaymentIntent.mock.calls.length;
 
-      // Second payment intent call (while PENDING payment exists)
       const secondResponse = await request(app.getHttpServer())
         .post(`/api/v1/invoices/${invoice.id}/pay`)
         .set('Authorization', `Bearer ${authToken}`)
         .expect(200);
 
-      expect(secondResponse.body.paymentIntentId).toBe('pi_second_456');
-
-      // Verify both payment records exist (current behavior: allows multiple pending payments)
-      const allPayments = await paymentRepository.find({
-        where: { invoiceId: invoice.id },
-      });
-      expect(allPayments.length).toBe(2);
-      expect(allPayments.some((p) => p.providerPaymentId === 'pi_first_123')).toBe(true);
-      expect(allPayments.some((p) => p.providerPaymentId === 'pi_second_456')).toBe(true);
-      expect(allPayments.every((p) => p.status === PaymentStatus.PENDING)).toBe(true);
+      expect(secondResponse.body).toMatchObject({ paymentIntentId: 'pi_first_123', clientSecret: 'pi_first_123_secret', reused: true });
+      expect(mockStripeService.createPaymentIntent.mock.calls.length).toBe(createCalls);
+      const allPayments = await paymentRepository.find({ where: { invoiceId: invoice.id } });
+      expect(allPayments).toHaveLength(1);
+      expect(allPayments[0]).toMatchObject({ providerPaymentId: 'pi_first_123', status: PaymentStatus.PENDING });
     });
   });
 

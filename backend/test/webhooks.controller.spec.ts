@@ -3,7 +3,6 @@ import { BadRequestException } from '@nestjs/common';
 import { WebhooksController } from '../src/payments/webhooks.controller';
 import { PaymentsService, PaymentEventResult } from '../src/payments/payments.service';
 import { StripeService } from '../src/core/services/stripe.service';
-import { PaymentStatus } from '../src/entities/payment.entity';
 
 describe('WebhooksController', () => {
   let controller: WebhooksController;
@@ -12,7 +11,7 @@ describe('WebhooksController', () => {
 
   beforeEach(async () => {
     const mockPaymentsService = {
-      updatePaymentStatus: jest.fn(),
+      handleProviderEvent: jest.fn(),
     };
 
     const mockStripeService = {
@@ -62,7 +61,7 @@ describe('WebhooksController', () => {
       };
 
       stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
+      paymentsService.handleProviderEvent.mockResolvedValue(undefined);
 
       const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
 
@@ -135,380 +134,32 @@ describe('WebhooksController', () => {
     });
   });
 
-  describe('payment_intent.succeeded event', () => {
-    it('should parse event.data.object as payment intent', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.succeeded',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(paymentsService.updatePaymentStatus).toHaveBeenCalledWith(
-        paymentIntent.id,
-        PaymentStatus.COMPLETED,
-        paymentIntent,
-      );
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should call paymentsService.updatePaymentStatus with payment intent ID, PaymentStatus.COMPLETED, and full payment intent object', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.succeeded',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(paymentsService.updatePaymentStatus).toHaveBeenCalledWith(
-        paymentIntent.id,
-        PaymentStatus.COMPLETED,
-        paymentIntent,
-      );
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should log success message to console with payment intent ID and invoice ID from metadata', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.succeeded',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        `Payment succeeded: ${paymentIntent.id} for invoice ${paymentIntent.metadata?.invoice_id}`,
-      );
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should return { received: true }', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.succeeded',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      const result = await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(result).toEqual({ received: true });
-
-      consoleLogSpy.mockRestore();
-    });
-  });
-
-  describe('payment_intent.payment_failed event', () => {
-    it('should parse event.data.object as payment intent', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.payment_failed',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(paymentsService.updatePaymentStatus).toHaveBeenCalledWith(
-        paymentIntent.id,
-        PaymentStatus.FAILED,
-        paymentIntent,
-      );
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should call paymentsService.updatePaymentStatus with payment intent ID, PaymentStatus.FAILED, and full payment intent object', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.payment_failed',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(paymentsService.updatePaymentStatus).toHaveBeenCalledWith(
-        paymentIntent.id,
-        PaymentStatus.FAILED,
-        paymentIntent,
-      );
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should log failure message to console with payment intent ID and invoice ID from metadata', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.payment_failed',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        `Payment failed: ${paymentIntent.id} for invoice ${paymentIntent.metadata?.invoice_id}`,
-      );
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should return { received: true }', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.payment_failed',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      const result = await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(result).toEqual({ received: true });
-
-      consoleLogSpy.mockRestore();
-    });
-  });
-
-  describe('unhandled event types', () => {
-    it('should log unhandled event type to console', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-
-      const mockEvent = {
-        type: 'payment_intent.created',
-        data: {
-          object: {},
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(consoleLogSpy).toHaveBeenCalledWith(`Unhandled event type: ${mockEvent.type}`);
-      expect(paymentsService.updatePaymentStatus).not.toHaveBeenCalled();
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should return { received: true } without calling paymentsService', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-
-      const mockEvent = {
-        type: 'charge.succeeded',
-        data: {
-          object: {},
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      const result = await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(result).toEqual({ received: true });
-      expect(paymentsService.updatePaymentStatus).not.toHaveBeenCalled();
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should test with various event types: payment_intent.created, charge.succeeded, etc.', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-
-      const eventTypes = ['payment_intent.created', 'charge.succeeded', 'customer.created'];
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      for (const eventType of eventTypes) {
-        const mockEvent = {
-          type: eventType,
-          data: {
-            object: {},
-          },
-        };
-
-        const mockRequest = {
-          rawBody: rawBody,
-        };
-
-        stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-
-        const result = await controller.handleStripeWebhook(mockRequest as any, signature);
-
-        expect(result).toEqual({ received: true });
-        expect(consoleLogSpy).toHaveBeenCalledWith(`Unhandled event type: ${eventType}`);
-      }
-
-      expect(paymentsService.updatePaymentStatus).not.toHaveBeenCalled();
-
-      consoleLogSpy.mockRestore();
+  // Routing of payment, refund and dispute events, and their idempotency, are
+  // PaymentsService.handleProviderEvent's job (payments-state.e2e-spec.ts,
+  // payments-authz.e2e-spec.ts); the controller verifies and hands over.
+  describe('delegation', () => {
+    it.each(['payment_intent.succeeded', 'charge.refunded', 'charge.dispute.created', 'customer.created'])(
+      'passes a verified %s event to the payments service once and acknowledges it',
+      async (type) => {
+        const event = { id: 'evt_1', type, data: { object: { id: 'obj_1' } } };
+        stripeService.verifyWebhookSignature.mockReturnValue(event as any);
+        paymentsService.handleProviderEvent.mockResolvedValue('applied');
+        const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
+
+        await expect(controller.handleStripeWebhook({ rawBody: Buffer.from('x') } as any, 'sig')).resolves.toEqual({ received: true });
+        expect(paymentsService.handleProviderEvent).toHaveBeenCalledTimes(1);
+        expect(paymentsService.handleProviderEvent).toHaveBeenCalledWith(event);
+        consoleLogSpy.mockRestore();
+      },
+    );
+
+    it('never hands over an event whose signature failed', async () => {
+      stripeService.verifyWebhookSignature.mockImplementation(() => {
+        throw new Error('bad signature');
+      });
+      jest.spyOn(console, 'error').mockImplementation();
+      await expect(controller.handleStripeWebhook({ rawBody: Buffer.from('x') } as any, 'sig')).rejects.toBeInstanceOf(BadRequestException);
+      expect(paymentsService.handleProviderEvent).not.toHaveBeenCalled();
     });
   });
 
@@ -518,7 +169,7 @@ describe('WebhooksController', () => {
         type: 'payment_intent.succeeded',
         data: { object: { id: 'pi_1', metadata: {} } },
       } as any);
-      paymentsService.updatePaymentStatus.mockRejectedValue(new Error('connection terminated'));
+      paymentsService.handleProviderEvent.mockRejectedValue(new Error('connection terminated'));
       const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
 
       const call = controller.handleStripeWebhook({ rawBody: Buffer.from('{}') } as any, 'sig');
@@ -532,7 +183,7 @@ describe('WebhooksController', () => {
         type: 'payment_intent.succeeded',
         data: { object: { id: 'pi_unknown', metadata: {} } },
       } as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(PaymentEventResult.UNKNOWN_PAYMENT);
+      paymentsService.handleProviderEvent.mockResolvedValue(PaymentEventResult.UNKNOWN_PAYMENT);
       const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
 
       await expect(controller.handleStripeWebhook({ rawBody: Buffer.from('{}') } as any, 'sig')).resolves.toEqual({ received: true });
@@ -627,7 +278,7 @@ describe('WebhooksController', () => {
       };
 
       stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
+      paymentsService.handleProviderEvent.mockResolvedValue(undefined);
 
       const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
 
@@ -637,76 +288,6 @@ describe('WebhooksController', () => {
         rawBody,
         signature,
       );
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should verify paymentsService.updatePaymentStatus called with correct status enum', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.succeeded',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(paymentsService.updatePaymentStatus).toHaveBeenCalledWith(
-        paymentIntent.id,
-        PaymentStatus.COMPLETED,
-        paymentIntent,
-      );
-
-      consoleLogSpy.mockRestore();
-    });
-
-    it('should verify console.log calls for event processing', async () => {
-      const rawBody = Buffer.from('test body');
-      const signature = 'stripe-signature-header';
-      const paymentIntent = {
-        id: 'pi_123',
-        metadata: {
-          invoice_id: 'invoice-id',
-        },
-      };
-
-      const mockEvent = {
-        type: 'payment_intent.succeeded',
-        data: {
-          object: paymentIntent,
-        },
-      };
-
-      const mockRequest = {
-        rawBody: rawBody,
-      };
-
-      stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
-
-      const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
-
-      await controller.handleStripeWebhook(mockRequest as any, signature);
-
-      expect(consoleLogSpy).toHaveBeenCalled();
 
       consoleLogSpy.mockRestore();
     });
@@ -731,7 +312,7 @@ describe('WebhooksController', () => {
       };
 
       stripeService.verifyWebhookSignature.mockReturnValue(mockEvent as any);
-      paymentsService.updatePaymentStatus.mockResolvedValue(undefined);
+      paymentsService.handleProviderEvent.mockResolvedValue(undefined);
 
       const consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
 

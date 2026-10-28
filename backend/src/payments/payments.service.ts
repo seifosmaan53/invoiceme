@@ -1,12 +1,36 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Not, Repository } from 'typeorm';
-import { Payment, PaymentStatus } from '../entities/payment.entity';
+import { DataSource, Not, Repository } from 'typeorm';
+import { Payment, PaymentProvider, PaymentStatus } from '../entities/payment.entity';
+import { PaymentEvent } from '../entities/payment-event.entity';
+import { StripeService } from '../core/services/stripe.service';
 import { Invoice, InvoiceStatus } from '../entities/invoice.entity';
 import { NotificationService } from '../core/services/notification.service';
 import { User } from '../entities/user.entity';
 import { ownedClient } from '../core/utils/cross-owner.util';
 import { withoutClientSecret } from './payment-currency';
+import { paymentSummary, PaymentSummaryDto, paymentTotals } from './payment-state';
+
+/** The parts of a verified provider event the webhook acts on. */
+export interface ProviderEvent {
+  id: string;
+  type: string;
+  created?: number;
+  data: { object: any };
+}
+
+export interface CheckoutAttempt {
+  clientSecret: string;
+  paymentIntentId: string;
+  /** Amount of this attempt (the amount still due), in invoice currency units. */
+  amount: number;
+  currency: string;
+  /** An open attempt for the same amount was returned instead of a new one. */
+  reused: boolean;
+}
+
+/** PaymentIntent statuses in which the customer can still complete the payment. */
+const REUSABLE_INTENT = new Set(['requires_payment_method', 'requires_confirmation', 'requires_action']);
 
 /** What a provider event did to the stored payment. */
 export enum PaymentEventResult {
@@ -51,7 +75,11 @@ export class PaymentsService {
     private invoiceRepository: Repository<Invoice>,
     @InjectRepository(User)
     private userRepository: Repository<User>,
+    @InjectRepository(PaymentEvent)
+    private eventRepository: Repository<PaymentEvent>,
     private notificationService: NotificationService,
+    private stripeService: StripeService,
+    private dataSource: DataSource,
   ) {}
 
   /**
@@ -184,13 +212,12 @@ export class PaymentsService {
       return;
     }
 
+    // Net of refunds and disputes (payments/payment-state.ts), so an event
+    // arriving after a refund cannot mark the invoice paid again.
     const completed = await this.paymentRepository.find({
       where: { invoiceId: invoice.id, status: PaymentStatus.COMPLETED },
     });
-    const paidCents = completed
-      .filter((p) => p.currency.toLowerCase() === invoice.currency.toLowerCase())
-      .reduce((sum, p) => sum + Math.round(Number(p.amount) * 100), 0);
-    if (paidCents < Math.round(Number(invoice.total) * 100)) {
+    if (paymentTotals(completed, invoice.currency).netCents < Math.round(Number(invoice.total) * 100)) {
       return;
     }
 
@@ -239,5 +266,244 @@ export class PaymentsService {
       relations: ['invoice'],
     });
   }
-}
 
+  /** Payment state of an invoice, shown beside its own status. */
+  async summaryFor(invoice: Invoice): Promise<PaymentSummaryDto> {
+    const payments = await this.paymentRepository.find({ where: { invoiceId: invoice.id } });
+    const totals = paymentTotals(payments, invoice.currency);
+    const summary = paymentSummary(totals, invoice.status);
+    // Reopening only makes sense when part of the money went back.
+    summary.canReopen = summary.canReopen && totals.netCents < Math.round(Number(invoice.total) * 100);
+    return summary;
+  }
+
+  /** Payments of an invoice with their provider events, without provider objects or secrets. */
+  async historyFor(invoiceId: string) {
+    const payments = await this.paymentRepository.find({ where: { invoiceId }, order: { createdAt: 'ASC' } });
+    const events = payments.length
+      ? await this.eventRepository
+          .createQueryBuilder('e')
+          .where('e.paymentId IN (:...ids)', { ids: payments.map((p) => p.id) })
+          .orderBy('e.receivedAt', 'ASC')
+          .getMany()
+      : [];
+    return payments.map((p) => ({
+      id: p.id,
+      status: p.status,
+      amount: Number(p.amount).toFixed(2),
+      currency: p.currency,
+      refundedAmount: Number(p.refundedAmount ?? 0).toFixed(2),
+      disputeStatus: p.disputeStatus,
+      disputedAmount: Number(p.disputedAmount ?? 0).toFixed(2),
+      reviewRequired: !!p.metadataJson?.review_required,
+      createdAt: p.createdAt,
+      events: events
+        .filter((e) => e.paymentId === p.id)
+        .map((e) => ({ type: e.type, outcome: e.outcome, details: e.details, receivedAt: e.receivedAt })),
+    }));
+  }
+
+  /**
+   * Process one verified Stripe event (signature checked by the webhook
+   * controller). Every event id is acted on at most once to completion;
+   * refund and dispute state is read back from Stripe (authoritative), so
+   * duplicate or out-of-order deliveries cannot move it backwards.
+   */
+  async handleProviderEvent(event: ProviderEvent): Promise<string> {
+    // Stripe events always carry an id; without one the event is still
+    // processed (the state it sets is idempotent) but cannot be recorded.
+    const done = event.id ? await this.eventRepository.findOne({ where: { providerEventId: event.id } }) : null;
+    if (done) return PaymentEventResult.DUPLICATE;
+
+    const object = event.data?.object ?? {};
+    let outcome: string;
+    let paymentId: string | null = null;
+    let details: Record<string, any> = { object_id: object.id ?? null };
+
+    switch (event.type) {
+      case 'payment_intent.succeeded':
+      case 'payment_intent.payment_failed':
+      case 'payment_intent.canceled': {
+        const status = event.type === 'payment_intent.succeeded' ? PaymentStatus.COMPLETED : PaymentStatus.FAILED;
+        outcome = await this.updatePaymentStatus(object.id, status, object);
+        paymentId = (await this.paymentRepository.findOne({ where: { providerPaymentId: object.id } }))?.id ?? null;
+        details = { ...details, status: object.status ?? null, amount_received: object.amount_received ?? null, currency: object.currency ?? null };
+        break;
+      }
+      case 'charge.refunded':
+      case 'charge.refund.updated':
+      case 'refund.created':
+      case 'refund.updated':
+      case 'refund.failed': {
+        const chargeId = event.type === 'charge.refunded' ? object.id : object.charge;
+        ({ outcome, paymentId, details } = await this.applyRefundState(chargeId));
+        break;
+      }
+      default:
+        if (event.type.startsWith('charge.dispute.')) {
+          ({ outcome, paymentId, details } = await this.applyDisputeState(object.id));
+        } else {
+          outcome = 'ignored';
+        }
+    }
+
+    if (!event.id) return outcome;
+    await this.eventRepository
+      .createQueryBuilder()
+      .insert()
+      .values({
+        providerEventId: event.id,
+        paymentId,
+        type: event.type,
+        outcome,
+        details,
+        providerCreatedAt: event.created ? new Date(event.created * 1000) : null,
+      })
+      .orIgnore()
+      .execute();
+    return outcome;
+  }
+
+  private async paymentForIntent(intentId: string | null | undefined): Promise<Payment | null> {
+    if (!intentId) return null;
+    return this.paymentRepository.findOne({ where: { providerPaymentId: intentId } });
+  }
+
+  /** Refunded amount from the charge as Stripe holds it now. */
+  private async applyRefundState(chargeId: string) {
+    const charge: any = await this.stripeService.retrieveCharge(chargeId);
+    const details = {
+      object_id: chargeId,
+      amount_refunded: charge.amount_refunded ?? null,
+      currency: charge.currency ?? null,
+      payment_intent: typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id ?? null,
+    };
+    const payment = await this.paymentForIntent(details.payment_intent);
+    if (!payment) return { outcome: PaymentEventResult.UNKNOWN_PAYMENT as string, paymentId: null, details };
+
+    const refunded = Number(charge.amount_refunded) / 100;
+    if (
+      typeof charge.currency !== 'string' ||
+      charge.currency.toLowerCase() !== payment.currency.toLowerCase() ||
+      !Number.isInteger(charge.amount_refunded) ||
+      refunded < 0 ||
+      refunded > Number(payment.amount)
+    ) {
+      this.logger.error(`Refund state for payment ${payment.id} does not match it (amount or currency); not applied`);
+      return { outcome: PaymentEventResult.MISMATCH as string, paymentId: payment.id, details };
+    }
+    if (Number(payment.refundedAmount) === refunded && payment.providerChargeId === chargeId) {
+      return { outcome: PaymentEventResult.DUPLICATE as string, paymentId: payment.id, details };
+    }
+    await this.paymentRepository.update(payment.id, { refundedAmount: refunded, providerChargeId: chargeId });
+    return { outcome: PaymentEventResult.APPLIED as string, paymentId: payment.id, details };
+  }
+
+  /** Dispute status and amount as Stripe holds them now. */
+  private async applyDisputeState(disputeId: string) {
+    const dispute: any = await this.stripeService.retrieveDispute(disputeId);
+    let intentId = typeof dispute.payment_intent === 'string' ? dispute.payment_intent : dispute.payment_intent?.id ?? null;
+    const chargeId = typeof dispute.charge === 'string' ? dispute.charge : dispute.charge?.id ?? null;
+    if (!intentId && chargeId) {
+      const charge: any = await this.stripeService.retrieveCharge(chargeId);
+      intentId = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id ?? null;
+    }
+    const details = { object_id: disputeId, status: dispute.status ?? null, amount: dispute.amount ?? null, currency: dispute.currency ?? null, payment_intent: intentId };
+    const payment = await this.paymentForIntent(intentId);
+    if (!payment) return { outcome: PaymentEventResult.UNKNOWN_PAYMENT as string, paymentId: null, details };
+
+    const amount = Number(dispute.amount) / 100;
+    if (
+      typeof dispute.currency !== 'string' ||
+      dispute.currency.toLowerCase() !== payment.currency.toLowerCase() ||
+      !Number.isInteger(dispute.amount) ||
+      amount < 0 ||
+      amount > Number(payment.amount) ||
+      typeof dispute.status !== 'string'
+    ) {
+      this.logger.error(`Dispute state for payment ${payment.id} does not match it (amount or currency); not applied`);
+      return { outcome: PaymentEventResult.MISMATCH as string, paymentId: payment.id, details };
+    }
+    if (payment.disputeStatus === dispute.status && Number(payment.disputedAmount) === amount) {
+      return { outcome: PaymentEventResult.DUPLICATE as string, paymentId: payment.id, details };
+    }
+    await this.paymentRepository.update(payment.id, { disputeStatus: dispute.status, disputedAmount: amount, providerChargeId: chargeId ?? payment.providerChargeId });
+    return { outcome: PaymentEventResult.APPLIED as string, paymentId: payment.id, details };
+  }
+
+  /**
+   * Start or resume online payment of an invoice (docs/PAYMENTS.md). Runs
+   * under a per-invoice lock, so concurrent requests see each other's
+   * attempt. An open attempt for the same amount and currency is returned
+   * again (its client_secret read back from Stripe, never stored); one for a
+   * different amount is cancelled first; a succeeded or processing one stops
+   * a second charge. The caller has checked ownership and invoice status.
+   */
+  async startCheckout(invoice: Invoice): Promise<CheckoutAttempt> {
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`pay:${invoice.id}`]);
+      const payments = manager.getRepository(Payment);
+      const all = await payments.find({ where: { invoiceId: invoice.id }, order: { createdAt: 'DESC' } });
+      const currency = invoice.currency.trim().toUpperCase();
+      const dueCents = Math.round(Number(invoice.total) * 100) - paymentTotals(all, currency).netCents;
+      if (dueCents <= 0) {
+        throw new BadRequestException('Nothing is due on this invoice');
+      }
+
+      for (const attempt of all.filter((p) => p.status === PaymentStatus.PENDING && p.provider === PaymentProvider.STRIPE)) {
+        let intent: any;
+        try {
+          intent = await this.stripeService.retrievePaymentIntent(attempt.providerPaymentId);
+        } catch {
+          throw new ServiceUnavailableException('Could not check the previous payment attempt; try again shortly');
+        }
+        if (intent?.metadata?.invoice_id !== invoice.id) {
+          // Never hand out an intent that is not this invoice's
+          await payments.update(attempt.id, { status: PaymentStatus.FAILED, metadataJson: { ...attempt.metadataJson, closed_reason: 'invoice_mismatch' } as any });
+          continue;
+        }
+        if (intent.status === 'succeeded') {
+          throw new ConflictException('A payment for this invoice succeeded and is being recorded; refresh in a moment');
+        }
+        if (!REUSABLE_INTENT.has(intent.status) && intent.status !== 'canceled') {
+          throw new ConflictException('A payment for this invoice is being processed');
+        }
+        if (intent.status !== 'canceled' && intent.amount === dueCents && String(intent.currency).toUpperCase() === currency) {
+          return { clientSecret: intent.client_secret, paymentIntentId: intent.id, amount: dueCents / 100, currency, reused: true };
+        }
+        if (intent.status !== 'canceled') {
+          try {
+            await this.stripeService.cancelPaymentIntent(intent.id);
+          } catch {
+            throw new ServiceUnavailableException('Could not cancel the previous payment attempt; try again shortly');
+          }
+        }
+        await payments.update(attempt.id, {
+          status: PaymentStatus.FAILED,
+          metadataJson: { ...attempt.metadataJson, closed_reason: intent.status === 'canceled' ? 'canceled' : 'superseded' } as any,
+        });
+      }
+
+      const idempotencyKey = `invoiceme-pay-${invoice.id}-${all.length + 1}-${dueCents}-${currency.toLowerCase()}`;
+      const intent = await this.stripeService.createPaymentIntent(
+        dueCents / 100,
+        currency,
+        { invoice_id: invoice.id, user_id: invoice.userId, invoice_number: invoice.number },
+        idempotencyKey,
+      );
+      await payments.save(
+        payments.create({
+          invoiceId: invoice.id,
+          providerPaymentId: intent.id,
+          amount: dueCents / 100,
+          currency,
+          status: PaymentStatus.PENDING,
+          idempotencyKey,
+          // client_secret goes only to the caller; it is not stored
+          metadataJson: { payment_intent_id: intent.id, status: intent.status },
+        }),
+      );
+      return { clientSecret: intent.client_secret, paymentIntentId: intent.id, amount: dueCents / 100, currency, reused: false };
+    });
+  }
+}

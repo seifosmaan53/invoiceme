@@ -331,7 +331,7 @@ Known gaps, not fixed:
 
 - The attachment URL check validates format only; the server does not fetch attachment URLs. The mobile app source now re-checks every attachment URL (including rows cached on the device) before opening or loading it, but installed apps get this only from a new app build; the server cannot fix URLs already cached on a device.
 - Offline-sync conflicts: the server applies changes to the latest state and does not detect concurrent edits of the same field. A protocol is proposed in [proposals/sync-conflicts.md](proposals/sync-conflicts.md) and waits on the owner's decisions; it is not implemented.
-- Payments: refunds and disputes are not handled; a refunded or disputed invoice stays `paid` (decision needed: [proposals/payments-refunds-disputes.md](proposals/payments-refunds-disputes.md)). Each `/pay` call creates a new PaymentIntent. Online payment is limited to USD, EUR, GBP, CAD and AUD, because amounts are converted as total × 100. `client_secret` is no longer stored, but rows created before that change still hold it (the proposal has a count query and an optional cleanup).
+- Payments: refunds and disputes are recorded but never reopen an invoice by themselves ([PAYMENTS.md](PAYMENTS.md)). Online payment is limited to USD, EUR, GBP, CAD and AUD, because amounts are converted as total × 100. `client_secret` is no longer stored, but rows created before that change still hold it (`npm run payments:scrub-secrets`, owner-run).
 - Per-IP rate limiting is in memory, so it is approximate across replicas.
 
 ---

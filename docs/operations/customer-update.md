@@ -93,7 +93,7 @@ It reads the schema first. A check whose tables/columns are missing, or whose
 query fails, is `[NOT CHECKED]`; exit code 3 means **not verified**, never
 clean. Exit codes: 0 every check ran, no findings; 1 findings that need
 review; 2 could not run; 3 not verified. The **schema fingerprint** it prints
-(markers for migrations 001-019, origin guessed from index names) is a
+(markers for migrations 001-020, origin guessed from index names) is a
 diagnostic clue, not a migration history. The info line
 `encrypted_client_fields` lists clients whose fields look encrypted; if it
 lists any, or if it is NOT CHECKED, keep `ENCRYPTION_KEY` exactly as it is.
@@ -113,7 +113,9 @@ tombstone triggers) **before** the new server starts; the server reads the
 new columns on every client, invoice and item query. After applying it, the
 server checks the triggers itself at startup and refuses sync writes (503) if
 they are missing; a fingerprint marker alone does not prove the triggers
-exist. Keep `DB_SYNCHRONIZE` unset for upgrades. Other migrations
+exist. Then migration `020_payment_events_and_state.sql` (additive,
+idempotent; refund and dispute columns on `payments`, `payment_events`)
+before the new server starts. Keep `DB_SYNCHRONIZE` unset for upgrades. Other migrations
 may be needed, depending on how this installation's schema was created (some SQL files run
 by hand, TypeORM synchronize, or later edits). Decide from the actual schema:
 

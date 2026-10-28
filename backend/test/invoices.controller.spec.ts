@@ -34,7 +34,6 @@ describe('InvoicesController', () => {
   let invoicesService: jest.Mocked<InvoicesService>;
   let pdfService: jest.Mocked<PdfService>;
   let s3Service: jest.Mocked<S3Service>;
-  let stripeService: jest.Mocked<StripeService>;
   let paymentsService: jest.Mocked<PaymentsService>;
   let auditService: jest.Mocked<AuditService>;
   let attachmentRepository: jest.Mocked<Repository<Attachment>>;
@@ -88,6 +87,9 @@ describe('InvoicesController', () => {
 
     const mockPaymentsService = {
       createPayment: jest.fn(),
+      startCheckout: jest.fn(),
+      summaryFor: jest.fn().mockResolvedValue({ state: 'none' }),
+      historyFor: jest.fn(),
       updatePaymentStatus: jest.fn(),
     };
 
@@ -193,7 +195,6 @@ describe('InvoicesController', () => {
     invoicesService = module.get(InvoicesService);
     pdfService = module.get(PdfService);
     s3Service = module.get(S3Service);
-    stripeService = module.get(StripeService);
     paymentsService = module.get(PaymentsService);
     auditService = module.get(AuditService);
     attachmentRepository = module.get(getRepositoryToken(Attachment));
@@ -362,7 +363,7 @@ describe('InvoicesController', () => {
       const result = await controller.findOne(id, mockUser, mockRequest as any);
 
       expect(invoicesService.findOne).toHaveBeenCalledWith(id, mockUser.userId);
-      expect(result).toEqual(invoice);
+      expect(result).toEqual({ ...invoice, paymentSummary: { state: 'none' } });
     });
 
     it('should call auditService.log with VIEW action, invoice details, and request IP', async () => {
@@ -1452,291 +1453,60 @@ describe('InvoicesController', () => {
   });
 
   describe('POST /invoices/:id/pay (createPaymentIntent)', () => {
-    it('should call invoicesService.findOne to get invoice', async () => {
-      const id = 'invoice-id';
-      const invoice = {
-        id,
+    // Attempt reuse, cancellation, amount due and Stripe calls are
+    // PaymentsService.startCheckout's job (payments-state.e2e-spec.ts).
+    const payable = (overrides: Record<string, any> = {}) =>
+      ({
+        id: 'invoice-id',
         userId: mockUser.userId,
-        clientId: 'client-id',
         number: 'INV-001',
-        status: InvoiceStatus.DRAFT,
+        status: InvoiceStatus.SENT,
         type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
         total: 100,
         currency: 'USD',
-      } as any;
+        ...overrides,
+      }) as any;
+    const attempt = { clientSecret: 'pi_123_secret', paymentIntentId: 'pi_123', amount: 100, currency: 'USD', reused: false };
 
-      const paymentIntent = {
-        id: 'pi_123',
-        client_secret: 'pi_123_secret',
-        status: 'requires_payment_method',
-      };
+    it('looks the invoice up for the caller, starts checkout and returns the attempt', async () => {
+      invoicesService.findOne.mockResolvedValue(payable());
+      paymentsService.startCheckout.mockResolvedValue(attempt);
 
-      invoicesService.findOne.mockResolvedValue(invoice as any);
-      stripeService.createPaymentIntent.mockResolvedValue(paymentIntent as any);
-      paymentsService.createPayment.mockResolvedValue(undefined);
-      auditService.log.mockResolvedValue(undefined);
+      const result = await controller.createPaymentIntent('invoice-id', mockUser, mockRequest as any);
 
-      await controller.createPaymentIntent(id, mockUser, mockRequest as any);
-
-      expect(invoicesService.findOne).toHaveBeenCalledWith(id, mockUser.userId);
+      expect(invoicesService.findOne).toHaveBeenCalledWith('invoice-id', mockUser.userId);
+      expect(paymentsService.startCheckout).toHaveBeenCalledWith(payable());
+      expect(result).toEqual({ clientSecret: 'pi_123_secret', paymentIntentId: 'pi_123', amount: '100.00', currency: 'USD', reused: false });
     });
 
-    it('should validate invoice status (not paid, not cancelled, not estimate, total > 0)', async () => {
-      const id = 'invoice-id';
-      const invoice = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'INV-001',
-        status: InvoiceStatus.DRAFT,
-        type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
-        total: 100,
-        currency: 'USD',
-      } as any;
-
-      const paymentIntent = {
-        id: 'pi_123',
-        client_secret: 'pi_123_secret',
-        status: 'requires_payment_method',
-      };
-
-      invoicesService.findOne.mockResolvedValue(invoice as any);
-      stripeService.createPaymentIntent.mockResolvedValue(paymentIntent as any);
-      paymentsService.createPayment.mockResolvedValue(undefined);
-      auditService.log.mockResolvedValue(undefined);
-
-      await controller.createPaymentIntent(id, mockUser, mockRequest as any);
-
-      expect(stripeService.createPaymentIntent).toHaveBeenCalled();
+    it.each([
+      ['paid', { status: InvoiceStatus.PAID }, 'Invoice is already paid'],
+      ['cancelled', { status: InvoiceStatus.CANCELLED }, 'Cannot create payment for cancelled invoice'],
+      ['an estimate', { type: InvoiceType.ESTIMATE }, 'Cannot create payment for estimate'],
+      ['zero total', { total: 0 }, 'Invoice total must be greater than zero'],
+      ['JPY', { currency: 'JPY' }, 'Online payment is not available for JPY'],
+    ])('refuses %s before any checkout', async (_label, overrides, message) => {
+      invoicesService.findOne.mockResolvedValue(payable(overrides));
+      await expect(controller.createPaymentIntent('invoice-id', mockUser, mockRequest as any)).rejects.toThrow(message);
+      expect(paymentsService.startCheckout).not.toHaveBeenCalled();
     });
 
-    it('should call stripeService.createPaymentIntent with amount, currency, metadata', async () => {
-      const id = 'invoice-id';
-      const invoice = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'INV-001',
-        status: InvoiceStatus.DRAFT,
-        type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
-        total: 100,
-        currency: 'USD',
-      } as any;
+    it('audits a new attempt and a reused one differently', async () => {
+      invoicesService.findOne.mockResolvedValue(payable());
+      paymentsService.startCheckout.mockResolvedValueOnce(attempt).mockResolvedValueOnce({ ...attempt, reused: true });
+      await controller.createPaymentIntent('invoice-id', mockUser, mockRequest as any);
+      await controller.createPaymentIntent('invoice-id', mockUser, mockRequest as any);
+      const actions = auditService.log.mock.calls.map((call: any[]) => call[4].action);
+      expect(actions).toEqual(['create_payment_intent', 'reuse_payment_intent']);
+      expect(auditService.log.mock.calls[0][5]).toBe(mockRequest.ip);
+    });
 
-      const paymentIntent = {
-        id: 'pi_123',
-        client_secret: 'pi_123_secret',
-        status: 'requires_payment_method',
-      };
-
-      invoicesService.findOne.mockResolvedValue(invoice as any);
-      stripeService.createPaymentIntent.mockResolvedValue(paymentIntent as any);
-      paymentsService.createPayment.mockResolvedValue(undefined);
-      auditService.log.mockResolvedValue(undefined);
-
-      await controller.createPaymentIntent(id, mockUser, mockRequest as any);
-
-      expect(stripeService.createPaymentIntent).toHaveBeenCalledWith(
-        invoice.total,
-        invoice.currency,
-        {
-          invoice_id: invoice.id,
-          user_id: mockUser.userId,
-          invoice_number: invoice.number,
-        },
+    it('turns an invalid Stripe key into a configuration message', async () => {
+      invoicesService.findOne.mockResolvedValue(payable());
+      paymentsService.startCheckout.mockRejectedValue(new Error('Invalid Stripe API key. Please check'));
+      await expect(controller.createPaymentIntent('invoice-id', mockUser, mockRequest as any)).rejects.toThrow(
+        'Payment processing is not properly configured',
       );
-    });
-
-    it('should call paymentsService.createPayment with invoice ID, payment intent ID, amount, currency, metadata', async () => {
-      const id = 'invoice-id';
-      const invoice = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'INV-001',
-        status: InvoiceStatus.DRAFT,
-        type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
-        total: 100,
-        currency: 'USD',
-      } as any;
-
-      const paymentIntent = {
-        id: 'pi_123',
-        client_secret: 'pi_123_secret',
-        status: 'requires_payment_method',
-      };
-
-      invoicesService.findOne.mockResolvedValue(invoice as any);
-      stripeService.createPaymentIntent.mockResolvedValue(paymentIntent as any);
-      paymentsService.createPayment.mockResolvedValue(undefined);
-      auditService.log.mockResolvedValue(undefined);
-
-      await controller.createPaymentIntent(id, mockUser, mockRequest as any);
-
-      expect(paymentsService.createPayment).toHaveBeenCalledWith(
-        invoice.id,
-        paymentIntent.id,
-        invoice.total,
-        invoice.currency,
-        // client_secret is returned to the caller, never stored
-        {
-          payment_intent_id: paymentIntent.id,
-          status: paymentIntent.status,
-        },
-      );
-    });
-
-    it('should call auditService.log with create_payment_intent action', async () => {
-      const id = 'invoice-id';
-      const invoice = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'INV-001',
-        status: InvoiceStatus.DRAFT,
-        type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
-        total: 100,
-        currency: 'USD',
-      } as any;
-
-      const paymentIntent = {
-        id: 'pi_123',
-        client_secret: 'pi_123_secret',
-        status: 'requires_payment_method',
-      };
-
-      invoicesService.findOne.mockResolvedValue(invoice as any);
-      stripeService.createPaymentIntent.mockResolvedValue(paymentIntent as any);
-      paymentsService.createPayment.mockResolvedValue(undefined);
-      auditService.log.mockResolvedValue(undefined);
-
-      await controller.createPaymentIntent(id, mockUser, mockRequest as any);
-
-      expect(auditService.log).toHaveBeenCalledWith(
-        mockUser.userId,
-        AuditAction.UPDATE,
-        AuditResource.INVOICE,
-        id,
-        { invoiceNumber: invoice.number, action: 'create_payment_intent', paymentIntentId: paymentIntent.id },
-        mockRequest.ip,
-      );
-    });
-
-    it('should return { clientSecret, paymentIntentId, amount, currency }', async () => {
-      const id = 'invoice-id';
-      const invoice = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'INV-001',
-        status: InvoiceStatus.DRAFT,
-        type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
-        total: 100,
-        currency: 'USD',
-      } as any;
-
-      const paymentIntent = {
-        id: 'pi_123',
-        client_secret: 'pi_123_secret',
-        status: 'requires_payment_method',
-      };
-
-      invoicesService.findOne.mockResolvedValue(invoice as any);
-      stripeService.createPaymentIntent.mockResolvedValue(paymentIntent as any);
-      paymentsService.createPayment.mockResolvedValue(undefined);
-      auditService.log.mockResolvedValue(undefined);
-
-      const result = await controller.createPaymentIntent(id, mockUser, mockRequest as any);
-
-      expect(result).toEqual({
-        clientSecret: paymentIntent.client_secret,
-        paymentIntentId: paymentIntent.id,
-        amount: invoice.total,
-        currency: invoice.currency,
-      });
-    });
-
-    it('should throw BadRequestException for invalid invoice states (already paid, cancelled, estimate, zero total)', async () => {
-      const id = 'invoice-id';
-      const paidInvoice = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'INV-001',
-        status: InvoiceStatus.PAID,
-        type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
-        total: 100,
-        currency: 'USD',
-      } as any;
-
-      invoicesService.findOne.mockResolvedValue(paidInvoice);
-
-      await expect(controller.createPaymentIntent(id, mockUser, mockRequest as any)).rejects.toThrow(BadRequestException);
-      expect(stripeService.createPaymentIntent).not.toHaveBeenCalled();
-    });
-
-    it('should throw BadRequestException when invoice is cancelled', async () => {
-      const id = 'invoice-id';
-      const cancelledInvoice = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'INV-001',
-        status: InvoiceStatus.CANCELLED,
-        type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
-        total: 100,
-        currency: 'USD',
-      } as any;
-
-      invoicesService.findOne.mockResolvedValue(cancelledInvoice);
-
-      await expect(controller.createPaymentIntent(id, mockUser, mockRequest as any)).rejects.toThrow(BadRequestException);
-    });
-
-    it('should throw BadRequestException when invoice is estimate', async () => {
-      const id = 'invoice-id';
-      const estimate = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'EST-001',
-        status: InvoiceStatus.DRAFT,
-        type: InvoiceType.ESTIMATE,
-        issueDate: new Date('2024-01-01'),
-        total: 100,
-        currency: 'USD',
-      } as any;
-
-      invoicesService.findOne.mockResolvedValue(estimate);
-
-      await expect(controller.createPaymentIntent(id, mockUser, mockRequest as any)).rejects.toThrow(BadRequestException);
-    });
-
-    it('should throw BadRequestException when total is zero', async () => {
-      const id = 'invoice-id';
-      const zeroInvoice = {
-        id,
-        userId: mockUser.userId,
-        clientId: 'client-id',
-        number: 'INV-001',
-        status: InvoiceStatus.DRAFT,
-        type: InvoiceType.INVOICE,
-        issueDate: new Date('2024-01-01'),
-        total: 0,
-        currency: 'USD',
-      } as any;
-
-      invoicesService.findOne.mockResolvedValue(zeroInvoice);
-
-      await expect(controller.createPaymentIntent(id, mockUser, mockRequest as any)).rejects.toThrow(BadRequestException);
     });
   });
 

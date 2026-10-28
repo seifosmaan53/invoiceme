@@ -64,18 +64,27 @@ export class StripeService {
     }
   }
 
-  async createPaymentIntent(amount: number, currency: string, metadata: Record<string, string>): Promise<Stripe.PaymentIntent> {
+  async createPaymentIntent(
+    amount: number,
+    currency: string,
+    metadata: Record<string, string>,
+    idempotencyKey?: string,
+  ): Promise<Stripe.PaymentIntent> {
     this.ensureAvailable();
     if (!isOnlinePaymentCurrency(currency)) {
       throw new UnsupportedPaymentCurrencyError(currency);
     }
 
     try {
-      return await this.stripe!.paymentIntents.create({
-        amount: Math.round(amount * 100), // Convert to cents
-        currency: currency.trim().toLowerCase(),
-        metadata,
-      });
+      return await this.stripe!.paymentIntents.create(
+        {
+          amount: Math.round(amount * 100), // Convert to cents
+          currency: currency.trim().toLowerCase(),
+          metadata,
+        },
+        // The same key returns the same PaymentIntent instead of a second one
+        idempotencyKey ? { idempotencyKey } : undefined,
+      );
     } catch (error: any) {
       this.logger.error('Stripe API error:', error?.message || error);
       
@@ -91,6 +100,23 @@ export class StripeService {
   async retrievePaymentIntent(paymentIntentId: string): Promise<Stripe.PaymentIntent> {
     this.ensureAvailable();
     return await this.stripe!.paymentIntents.retrieve(paymentIntentId);
+  }
+
+  async cancelPaymentIntent(paymentIntentId: string): Promise<Stripe.PaymentIntent> {
+    this.ensureAvailable();
+    return await this.stripe!.paymentIntents.cancel(paymentIntentId);
+  }
+
+  /** Authoritative charge state (amount_refunded), whatever order events arrived in. */
+  async retrieveCharge(chargeId: string): Promise<Stripe.Charge> {
+    this.ensureAvailable();
+    return await this.stripe!.charges.retrieve(chargeId);
+  }
+
+  /** Authoritative dispute state. */
+  async retrieveDispute(disputeId: string): Promise<Stripe.Dispute> {
+    this.ensureAvailable();
+    return await this.stripe!.disputes.retrieve(disputeId);
   }
 
   verifyWebhookSignature(payload: string | Buffer, signature: string): Stripe.Event {

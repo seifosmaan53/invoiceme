@@ -2,7 +2,6 @@ import { Controller, Post, Headers, HttpCode, HttpStatus, RawBodyRequest, Req, B
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
 import { StripeService } from '../core/services/stripe.service';
-import { PaymentStatus } from '../entities/payment.entity';
 import Stripe from 'stripe';
 
 @ApiTags('Webhooks')
@@ -50,19 +49,10 @@ export class WebhooksController {
 
     // Errors past this point are ours, not the sender's: they surface as 5xx
     // so Stripe redelivers the event. Redelivery is safe (see updatePaymentStatus).
-    if (event.type === 'payment_intent.succeeded') {
-      const paymentIntent = event.data.object as any;
-      console.log(`Payment succeeded: ${paymentIntent.id} for invoice ${paymentIntent.metadata?.invoice_id}`);
-      const result = await this.paymentsService.updatePaymentStatus(paymentIntent.id, PaymentStatus.COMPLETED, paymentIntent);
-      console.log(`Payment ${paymentIntent.id}: ${result}`);
-    } else if (event.type === 'payment_intent.payment_failed') {
-      const paymentIntent = event.data.object as any;
-      console.log(`Payment failed: ${paymentIntent.id} for invoice ${paymentIntent.metadata?.invoice_id}`);
-      const result = await this.paymentsService.updatePaymentStatus(paymentIntent.id, PaymentStatus.FAILED, paymentIntent);
-      console.log(`Payment ${paymentIntent.id}: ${result}`);
-    } else {
-      console.log(`Unhandled event type: ${event.type}`);
-    }
+    // Payment, refund and dispute events; each event id is acted on once,
+    // refund and dispute state is read back from Stripe (PaymentsService).
+    const result = await this.paymentsService.handleProviderEvent(event as any);
+    console.log(`Stripe event ${event.id} (${event.type}): ${result}`);
 
     return { received: true };
   }

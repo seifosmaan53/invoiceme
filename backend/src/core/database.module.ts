@@ -19,6 +19,7 @@ import { UserSettings } from '../entities/user-settings.entity';
 import { SyncConflict } from '../entities/sync-conflict.entity';
 import { SyncTombstone } from '../entities/sync-tombstone.entity';
 import { SyncRecordRevision } from '../entities/sync-record-revision.entity';
+import { PaymentEvent } from '../entities/payment-event.entity';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { SyncRecordRevision } from '../entities/sync-record-revision.entity';
           SyncConflict,
           SyncTombstone,
           SyncRecordRevision,
+          PaymentEvent,
         ],
         // Never auto-sync in real environments. Opt-in only via
         // DB_SYNCHRONIZE=true (used by E2E CI to build the schema from

@@ -13,6 +13,7 @@ import { InvoiceNumberFormatterService } from '../core/services/invoice-number-f
 import { ChangeObjectType } from '../entities/device-change.entity';
 import { ownedClient, withoutForeignClient, withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
 import { businessToday, calendarDateParts, toCalendarDate } from '../common/calendar-date';
+import { paymentTotals } from '../payments/payment-state';
 
 // Shown when an invoice still points at a client of another user (a row
 // written before ownership was enforced). That client is never returned.
@@ -133,11 +134,10 @@ export class InvoicesService {
       },
     });
 
-    // Calculate total paid amount, counting only payments in the invoice's
-    // currency (same rule as PaymentsService.markInvoicePaidIfCovered)
-    const paidCents = payments
-      .filter((payment) => payment.currency.toLowerCase() === invoice.currency.toLowerCase())
-      .reduce((sum, payment) => sum + Math.round(Number(payment.amount) * 100), 0);
+    // Net received in the invoice's currency, after refunds and disputes
+    // (same rule as PaymentsService.markInvoicePaidIfCovered): an old
+    // successful payment that was refunded does not make the invoice paid.
+    const paidCents = paymentTotals(payments, invoice.currency).netCents;
 
     // Update status if fully paid
     if (paidCents >= Math.round(Number(invoice.total) * 100)) {

@@ -5,11 +5,12 @@ import { WebhooksController } from './webhooks.controller';
 import { Payment } from '../entities/payment.entity';
 import { Invoice } from '../entities/invoice.entity';
 import { User } from '../entities/user.entity';
+import { PaymentEvent } from '../entities/payment-event.entity';
 import { CoreServicesModule } from '../core/core-services.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Payment, Invoice, User]),
+    TypeOrmModule.forFeature([Payment, Invoice, User, PaymentEvent]),
     CoreServicesModule,
   ],
   controllers: [WebhooksController],

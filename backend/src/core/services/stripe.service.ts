@@ -73,7 +73,7 @@ export class StripeService {
     try {
       return await this.stripe!.paymentIntents.create({
         amount: Math.round(amount * 100), // Convert to cents
-        currency: currency.toLowerCase(),
+        currency: currency.trim().toLowerCase(),
         metadata,
       });
     } catch (error: any) {

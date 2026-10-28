@@ -1582,9 +1582,9 @@ describe('InvoicesController', () => {
         paymentIntent.id,
         invoice.total,
         invoice.currency,
+        // client_secret is returned to the caller, never stored
         {
           payment_intent_id: paymentIntent.id,
-          client_secret: paymentIntent.client_secret,
           status: paymentIntent.status,
         },
       );

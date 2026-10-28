@@ -41,8 +41,10 @@ events received after the change are applied.
 
 Since the fix that accompanies this proposal, `client_secret` is no longer
 stored in `payments.metadata_json`. Rows created earlier still contain it.
-These secrets confirm PaymentIntents that are completed, failed or abandoned.
-Each `/pay` call creates a new intent, so the stored secrets are never used.
+InvoiceMe never uses them again (each `/pay` call creates a new intent), but a
+secret for an intent that was abandoned or failed (`requires_payment_method`)
+can still be used to confirm that intent at Stripe, and database backups keep
+the secrets until they are removed there too.
 
 Count affected rows (read-only):
 

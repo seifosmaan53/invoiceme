@@ -130,6 +130,14 @@ describe('Sync push contract (E2E)', () => {
       .send({ deviceId: 'device-test', changes })
       .expect(200);
 
+  /** Protocol 2 push (revisions and conflicts). */
+  const push2 = (token: string, changes: any[]) =>
+    request(app.getHttpServer())
+      .post('/api/v1/sync/push')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ protocol: 2, deviceId: 'device-test', changes })
+      .expect(200);
+
   const invoiceData = (clientId: string, number: string) => ({
     clientId,
     type: InvoiceType.INVOICE,
@@ -372,7 +380,7 @@ describe('Sync push contract (E2E)', () => {
   });
 
   describe('deletion, recreation and stale edits across users', () => {
-    it('another user cannot take over a soft-deleted client by recreating its id; the owner can still edit it', async () => {
+    it('another user cannot take over a soft-deleted client by recreating its id; the owner restores it only explicitly', async () => {
       const clientId = uuidv4();
       await push(tokenA, [change(ChangeObjectType.CLIENT, clientId, ChangeType.CREATE, { name: 'Mine' }, uuidv4())]);
       await push(tokenA, [change(ChangeObjectType.CLIENT, clientId, ChangeType.DELETE, {}, uuidv4())]);
@@ -385,16 +393,29 @@ describe('Sync push contract (E2E)', () => {
       expect(row).toMatchObject({ userId: userA.id, name: 'Mine' });
       expect(row.deletedAt).not.toBeNull();
 
-      // Positive control: the owner can restore it.
-      const restore = await push(tokenA, [
-        change(ChangeObjectType.CLIENT, clientId, ChangeType.UPDATE, { deletedAt: null }, uuidv4()),
+      // Sync no longer un-deletes: deletedAt is not writable, and an edit of a deleted record is refused.
+      const legacy = await push(tokenA, [
+        change(ChangeObjectType.CLIENT, clientId, ChangeType.UPDATE, { deletedAt: null, name: 'Edited' }, uuidv4()),
       ]);
-      expect(restore.body.results[0].status).toBe('applied');
-      expect((await clientRepository.findOneByOrFail({ id: clientId })).deletedAt).toBeNull();
+      expect(legacy.body.results[0]).toMatchObject({ status: 'failed', reason: 'record_deleted' });
+      expect((await clientRepository.findOneByOrFail({ id: clientId })).deletedAt).not.toBeNull();
+
+      // Positive control: the owner's protocol-2 edit becomes a conflict, and restoring it is explicit.
+      const deletedRevision = (await clientRepository.findOneByOrFail({ id: clientId })).revision;
+      const edit = await push2(tokenA, [
+        { ...change(ChangeObjectType.CLIENT, clientId, ChangeType.UPDATE, { name: 'Edited' }, uuidv4()), base_revision: 1 },
+      ]);
+      expect(edit.body.results[0]).toMatchObject({ status: 'conflict' });
+      await request(app.getHttpServer())
+        .post(`/api/v1/sync/conflicts/${edit.body.results[0].conflict_id}/resolve`)
+        .set('Authorization', `Bearer ${tokenA}`)
+        .send({ action: 'restore', expected_revision: deletedRevision })
+        .expect(200);
+      expect(await clientRepository.findOneByOrFail({ id: clientId })).toMatchObject({ deletedAt: null, name: 'Edited' });
     });
 
-    it('a stale edit to a hard-deleted item id cannot modify the record another user later created with that id', async () => {
-      // A creates and deletes an item; the id is free again.
+    it('a deleted item id stays reserved: another user cannot take it, and a stale edit changes nothing', async () => {
+      // A creates and deletes an item; its tombstone keeps the id reserved for A.
       const clientA = uuidv4();
       const invoiceA = uuidv4();
       const itemId = uuidv4();
@@ -413,18 +434,23 @@ describe('Sync push contract (E2E)', () => {
         change(ChangeObjectType.INVOICE, invoiceB, ChangeType.CREATE, invoiceData(clientB, 'B-1'), uuidv4()),
         change(ChangeObjectType.INVOICE_ITEM, itemId, ChangeType.CREATE, { invoiceId: invoiceB, description: 'B line' }, uuidv4()),
       ]);
-      expect(created.body.failed).toBe(0);
+      expect(created.body.results.map((r: any) => r.status)).toEqual(['applied', 'applied', 'failed']);
+      expect(await invoiceItemRepository.existsBy({ id: itemId })).toBe(false);
 
-      // A's offline device later sends an edit and a delete for its old item.
+      // A's offline device later sends an edit and a delete for its old item: no record comes back.
       const stale = await push(tokenA, [
         change(ChangeObjectType.INVOICE_ITEM, itemId, ChangeType.UPDATE, { description: 'stale', invoiceId: invoiceA }, uuidv4()),
         change(ChangeObjectType.INVOICE_ITEM, itemId, ChangeType.DELETE, {}, uuidv4()),
       ]);
-      expect(stale.body.results.map((r: any) => r.status)).toEqual(['failed', 'failed']);
-      expect(await invoiceItemRepository.findOneByOrFail({ id: itemId })).toMatchObject({
-        invoiceId: invoiceB,
-        description: 'B line',
-      });
+      expect(stale.body.results.map((r: any) => r.status)).toEqual(['failed', 'applied']);
+      expect(stale.body.results[0].reason).toBe('record_deleted');
+      expect(await invoiceItemRepository.existsBy({ id: itemId })).toBe(false);
+
+      // Positive control: B's own new item with a fresh id is created.
+      const fresh = await push(tokenB, [
+        change(ChangeObjectType.INVOICE_ITEM, uuidv4(), ChangeType.CREATE, { invoiceId: invoiceB, description: 'B line' }, uuidv4()),
+      ]);
+      expect(fresh.body.results[0].status).toBe('applied');
     });
   });
 
@@ -483,7 +509,7 @@ describe('Sync push contract (E2E)', () => {
     // Without an idempotency key the server cannot tell a replay from a new
     // change. These pin the documented behaviour; they are why the mobile
     // client should send change_id.
-    it('a replayed create re-creates a deleted invoice item', async () => {
+    it('a replayed create no longer re-creates a deleted invoice item (tombstone)', async () => {
       const clientId = uuidv4();
       const invoiceId = uuidv4();
       const itemId = uuidv4();
@@ -499,8 +525,8 @@ describe('Sync push contract (E2E)', () => {
       await push(tokenA, [change(ChangeObjectType.INVOICE_ITEM, itemId, ChangeType.DELETE, {})]);
 
       const replay = await push(tokenA, [createItem]);
-      expect(replay.body.results[0]).toMatchObject({ change_id: null, status: 'applied' });
-      expect(await invoiceItemRepository.existsBy({ id: itemId })).toBe(true);
+      expect(replay.body.results[0]).toMatchObject({ change_id: null, status: 'failed', reason: 'record_deleted' });
+      expect(await invoiceItemRepository.existsBy({ id: itemId })).toBe(false);
     });
 
     it('a replayed old update overwrites a newer one', async () => {

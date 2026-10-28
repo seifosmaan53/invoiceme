@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
+import { Repository, DataSource, IsNull } from 'typeorm';
 import { Invoice, InvoiceType, InvoiceStatus } from '../entities/invoice.entity';
 import { InvoiceItem } from '../entities/invoice-item.entity';
 import { Client } from '../entities/client.entity';
@@ -189,7 +189,7 @@ export class InvoicesService {
     // Scoped to the owner: another user's invoice is answered exactly like a
     // missing one, so the response does not reveal that the id exists.
     const invoice = await this.invoiceRepository.findOne({
-      where: { id, userId, deletedAt: null },
+      where: { id, userId, deletedAt: IsNull() },
       relations: ['client', 'items'],
     });
 
@@ -202,7 +202,7 @@ export class InvoicesService {
 
     // Reload invoice to get updated status
     return this.invoiceRepository.findOne({
-      where: { id, userId, deletedAt: null },
+      where: { id, userId, deletedAt: IsNull() },
       relations: ['client', 'items'],
     }) as Promise<Invoice>;
   }
@@ -210,7 +210,7 @@ export class InvoicesService {
   async create(createInvoiceDto: CreateInvoiceDto, userId: string): Promise<Invoice> {
     // Verify client belongs to user
     const client = await this.clientRepository.findOne({
-      where: { id: createInvoiceDto.clientId, userId, deletedAt: null },
+      where: { id: createInvoiceDto.clientId, userId, deletedAt: IsNull() },
     });
 
     if (!client) {
@@ -285,7 +285,7 @@ export class InvoicesService {
 
     if (updateInvoiceDto.clientId) {
       const client = await this.clientRepository.findOne({
-        where: { id: updateInvoiceDto.clientId, userId, deletedAt: null },
+        where: { id: updateInvoiceDto.clientId, userId, deletedAt: IsNull() },
       });
       if (!client) {
         throw new NotFoundException('Client not found');
@@ -624,7 +624,7 @@ export class InvoicesService {
    */
   async findAllForExport(userId: string): Promise<Invoice[]> {
     const invoices = await this.invoiceRepository.find({
-      where: { userId, deletedAt: null },
+      where: { userId, deletedAt: IsNull() },
       relations: ['client'],
       order: { issueDate: 'DESC' },
     });

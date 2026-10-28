@@ -1,7 +1,9 @@
 # Proposal: conflict handling for offline sync
 
-Status: **proposal, not implemented.** Nothing here changes behaviour until
-the owner has made the decisions in [Decisions](#decisions-for-the-owner).
+Status: **decided and implemented (2026-10-28).** The owner approved the
+rules summarised below; the implementation and its exact behaviour are in
+[../SYNC-CONTRACT.md](../SYNC-CONTRACT.md) ("Protocol 2"). The rest of this
+document is the original analysis, kept for context.
 Current behaviour is in [../SYNC-CONTRACT.md](../SYNC-CONTRACT.md).
 
 ## Minimum decisions (summary, 2026-10-28)

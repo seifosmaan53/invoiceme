@@ -1,3 +1,4 @@
+import { IsNull } from 'typeorm';
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { NotFoundException } from '@nestjs/common';
@@ -209,7 +210,7 @@ describe('ClientsService', () => {
       const result = await service.findOne(id, userId);
 
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({
-        where: { id, userId, deletedAt: null },
+        where: { id, userId, deletedAt: IsNull() },
       });
       expect(result).toEqual(client);
     });
@@ -263,7 +264,7 @@ describe('ClientsService', () => {
       }
 
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({
-        where: { id, userId, deletedAt: null },
+        where: { id, userId, deletedAt: IsNull() },
       });
     });
   });
@@ -384,7 +385,7 @@ describe('ClientsService', () => {
       const result = await service.update(id, updateClientDto, userId);
 
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({
-        where: { id, userId, deletedAt: null },
+        where: { id, userId, deletedAt: IsNull() },
       });
       expect(mockClientRepository.save).toHaveBeenCalledWith(updatedClient);
       expect(result).toEqual(updatedClient);
@@ -511,7 +512,7 @@ describe('ClientsService', () => {
       await service.archive(id, userId);
 
       expect(mockClientRepository.findOne).toHaveBeenCalledWith({
-        where: { id, userId, deletedAt: null },
+        where: { id, userId, deletedAt: IsNull() },
       });
       expect(mockClientRepository.save).toHaveBeenCalledWith(
         expect.objectContaining({

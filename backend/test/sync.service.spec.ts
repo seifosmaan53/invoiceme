@@ -6,6 +6,14 @@ import { Client } from '../src/entities/client.entity';
 import { Invoice } from '../src/entities/invoice.entity';
 import { InvoiceItem } from '../src/entities/invoice-item.entity';
 import { Attachment } from '../src/entities/attachment.entity';
+import { SyncConflict } from '../src/entities/sync-conflict.entity';
+import { SyncTombstone } from '../src/entities/sync-tombstone.entity';
+import { SyncRecordRevision } from '../src/entities/sync-record-revision.entity';
+import { SYNC_CONFIG } from '../src/sync/sync-config';
+import { SyncSchemaService } from '../src/sync/sync-schema.service';
+
+// Record ids are UUIDs (non-UUID object_ids are rejected before any lookup)
+const CLIENT_ID = '0b0e9a3c-2f0e-4c1a-9a51-6f2b8c7d1e01';
 
 describe('SyncService', () => {
   let service: SyncService;
@@ -15,9 +23,15 @@ describe('SyncService', () => {
   let mockInvoiceItemRepository: any;
   let mockAttachmentRepository: any;
   let mockTransactionManager: any;
+  let mockConflictRepository: any;
+  let mockTombstoneRepository: any;
+  let mockRevisionRepository: any;
 
   // SyncService only applies fields that are real entity columns
-  const metadata = (...columns: string[]) => ({ columns: columns.map((propertyName) => ({ propertyName })) });
+  const metadata = (...columns: string[]) => ({
+    tableName: 'records',
+    columns: columns.map((propertyName) => ({ propertyName, databaseName: propertyName })),
+  });
 
   beforeEach(async () => {
     // Each pushed change runs in a transaction whose manager hands out the
@@ -54,13 +68,23 @@ describe('SyncService', () => {
       create: jest.fn(),
     };
 
+    // Items changed on their own since `since` (none in these tests)
+    const noChangedItems: any = {};
+    for (const step of ['innerJoin', 'where', 'andWhere', 'orderBy']) noChangedItems[step] = jest.fn(() => noChangedItems);
+    noChangedItems.getMany = jest.fn().mockResolvedValue([]);
+
     mockInvoiceItemRepository = {
+      createQueryBuilder: jest.fn(() => noChangedItems),
       find: jest.fn(),
       findOne: jest.fn(),
       save: jest.fn(),
       create: jest.fn(),
       delete: jest.fn(),
     };
+
+    mockConflictRepository = { exists: jest.fn().mockResolvedValue(false), count: jest.fn().mockResolvedValue(0) };
+    mockTombstoneRepository = { findOne: jest.fn().mockResolvedValue(null), find: jest.fn().mockResolvedValue([]) };
+    mockRevisionRepository = {};
 
     mockAttachmentRepository = {
       find: jest.fn(),
@@ -93,6 +117,11 @@ describe('SyncService', () => {
           provide: getRepositoryToken(Attachment),
           useValue: mockAttachmentRepository,
         },
+        { provide: getRepositoryToken(SyncConflict), useValue: mockConflictRepository },
+        { provide: getRepositoryToken(SyncTombstone), useValue: mockTombstoneRepository },
+        { provide: getRepositoryToken(SyncRecordRevision), useValue: mockRevisionRepository },
+        { provide: SYNC_CONFIG, useValue: { legacyWriteCutoff: null, retentionDays: 400, conflictRetentionDays: 180 } },
+        { provide: SyncSchemaService, useValue: { assertReady: jest.fn() } },
       ],
     }).compile();
 
@@ -104,6 +133,9 @@ describe('SyncService', () => {
       [Invoice, mockInvoiceRepository],
       [InvoiceItem, mockInvoiceItemRepository],
       [Attachment, mockAttachmentRepository],
+      [SyncConflict, mockConflictRepository],
+      [SyncTombstone, mockTombstoneRepository],
+      [SyncRecordRevision, mockRevisionRepository],
     ]);
     mockTransactionManager.getRepository.mockImplementation((entity: any) => repositories.get(entity));
   });
@@ -113,7 +145,7 @@ describe('SyncService', () => {
       const changes = [
         {
           object_type: ChangeObjectType.CLIENT,
-          object_id: 'client-id',
+          object_id: CLIENT_ID,
           change_type: ChangeType.CREATE,
           data: { name: 'Test Client', email: 'test@example.com' },
           device_id: 'device-id',
@@ -126,7 +158,7 @@ describe('SyncService', () => {
         userId: 'user-id',
         deviceId: 'device-id',
         objectType: ChangeObjectType.CLIENT,
-        objectId: 'client-id',
+        objectId: CLIENT_ID,
         changeJson: changes[0].data,
         changeType: ChangeType.CREATE,
         synced: false,
@@ -138,7 +170,7 @@ describe('SyncService', () => {
       });
 
       mockClientRepository.findOne.mockResolvedValue(null);
-      mockClientRepository.insert.mockResolvedValue({ identifiers: [{ id: 'client-id' }] });
+      mockClientRepository.insert.mockResolvedValue({ identifiers: [{ id: CLIENT_ID }] });
 
       const result = await service.pushChanges('user-id', {
         deviceId: 'device-id',
@@ -149,12 +181,16 @@ describe('SyncService', () => {
       expect(result.failed).toBe(0);
       expect(mockDeviceChangeRepository.create).toHaveBeenCalled();
       expect(mockDeviceChangeRepository.save).toHaveBeenCalledTimes(1);
-      expect(mockTransactionManager.update).toHaveBeenCalledWith(DeviceChange, 'change-id', { synced: true });
-      expect(mockClientRepository.findOne).toHaveBeenCalledWith({ where: { id: 'client-id', userId: 'user-id' } });
+      expect(mockTransactionManager.update).toHaveBeenCalledWith(DeviceChange, 'change-id', {
+        synced: true,
+        outcome: 'applied',
+        conflictId: null,
+      });
+      expect(mockClientRepository.findOne).toHaveBeenCalledWith({ where: { id: CLIENT_ID, userId: 'user-id' } });
       expect(mockClientRepository.insert).toHaveBeenCalledWith({
         name: 'Test Client',
         email: 'test@example.com',
-        id: 'client-id',
+        id: CLIENT_ID,
         userId: 'user-id',
       });
     });
@@ -163,7 +199,7 @@ describe('SyncService', () => {
       const changes = [
         {
           object_type: ChangeObjectType.CLIENT,
-          object_id: 'client-id',
+          object_id: CLIENT_ID,
           change_type: ChangeType.CREATE,
           data: { name: 'Test Client', userId: 'other-user-id', id: 'other-id' },
           device_id: 'device-id',
@@ -174,7 +210,7 @@ describe('SyncService', () => {
       mockDeviceChangeRepository.create.mockReturnValue({
         userId: 'user-id',
         objectType: ChangeObjectType.CLIENT,
-        objectId: 'client-id',
+        objectId: CLIENT_ID,
         changeJson: changes[0].data,
         changeType: ChangeType.CREATE,
       });
@@ -183,14 +219,14 @@ describe('SyncService', () => {
       const result = await service.pushChanges('user-id', { deviceId: 'device-id', changes });
 
       expect(result).toMatchObject({ synced: 1, failed: 0 });
-      expect(mockClientRepository.insert).toHaveBeenCalledWith({ name: 'Test Client', id: 'client-id', userId: 'user-id' });
+      expect(mockClientRepository.insert).toHaveBeenCalledWith({ name: 'Test Client', id: CLIENT_ID, userId: 'user-id' });
     });
 
     it('should count a DELETE of another user\'s client as failed', async () => {
       const changes = [
         {
           object_type: ChangeObjectType.CLIENT,
-          object_id: 'client-id',
+          object_id: CLIENT_ID,
           change_type: ChangeType.DELETE,
           data: {},
           device_id: 'device-id',
@@ -201,7 +237,7 @@ describe('SyncService', () => {
       mockDeviceChangeRepository.create.mockReturnValue({
         userId: 'user-id',
         objectType: ChangeObjectType.CLIENT,
-        objectId: 'client-id',
+        objectId: CLIENT_ID,
         changeJson: {},
         changeType: ChangeType.DELETE,
       });
@@ -219,7 +255,7 @@ describe('SyncService', () => {
       const changes = [
         {
           object_type: ChangeObjectType.CLIENT,
-          object_id: 'client-id',
+          object_id: CLIENT_ID,
           change_type: ChangeType.CREATE,
           data: { name: 'Test Client' },
           device_id: 'device-id',
@@ -232,7 +268,7 @@ describe('SyncService', () => {
         userId: 'user-id',
         deviceId: 'device-id',
         objectType: ChangeObjectType.CLIENT,
-        objectId: 'client-id',
+        objectId: CLIENT_ID,
         changeJson: changes[0].data,
         changeType: ChangeType.CREATE,
         synced: false,
@@ -258,7 +294,7 @@ describe('SyncService', () => {
       const changes = [
         {
           object_type: ChangeObjectType.CLIENT,
-          object_id: 'client-id',
+          object_id: CLIENT_ID,
           change_type: ChangeType.UPDATE,
           data: { name: 'Updated Client' },
           device_id: 'device-id',
@@ -271,7 +307,7 @@ describe('SyncService', () => {
         userId: 'user-id',
         deviceId: 'device-id',
         objectType: ChangeObjectType.CLIENT,
-        objectId: 'client-id',
+        objectId: CLIENT_ID,
         changeJson: changes[0].data,
         changeType: ChangeType.UPDATE,
         synced: false,
@@ -283,7 +319,7 @@ describe('SyncService', () => {
       });
 
       const existingClient = {
-        id: 'client-id',
+        id: CLIENT_ID,
         userId: 'user-id',
         name: 'Old Client',
       };
@@ -306,7 +342,7 @@ describe('SyncService', () => {
       const changes = [
         {
           object_type: ChangeObjectType.CLIENT,
-          object_id: 'client-id',
+          object_id: CLIENT_ID,
           change_type: ChangeType.DELETE,
           data: {},
           device_id: 'device-id',
@@ -319,7 +355,7 @@ describe('SyncService', () => {
         userId: 'user-id',
         deviceId: 'device-id',
         objectType: ChangeObjectType.CLIENT,
-        objectId: 'client-id',
+        objectId: CLIENT_ID,
         changeJson: {},
         changeType: ChangeType.DELETE,
         synced: false,
@@ -331,7 +367,7 @@ describe('SyncService', () => {
       });
 
       const existingClient = {
-        id: 'client-id',
+        id: CLIENT_ID,
         userId: 'user-id',
         deletedAt: null,
       };

@@ -714,6 +714,22 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/reopen`).set('Authorization', `Bearer ${tokenA}`).expect(200);
     });
 
+    it('after a won dispute there is nothing to reopen; a dispute opened after a reopen pauses online payment', async () => {
+      const { pi, charge } = await paidInvoice();
+      stripeDisputes.set('dp_won', { id: 'dp_won', payment_intent: pi, charge, amount: 11000, currency: 'usd', status: 'won' });
+      await postWebhook(event('charge.dispute.closed', { id: 'dp_won' })).expect(200);
+      await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/reopen`).set('Authorization', `Bearer ${tokenA}`).expect(409);
+
+      // Partial refund, legitimate reopen, then a new dispute opens on the payment
+      await refund(charge, 1000).expect(200);
+      await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/reopen`).set('Authorization', `Bearer ${tokenA}`).expect(200);
+      stripeDisputes.set('dp_won', { ...stripeDisputes.get('dp_won'), status: 'needs_response', amount: 10000 });
+      await postWebhook(event('charge.dispute.updated', { id: 'dp_won' })).expect(200);
+      createPaymentIntent.mockClear();
+      await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/pay`).set('Authorization', `Bearer ${tokenA}`).expect(409);
+      expect(createPaymentIntent).not.toHaveBeenCalled();
+    });
+
     it('a dispute or refund for an intent this server did not create is recorded as unknown', async () => {
       stripeCharges.set('ch_x', { id: 'ch_x', payment_intent: 'pi_elsewhere', amount_refunded: 100, currency: 'usd' });
       await postWebhook(event('charge.refunded', { id: 'ch_x' })).expect(200);
@@ -806,6 +822,17 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       // Positive control: back to sent, the same call starts a checkout
       await invoiceRepository.update({ id: invoiceA.id }, { status: InvoiceStatus.SENT });
       await expect(moduleFixture.get(PaymentsService).startCheckout(stale)).resolves.toMatchObject({ reused: false });
+    });
+
+    it('re-checks currency, type and total under the lock', async () => {
+      const stale = await invoiceRepository.findOneByOrFail({ id: invoiceA.id }); // loaded as USD
+      await invoiceRepository.update({ id: invoiceA.id }, { currency: 'JPY' });
+      await expect(moduleFixture.get(PaymentsService).startCheckout(stale)).rejects.toThrow('Online payment is not available for JPY');
+      await invoiceRepository.update({ id: invoiceA.id }, { currency: 'USD', type: InvoiceType.ESTIMATE });
+      await expect(moduleFixture.get(PaymentsService).startCheckout(stale)).rejects.toThrow('Cannot create payment for estimate');
+      await invoiceRepository.update({ id: invoiceA.id }, { type: InvoiceType.INVOICE, total: 0 });
+      await expect(moduleFixture.get(PaymentsService).startCheckout(stale)).rejects.toThrow('greater than zero');
+      expect(createPaymentIntent).not.toHaveBeenCalled();
     });
 
     it('a paid invoice is not charged again; a Stripe check failure stops rather than risks a duplicate', async () => {

@@ -72,7 +72,8 @@ and dispute events to the webhook endpoint for these states to appear.
 
 Requests for one invoice run one at a time (a database lock), so concurrent
 requests see each other's attempt; the invoice is read again under that lock,
-so one paid or cancelled in the meantime is not charged.
+so one paid, cancelled or changed in the meantime (currency, type, total) is
+not charged on stale data. Reopening runs under the same lock.
 
 | previous attempt (as Stripe reports it now) | result |
 |---|---|
@@ -80,6 +81,7 @@ so one paid or cancelled in the meantime is not charged.
 | open (`requires_payment_method`, `_confirmation`, `_action`), same amount and currency | returned again (`reused: true`); its client_secret is read back from Stripe, not stored |
 | open, different amount or currency (invoice changed) | cancelled at Stripe, marked failed (`superseded`), new attempt created |
 | `canceled` | marked failed, new attempt created |
+| a dispute on the invoice is open | 409, no new charge until it is decided |
 | `processing` | 409, no new charge |
 | `succeeded`, webhook not yet received | 409, no new charge |
 | Stripe cannot be reached to check it | 503, no new charge |

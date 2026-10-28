@@ -16,7 +16,6 @@ import {
   Req,
   HttpCode,
   HttpStatus,
-  ConflictException,
 } from '@nestjs/common';
 import { 
   ApiTags, 
@@ -844,22 +843,21 @@ export class InvoicesController {
   @ApiResponse({ status: 400, description: 'The invoice is not paid' })
   @ApiResponse({ status: 409, description: 'The payments received still cover the invoice' })
   async reopen(@Param('id') id: string, @CurrentUser() user: any, @Req() req: any) {
+    // Ownership first (another user's invoice answers 404), then the decision
+    // under the per-invoice payment lock (PaymentsService.reopenInvoice).
     const invoice = await this.invoicesService.findOne(id, user.userId);
-    const summary = await this.paymentsService.summaryFor(invoice);
-    if (summary.state === 'disputed') {
-      throw new ConflictException('A dispute on this invoice is still open; reopen it once the dispute is decided');
-    }
-    const netCents = Math.round(Number(summary.net) * 100);
-    const reopened = await this.invoicesService.reopen(id, user.userId, netCents);
+    await this.paymentsService.reopenInvoice(invoice.id, user.userId);
+    const reopened = await this.invoicesService.findOne(id, user.userId);
+    const paymentSummary = await this.paymentsService.summaryFor(reopened);
     await this.auditService.log(
       user.userId,
       AuditAction.UPDATE,
       AuditResource.INVOICE,
       id,
-      { invoiceNumber: invoice.number, action: 'reopen', paymentState: summary.state },
+      { invoiceNumber: invoice.number, action: 'reopen', paymentState: paymentSummary.state },
       req.ip,
     );
-    return { ...reopened, paymentSummary: await this.paymentsService.summaryFor(reopened) };
+    return { ...reopened, paymentSummary };
   }
 
   @Get('export/csv')

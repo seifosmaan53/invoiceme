@@ -297,6 +297,29 @@ unless `PUBLIC_ORIGIN` or `TRUSTED_HOSTS` is set. API clients that already
 use HTTPS, requests through a TLS proxy marked `https`, and the local health
 check are unaffected. Nothing new is required for the backend to start.
 
+## Reviews of 2026-10-25 and known gaps
+
+Each report records what was proven with a failing test, what was fixed, how it was verified, and what was not checked. They describe specific checks, not a guarantee that the application is secure.
+
+| Report | Covers |
+|---|---|
+| [sync-ownership](security/2026-10-25-sync-ownership.md), [review](security/2026-10-25-sync-ownership-REVIEW.md) | Per-user ownership in sync and REST |
+| [historical-cross-owner](security/2026-10-25-historical-cross-owner.md) | Finding legacy cross-owner rows (read-only report) |
+| [container-pdf](security/2026-10-25-container-pdf.md) | Container image and PDF rendering build |
+| [payments-attachments](security/2026-10-25-payments-attachments.md) | `/pay` authorization, Stripe webhook, attachment URL format check |
+| [pdf-keys-login](security/2026-10-25-pdf-keys-login.md) | PDF rendering network access, API-key scopes, login 500 |
+
+Known gaps, not fixed:
+
+- The attachment URL check validates format only; the server does not fetch attachment URLs, and the mobile app does not yet re-check cached URLs before opening them (needs a mobile release).
+- The permission guard admits API keys on routes without a `@RequirePermission` decorator. Unit tests fail if the invoices or clients controller gains such a route; other controllers rely on review.
+- Offline-sync conflicts: the server applies changes to the latest state and does not detect concurrent edits of the same field. A protocol is proposed in [proposals/sync-conflicts.md](proposals/sync-conflicts.md) and waits on the owner's decisions; it is not implemented.
+- Payments: refunds and disputes are not handled; zero-decimal currencies (such as JPY) are multiplied by 100; the full PaymentIntent, including `client_secret`, is copied into payment metadata; each `/pay` call creates a new PaymentIntent.
+- `PdfCacheService.getBrowser()` returns a browser whose pages are not locked down (no caller in the application today).
+- Per-IP rate limiting is in memory, so it is approximate across replicas.
+
+---
+
 ## Security Checklist
 
 Before deploying to production:

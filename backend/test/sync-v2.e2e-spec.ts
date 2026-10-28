@@ -196,13 +196,61 @@ describe('Sync protocol 2 (E2E)', () => {
     it('a stale edit of an item of a paid invoice is a protected conflict', async () => {
       const { invoiceId } = await seed(InvoiceStatus.PAID);
       const itemId = uuidv4();
-      await push2(tokenA, [change('invoice_item', itemId, 'create', { invoiceId, description: 'Line', quantity: 1, unitPrice: 100, lineTotal: 100 })]);
+      // Created by a device that saw the paid invoice (parent_revision current)
+      const created = await push2(tokenA, [
+        { ...change('invoice_item', itemId, 'create', { invoiceId, description: 'Line', quantity: 1, unitPrice: 100, lineTotal: 100 }), parent_revision: await revisionOf(invoices, invoiceId) },
+      ]);
+      expect(created.body.results[0].status).toBe('applied');
       await items.update({ id: itemId }, { description: 'Line (server)' });
 
       const res = await push2(tokenA, [change('invoice_item', itemId, 'update', { quantity: 2 }, 1)]);
       expect(res.body.results[0].status).toBe('conflict');
       expect((await conflicts.findOneByOrFail({ id: res.body.results[0].conflict_id })).kind).toBe('protected_invoice');
       expect(Number((await items.findOneByOrFail({ id: itemId })).quantity)).toBe(1);
+    });
+
+    it('an item change made while the invoice was a draft conflicts once the invoice is paid; one that saw it paid applies', async () => {
+      const { invoiceId } = await seed();
+      const itemId = uuidv4();
+      const otherItem = uuidv4();
+      await push2(tokenA, [
+        { ...change('invoice_item', itemId, 'create', { invoiceId, description: 'Line', quantity: 1, unitPrice: 100, lineTotal: 100 }), parent_revision: 1 },
+        { ...change('invoice_item', otherItem, 'create', { invoiceId, description: 'Other', quantity: 1, unitPrice: 5, lineTotal: 5 }), parent_revision: 1 },
+      ]);
+      // Paid elsewhere: the invoice moves to revision 2; the items do not change.
+      await invoices.update({ id: invoiceId }, { status: InvoiceStatus.PAID });
+      const paidRevision = await revisionOf(invoices, invoiceId);
+
+      // Offline changes made while it was a draft (item base is still current)
+      const stale = await push2(tokenA, [
+        { ...change('invoice_item', itemId, 'update', { quantity: 5 }, 1), parent_revision: 1 },
+        change('invoice_item', otherItem, 'delete', {}, 1),
+        { ...change('invoice_item', uuidv4(), 'create', { invoiceId, description: 'Added offline' }), parent_revision: 1 },
+      ]);
+      expect(stale.body.results.map((r: any) => r.status)).toEqual(['conflict', 'conflict', 'conflict']);
+      expect(Number((await items.findOneByOrFail({ id: itemId })).quantity)).toBe(1);
+      expect(await items.existsBy({ id: otherItem })).toBe(true);
+      expect(await items.count({ where: { invoiceId } })).toBe(2);
+      const kinds = await conflicts.find();
+      expect(kinds.every((c) => c.kind === 'protected_invoice')).toBe(true);
+
+      // Positive control: a device that saw the paid invoice can still edit (no new restriction)
+      const current = await push2(tokenA, [{ ...change('invoice_item', itemId, 'update', { quantity: 5 }, 1), parent_revision: paidRevision }]);
+      expect(current.body.results[0].status).toBe('applied');
+      expect(Number((await items.findOneByOrFail({ id: itemId })).quantity)).toBe(5);
+    });
+
+    it('moving an item into or out of a paid invoice is a conflict', async () => {
+      const draft = await seed();
+      const paid = await seed(InvoiceStatus.PAID);
+      const itemId = uuidv4();
+      await push2(tokenA, [{ ...change('invoice_item', itemId, 'create', { invoiceId: draft.invoiceId, description: 'Line' }), parent_revision: 1 }]);
+      const paidRevision = await revisionOf(invoices, paid.invoiceId);
+      const move = await push2(tokenA, [
+        { ...change('invoice_item', itemId, 'update', { invoiceId: paid.invoiceId }, 1), parent_revision: paidRevision },
+      ]);
+      expect(move.body.results[0].status).toBe('conflict');
+      expect((await items.findOneByOrFail({ id: itemId })).invoiceId).toBe(draft.invoiceId);
     });
 
     it('a stale delete of a paid invoice is refused (conflict), the invoice stays', async () => {
@@ -467,6 +515,42 @@ describe('Sync protocol 2 (E2E)', () => {
       ]);
       expect((await invoices.findOneByOrFail({ id: sent.invoiceId })).notes).toBe('first');
       expect((await clients.findOneByOrFail({ id: deletedClient })).deletedAt).not.toBeNull();
+    });
+
+    it('refuses item creates in, and item moves into, a sent or paid invoice', async () => {
+      const paid = await seed(InvoiceStatus.PAID);
+      const draft = await seed();
+      const moved = uuidv4();
+      await push2(tokenA, [change('invoice_item', moved, 'create', { invoiceId: draft.invoiceId, description: 'Draft line', quantity: 1, unitPrice: 1, lineTotal: 1 })]);
+
+      const res = await push1(tokenA, [
+        {
+          object_type: 'invoice_item',
+          object_id: uuidv4(),
+          change_type: 'create',
+          data: { invoiceId: paid.invoiceId, description: 'Added offline', quantity: 1, unitPrice: 50, lineTotal: 50 },
+          device_id: 'd',
+        },
+        { object_type: 'invoice_item', object_id: moved, change_type: 'update', data: { invoiceId: paid.invoiceId }, device_id: 'd' },
+      ]);
+      expect(res.body.results.map((r: any) => [r.status, r.reason ?? null])).toEqual([
+        ['failed', 'client_upgrade_required'],
+        ['failed', 'client_upgrade_required'],
+      ]);
+      expect(await items.countBy({ invoiceId: paid.invoiceId })).toBe(0);
+
+      // Protocol 2: a stale move into a paid invoice is a protected conflict, never a merge.
+      await items.update({ id: moved }, { description: 'Changed on the server' });
+      const stale = await push2(tokenA, [change('invoice_item', moved, 'update', { invoiceId: paid.invoiceId }, 1)]);
+      expect(stale.body.results[0].status).toBe('conflict');
+      expect((await conflicts.findOneByOrFail({ id: stale.body.results[0].conflict_id })).kind).toBe('protected_invoice');
+      expect((await items.findOneByOrFail({ id: moved })).invoiceId).toBe(draft.invoiceId);
+
+      // Positive control: a protocol-1 item create in a draft invoice still applies.
+      const ok = await push1(tokenA, [
+        { object_type: 'invoice_item', object_id: uuidv4(), change_type: 'create', data: { invoiceId: draft.invoiceId, description: 'Fine', quantity: 1, unitPrice: 1, lineTotal: 1 }, device_id: 'd' },
+      ]);
+      expect(ok.body.results[0].status).toBe('applied');
     });
 
     it('after the configured cutoff: every write refused with an upgrade notice; reads still work', async () => {

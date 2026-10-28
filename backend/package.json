@@ -35,7 +35,9 @@
     "backup:verify-restore": "ts-node --transpile-only src/ops/verify-restore.ts",
     "backup:verify-restore:prod": "node dist/ops/verify-restore.js",
     "backup:verify-files": "ts-node --transpile-only src/ops/verify-files.ts",
-    "backup:verify-files:prod": "node dist/ops/verify-files.js"
+    "backup:verify-files:prod": "node dist/ops/verify-files.js",
+    "payments:scrub-secrets": "ts-node --transpile-only src/ops/scrub-payment-secrets.ts",
+    "payments:scrub-secrets:prod": "node dist/ops/scrub-payment-secrets.js"
   },
   "dependencies": {
     "@nestjs/cache-manager": "^3.0.1",

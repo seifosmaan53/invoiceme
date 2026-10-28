@@ -92,6 +92,29 @@ jobs:
           # migration classes, so migration:run can't create it).
           DB_SYNCHRONIZE: 'true'
 
+      # Calendar dates (issue/due) shifted a day only on servers west of UTC;
+      # runners use UTC, so this suite runs again in New York time. The unit
+      # suite also runs there so a timezone-dependent test fails here first.
+      - name: Dates and unit tests west of UTC
+        run: |
+          TZ=America/New_York npx jest --config ./test/jest-e2e.json --runInBand test/invoice-dates.e2e-spec.ts
+          TZ=America/New_York npm test
+        env:
+          NODE_ENV: test
+          JWT_SECRET: ci-test-jwt-secret-minimum-32-characters
+          JWT_REFRESH_SECRET: ci-test-refresh-secret-minimum-32-chars
+          DB_TEST_HOST: localhost
+          DB_TEST_PORT: 5432
+          DB_TEST_USERNAME: postgres
+          DB_TEST_PASSWORD: postgres
+          DB_TEST_DATABASE: invoiceme_test
+          DB_HOST: localhost
+          DB_PORT: 5432
+          DB_USERNAME: postgres
+          DB_PASSWORD: postgres
+          DB_DATABASE: invoiceme_test
+          DB_SYNCHRONIZE: 'true'
+
       - name: Build
         run: npm run build
 

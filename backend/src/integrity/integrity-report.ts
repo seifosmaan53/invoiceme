@@ -18,7 +18,7 @@
  * whose query fails is also NOT CHECKED (each check runs under a savepoint).
  * A database is only reported clean when every finding check actually ran.
  * The output also includes a schema fingerprint (markers for SQL migrations
- * 001-018, origin guessed from index names). These are diagnostic clues, not a
+ * 001-019, origin guessed from index names). These are diagnostic clues, not a
  * migration history: never decide which migrations to apply from them alone
  * (see scripts/schema-review.sh and docs/operations/customer-update.md).
  *
@@ -56,7 +56,7 @@ export interface CheckResult {
 }
 
 export interface SchemaFingerprint {
-  /** Migration id (001-018) -> whether its marker is present. */
+  /** Migration id (001-019) -> whether its marker is present. */
   migrations: Record<string, boolean>;
   /**
    * How the schema appears to have been created, from index naming: the SQL
@@ -82,7 +82,7 @@ export interface LiveSchema {
   indexes: Set<string>;
 }
 
-/** Markers for the repository's SQL migrations (backend/migrations/001-018). */
+/** Markers for the repository's SQL migrations (backend/migrations/001-019). */
 export const SCHEMA_MARKERS: { migration: string; table: string; column?: string; index?: string }[] = [
   { migration: '001', table: 'users' },
   { migration: '002', table: 'clients' },
@@ -102,6 +102,8 @@ export const SCHEMA_MARKERS: { migration: string; table: string; column?: string
   { migration: '016', table: 'recurring_invoices' },
   { migration: '017', table: 'user_settings', column: 'pdf_layout' },
   { migration: '018', table: 'device_changes', column: 'change_id' },
+  // Marks the tables only; the server itself checks the triggers (sync-schema.service.ts).
+  { migration: '019', table: 'sync_conflicts' },
 ];
 
 export function missingRequirements(requires: SchemaRequirements, live: LiveSchema): string[] {

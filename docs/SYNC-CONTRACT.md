@@ -9,9 +9,151 @@ listed, the server does not provide it. Behaviour marked *tested* is covered
 by `backend/test/sync-contract.e2e-spec.ts` (real PostgreSQL) unless another
 suite is named.
 
-Conflict handling (stale offline edits) is **not** implemented. The design
-options and the decisions the owner has to make are in
+There are two request formats. **Protocol 2** (`"protocol": 2` in the push
+body) carries the record revision each change was based on; the server
+detects stale writes and keeps conflicts for the owner to resolve
+([Protocol 2](#protocol-2-revisions-and-conflicts)). **Protocol 1** (no
+`protocol` field: apps released before protocol 2) works as before, with the
+protections listed under [Protocol 1](#protocol-1-older-apps). The approved
+rules this implements are summarised in
 [proposals/sync-conflicts.md](proposals/sync-conflicts.md).
+
+## Protocol 2: revisions and conflicts
+
+### Revisions
+
+- Clients, invoices and invoice items have a `revision` (integer, starts at
+  1). The **database** sets it: a trigger (migration 019) adds 1 on every
+  update that changes any column other than `revision`/`updated_at`, for
+  every write path (REST, sync, payments, scheduled jobs, SQL). A value sent
+  by a client is ignored. The trigger also records which columns each
+  revision changed (`sync_record_revisions`).
+- Pull returns `revision` on every client, invoice and item. A device keeps
+  it with its local copy and sends it back as `base_revision` when it edits
+  or deletes the record.
+- Client timestamps (`updated_at`) never decide anything.
+
+### Push (`"protocol": 2`)
+
+Each change needs a `change_id`. `update` and `delete` of clients, invoices
+and items need `base_revision` (>= 1); `create` has none. An `update`
+carries **only the fields the user changed**. Each change is processed in
+its own transaction, in array order, under a per-record lock (also taken by
+conflict resolution) with the record row-locked, so a REST save cannot slip
+in between the check and the write.
+
+| Situation | Result | Record |
+|---|---|---|
+| `base_revision` = current revision | `applied`, new `revision` | updated |
+| Older base; the server changed **other** fields since then, and the history proves it | `merged`, new `revision` | only the sent fields updated |
+| Older base; a sent field was also changed on the server, or the history cannot prove which fields changed (pruned, or base 0) | `conflict` + `conflict_id` (`stale_edit`) | unchanged |
+| Older base on a **sent, overdue or paid** invoice, or an item of one (any change) | `conflict` (`protected_invoice`) | unchanged; never merged |
+| Sent values equal the current ones | `applied` (nothing to change) | unchanged |
+| Edit or create of a record that is deleted (soft-deleted, or a tombstone exists) | `conflict` (`edit_after_delete`) | stays deleted |
+| Delete with an older base of an editable record | `applied` + `conflict_id` (`delete_after_edit`) | deleted; the version it removed can be restored |
+| Delete with current base | `applied` | deleted |
+| Delete of an already deleted or never existing record | `applied` | none |
+| `base_revision` above the current revision | `failed`, `reason: invalid_base_revision` | unchanged |
+| `update` of a record that does not exist (no tombstone) | `failed`, `reason: not_found` | none |
+| Missing `change_id` / `base_revision` | `failed`, `reason: change_id_required` / `base_revision_required` | none |
+| Another user's record or reference, invalid data | `failed` (no reason, as before) | unchanged |
+
+"Sent or paid" means status `sent`, `overdue` (a sent invoice past its due
+date) or `paid`. There is no other server-side restriction on editing
+invoices; this release adds none beyond the conflict rules above.
+
+Merges are only allowed when the server can prove which fields changed: the
+revision history must contain every revision after the base. Values are
+compared after normalising numbers (`"100.00"` = `100`), dates and JSON.
+
+### Replays and retries
+
+- Same `change_id`, same contents (object, type, base, data): the first
+  outcome again, with no second write: `duplicate` for an applied or merged
+  change, `conflict` with the same `conflict_id` for a conflicted one.
+- Same `change_id`, different contents: `failed`, `reason:
+  change_id_reused`, nothing written.
+- `failed` changes are not recorded as processed: resending retries them.
+  `conflict` changes must not be resent; they are resolved through the
+  conflicts API.
+- Partial batches: every change stands on its own. A change that depends on
+  an earlier one in the same batch (an item of a new invoice) fails if that
+  one failed or conflicted (`failed`, the invoice is not the user's), and
+  succeeds on a retry once the dependency exists.
+- Reconnects: resend the whole unacknowledged queue with the same
+  `change_id`s; processed changes are answered from their stored outcome.
+
+### Conflicts API (JWT only; API keys get 401)
+
+- `GET /api/v1/sync/conflicts?status=open|all` — the user's conflicts.
+- `GET /api/v1/sync/conflicts/:id` — one conflict plus `current` (the record
+  now: `revision`, `deleted`, `fields`). Another user's id answers 404.
+- `POST /api/v1/sync/conflicts/:id/resolve` `{action, expected_revision}`:
+  - `apply_client` (`stale_edit`): write the device's version over the
+    current one;
+  - `restore` (`edit_after_delete`, `delete_after_edit`): bring the record
+    back (plus the device's edits for `edit_after_delete`; a hard-deleted
+    item is recreated from the state kept with its tombstone; an invoice
+    needs its client to be active);
+  - `dismiss` (any): keep the server as it is.
+  Checks, in one transaction: the conflict belongs to the user (404) and is
+  still open (409; two resolutions cannot both win), the record is still at
+  `expected_revision` (409 with `current_revision`), and `apply_client` or
+  edits on a sent/overdue/paid invoice are refused (422). A `protected_invoice`
+  conflict can only be dismissed; the user then edits the invoice directly.
+- Conflicts keep only an allowlist of business fields
+  (`backend/src/sync/conflict-fields.ts`), with long text cut to 2,000
+  characters and large JSON dropped; never metadata, credentials or payment
+  data. Fields left out are listed in `omitted_fields`.
+
+### Pull additions
+
+- `tombstones`: `{object_type, object_id, deleted_at}` of the user's records
+  deleted after `since` (clients, invoices, items, attachments). A protocol-2
+  client removes them locally.
+- `fullResyncRequired`: `since` is older than the retention period
+  (`SYNC_RETENTION_DAYS`, default 400 days), so tombstones may be gone; the
+  client drops its local data and pulls without `since`.
+- `openConflicts`: number of open conflicts.
+- Items created or changed after `since` are returned even when their
+  invoice is not.
+- `lastSyncTimestamp` is taken before the queries, so a row committed during
+  the pull is returned again next time rather than skipped.
+
+### Retention
+
+- Tombstones and field history: `SYNC_RETENTION_DAYS` (default 400, minimum
+  90). Within it, a deleted id cannot be recreated, by its owner or anyone
+  else. After it, a device offline for longer is told to resync fully, but a
+  queued create of such an old id could recreate it (documented limit).
+- Resolved or dismissed conflicts: `SYNC_CONFLICT_RETENTION_DAYS` (default
+  180). Open conflicts are kept until the owner acts.
+
+## Protocol 1 (older apps)
+
+Requests without `"protocol": 2` are processed as before (whichever write is
+applied last wins; there is no concurrency guarantee for these apps), except
+where that would bypass a protection they cannot honour:
+
+- update or delete of a sent, overdue or paid invoice (or its items):
+  `failed`, `reason: client_upgrade_required`;
+- edit or create of a deleted record: `failed`, `reason: record_deleted`
+  (no resurrection, including a replayed old create);
+- update of a record with an open conflict: `failed`, `reason: open_conflict`;
+- `deletedAt`, `revision`, `createdAt` and `updatedAt` are no longer
+  writable through sync (an app can no longer un-delete by sending
+  `deletedAt: null`).
+
+These apps resend `failed` changes on every sync, so such a change stays in
+their queue until the app is updated. Reads (`pull`) are unchanged for them;
+they ignore the new fields.
+
+**Cutoff.** `SYNC_LEGACY_WRITE_CUTOFF` (unset by default: never) refuses all
+protocol-1 pushes from that date: every change `failed`, `reason:
+client_upgrade_required`, plus `notice: client_upgrade_required` and a
+message, HTTP 200 so older apps keep working read-only. Recommended: 60 days
+after a confirmed release of an app that speaks protocol 2. No date is set
+in this repository.
 
 ## Authentication and ownership
 
@@ -227,15 +369,10 @@ Without `change_id`, a resend re-applies every change in the batch.
 
 ### Stale writes and conflicts
 
-- **`updated_at` is ignored.** The server does no timestamp comparison,
-  version check or conflict detection. Whichever write is **applied** last
-  wins, whenever it was made offline (*tested*: a change stamped 2000 that
-  arrives after one stamped 2099 wins). A device that comes back online after
-  a week overwrites newer edits made on another device or through the REST
-  API with its older data.
-- This is *not* last-write-wins by client timestamp, and must not be
-  described as such. Making stale edits detectable needs a protocol change;
-  see [proposals/sync-conflicts.md](proposals/sync-conflicts.md).
+- **`updated_at` is ignored** in both protocols. Protocol 2 detects stale
+  writes by revision (above). Protocol 1 cannot: whichever write is
+  **applied** last wins (*tested*: a change stamped 2000 that arrives after
+  one stamped 2099 wins), except for the protections listed for protocol 1.
 
 ### Clock skew
 
@@ -295,58 +432,47 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
 
 ## Compatibility and rollout
 
-| server \ client              | released client (no `change_id`) | client sending `change_id` |
-|------------------------------|----------------------------------|----------------------------|
-| before this change           | as before                        | `400` (`forbidNonWhitelisted`, nothing applied); the client on this branch resends without `change_id` = old behaviour |
-| with this change + migration 018 | works with the same counts, ignores the extra `results`, no replay protection | idempotent, exact acknowledgements |
+| server \ app | released app (protocol 1) | protocol-2 app |
+|---|---|---|
+| before migration 019 | as before | pushes `"protocol": 2`, which an old server rejects (400) and applies nothing; the protocol-2 app shows that sync needs a server update (it does not fall back to protocol 1) |
+| with migration 019 | as before plus the protocol-1 protections above; reads unchanged | revisions, merges, conflicts, tombstones |
+| with `SYNC_LEGACY_WRITE_CUTOFF` passed | read-only; every push answered `client_upgrade_required` | as above |
 
-- Deploy order: **database migration 018 → server → mobile release.** A
-  client release that sends `change_id` **without** the 400 fallback must
-  not ship before every server it talks to has been updated.
-- Migration 018 (`backend/migrations/018_add_device_change_change_id.sql`)
-  adds the nullable `device_changes.change_id` column and the partial unique
-  index `idx_device_changes_user_change_id (user_id, change_id) WHERE
-  change_id IS NOT NULL`. It is additive and idempotent and changes no data.
-  Before changing anything it counts duplicate (user_id, change_id) groups.
-  These can exist only if the column was added earlier without the index,
-  for example by TypeORM synchronize. If there are any, it stops with
-  `migration 018: device_changes has N duplicate (user_id, change_id)
-  group(s); unique index not created and no data changed`. Resolving those is
-  a manual decision. Run it like the others with
-  `psql -v ON_ERROR_STOP=1 --single-transaction`. Tested in
-  `backend/test/sync-migration-018.e2e-spec.ts`.
-- The server code needs the column. Do not start this server version against
-  a database without migration 018, or every push will fail.
-- Rollback: the previous server version ignores the column and the index, so
-  they can stay. A client sending `change_id` must then be held back, because
-  the old server rejects the field.
-- The integrity report's schema fingerprint includes a marker for migration 018
-  (`device_changes.change_id`).
+- Order: **migration 019 → server → app release → (later, optionally) the
+  cutoff.** The server reads the new columns on every client, invoice and
+  item query: do not start it without migration 019. Migration 018 must
+  already be applied.
+- Migration 019 (`backend/migrations/019_sync_revisions_conflicts.sql`) is
+  additive and idempotent: `revision` columns (existing rows start at 1),
+  `sync_record_revisions`, `sync_tombstones`, `sync_conflicts`, three columns
+  on `device_changes`, and the trigger functions and triggers. It changes no
+  existing values. Records deleted before it have no tombstone. Run it with
+  `psql -v ON_ERROR_STOP=1 --single-transaction`.
+- The server checks the live database for the triggers when it starts (not
+  the integrity report's fingerprint). Without them, sync pushes and conflict
+  resolution answer 503 instead of processing writes without revision
+  evidence. With `DB_SYNCHRONIZE=true` (tests, local development only) the
+  server installs them itself.
+- Rollback: the previous server version ignores the new columns and tables.
+  Remove the triggers only together with the columns' users; while the
+  triggers stay, they keep revisions and tombstones current. A protocol-2 app
+  needs a protocol-2 server.
+- Migration 018 remains required (`device_changes.change_id`).
 
 ## Known gaps
 
-These are follow-ups. They are intentionally not changed here, because each
-needs a product decision or a client release:
-
-1. **No conflict handling / stale writes.** Apply order wins. Needs a policy;
-   see [proposals/sync-conflicts.md](proposals/sync-conflicts.md).
-2. **The released mobile client ignores `results` and sends no
-   `change_id`.** Until the client change ships, a mid-batch failure is
-   acknowledged as applied on the device and replays are not idempotent. The
-   server side is ready.
-3. **Deletions do not propagate through pull.** Soft-deleted rows are
-   filtered out, and hard-deleted items/attachments vanish, so other devices
-   never learn about a delete. Needs tombstones or a deleted-ids list.
-4. **Incremental pull misses item/attachment-only changes.** Items and
-   attachments have no `updatedAt`. They are returned only when their parent
-   invoice/client is, and editing an item through sync does not bump the
-   invoice.
-5. **Pull timestamp window.** `lastSyncTimestamp` is taken after the
-   queries, so rows committed between the query and that moment are skipped
-   by the next incremental pull. Capturing the timestamp before querying (and
-   tolerating duplicates) would close this.
-6. **No batch size limit** on `changes`. A large queue is one long request
-   with one transaction per change.
-7. **Permanently failing changes** are retried forever by a client that
-   resends failed changes. There is no reason code to tell "fix the data"
-   from "retry later" (proposal, decision D5).
+1. **Protocol-1 apps** have no concurrency guarantee: their writes are last
+   applied wins, except for the protections above. This ends only when they
+   update.
+2. **REST writes** take the row lock but send no revision: a web or REST
+   edit always applies to the current record (and bumps its revision, so a
+   device's older edit then conflicts or merges).
+3. **Attachments** have no revision: they are created and deleted, and
+   deletes propagate as tombstones, but an attachment edit is applied as
+   sent.
+4. **Retention:** after `SYNC_RETENTION_DAYS`, tombstones and field history
+   are pruned; a device offline for longer gets `fullResyncRequired`, and a
+   queued create of a pruned id could recreate it.
+5. **No batch size limit** on `changes`.
+6. **Records deleted before migration 019** have no tombstone; devices learn
+   about them only on a full resync.

@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { User } from './user.entity';
+import { BIGINT_AS_NUMBER } from './bigint-transformer';
 
 @Entity('clients')
 @Index(['userId'])
@@ -56,6 +57,10 @@ export class Client {
   @ApiPropertyOptional({ example: 'https://example.com/avatar.png' })
   @Column({ name: 'avatar_url', type: 'text', nullable: true })
   avatarUrl?: string;
+
+  @ApiProperty({ description: 'Server-controlled revision; increases on every change (sync protocol 2)', example: 1 })
+  @Column({ type: 'bigint', default: 1, transformer: BIGINT_AS_NUMBER })
+  revision: number;
 
   @ApiProperty({ example: '2025-01-20T10:00:00.000Z' })
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })

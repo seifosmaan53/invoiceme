@@ -1,5 +1,6 @@
 import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { User } from './user.entity';
+import { BIGINT_AS_NUMBER } from './bigint-transformer';
 
 export enum ChangeType {
   CREATE = 'create',
@@ -52,6 +53,17 @@ export class DeviceChange {
 
   @Column({ default: false })
   synced: boolean;
+
+  /** Protocol 2: the record revision the device based this change on (migration 019). */
+  @Column({ name: 'base_revision', type: 'bigint', nullable: true, transformer: BIGINT_AS_NUMBER })
+  baseRevision: number | null;
+
+  /** How the change was processed: applied, merged or conflict (null while not processed). */
+  @Column({ type: 'varchar', length: 20, nullable: true })
+  outcome: string | null;
+
+  @Column({ name: 'conflict_id', type: 'uuid', nullable: true })
+  conflictId: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

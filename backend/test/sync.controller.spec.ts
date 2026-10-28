@@ -7,6 +7,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { SyncController } from '../src/sync/sync.controller';
 import { SyncService, SyncPushDto } from '../src/sync/sync.service';
+import { SyncConflictsService } from '../src/sync/sync-conflicts.service';
 import { JwtAuthGuard } from '../src/auth/guards/jwt-auth.guard';
 import { ChangeObjectType, ChangeType } from '../src/entities/device-change.entity';
 
@@ -32,6 +33,7 @@ describe('SyncController', () => {
           provide: SyncService,
           useValue: mockSyncService,
         },
+        { provide: SyncConflictsService, useValue: { list: jest.fn(), get: jest.fn(), resolve: jest.fn() } },
       ],
     })
       .overrideGuard(JwtAuthGuard)
@@ -63,6 +65,7 @@ describe('SyncController', () => {
       };
 
       const syncResult = {
+        protocol: 1,
         synced: 1,
         failed: 0,
         results: [],
@@ -83,6 +86,7 @@ describe('SyncController', () => {
       };
 
       const syncResult = {
+        protocol: 1,
         synced: 0,
         failed: 0,
         results: [],
@@ -111,6 +115,7 @@ describe('SyncController', () => {
       };
 
       const syncResult = {
+        protocol: 1,
         synced: 1,
         failed: 0,
         results: [],
@@ -133,6 +138,7 @@ describe('SyncController', () => {
       };
 
       const syncResult = {
+        protocol: 1,
         synced: 0,
         failed: 0,
         results: [],
@@ -160,6 +166,7 @@ describe('SyncController', () => {
       };
 
       const syncResult = {
+        protocol: 1,
         synced: 100,
         failed: 0,
         results: [],
@@ -195,6 +202,10 @@ describe('SyncController', () => {
         invoices: [],
         invoiceItems: [],
         attachments: [],
+        protocol: 2,
+        tombstones: [],
+        fullResyncRequired: false,
+        openConflicts: 0,
         lastSyncTimestamp: '2024-01-01T00:00:00.000Z',
       };
 
@@ -212,6 +223,10 @@ describe('SyncController', () => {
         invoices: [],
         invoiceItems: [],
         attachments: [],
+        protocol: 2,
+        tombstones: [],
+        fullResyncRequired: false,
+        openConflicts: 0,
         lastSyncTimestamp: '2024-01-01T00:00:00.000Z',
       };
 
@@ -232,6 +247,10 @@ describe('SyncController', () => {
         ],
         invoiceItems: [],
         attachments: [],
+        protocol: 2,
+        tombstones: [],
+        fullResyncRequired: false,
+        openConflicts: 0,
         lastSyncTimestamp: '2024-01-01T00:00:00.000Z',
       };
 
@@ -254,6 +273,10 @@ describe('SyncController', () => {
         invoices: [],
         invoiceItems: [],
         attachments: [],
+        protocol: 2,
+        tombstones: [],
+        fullResyncRequired: false,
+        openConflicts: 0,
         lastSyncTimestamp: '2024-01-01T00:00:00.000Z',
       };
 
@@ -274,6 +297,10 @@ describe('SyncController', () => {
         invoices: [],
         invoiceItems: [],
         attachments: [],
+        protocol: 2,
+        tombstones: [],
+        fullResyncRequired: false,
+        openConflicts: 0,
         lastSyncTimestamp: '2024-01-02T00:00:00.000Z',
       };
 
@@ -293,6 +320,10 @@ describe('SyncController', () => {
         invoices: [],
         invoiceItems: [],
         attachments: [],
+        protocol: 2,
+        tombstones: [],
+        fullResyncRequired: false,
+        openConflicts: 0,
         lastSyncTimestamp: since,
       };
 
@@ -320,6 +351,7 @@ describe('SyncController', () => {
       };
 
       const syncResult = {
+        protocol: 1,
         synced: 0,
         failed: 0,
         results: [],
@@ -347,6 +379,7 @@ describe('SyncController', () => {
       };
 
       const syncResult = {
+        protocol: 1,
         synced: 0,
         failed: 0,
         results: [],
@@ -368,6 +401,10 @@ describe('SyncController', () => {
         invoices: [],
         invoiceItems: [],
         attachments: [],
+        protocol: 2,
+        tombstones: [],
+        fullResyncRequired: false,
+        openConflicts: 0,
         lastSyncTimestamp: since,
       };
 
@@ -386,6 +423,7 @@ describe('SyncController', () => {
       };
 
       const syncResult = {
+        protocol: 1,
         synced: 0,
         failed: 0,
         results: [],
@@ -410,6 +448,10 @@ describe('SyncController', () => {
         invoices: [],
         invoiceItems: [],
         attachments: [],
+        protocol: 2,
+        tombstones: [],
+        fullResyncRequired: false,
+        openConflicts: 0,
         lastSyncTimestamp: since,
       };
 

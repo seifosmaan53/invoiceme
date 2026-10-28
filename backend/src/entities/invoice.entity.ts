@@ -3,6 +3,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { User } from './user.entity';
 import { Client } from './client.entity';
 import { InvoiceItem } from './invoice-item.entity';
+import { BIGINT_AS_NUMBER } from './bigint-transformer';
 
 export enum InvoiceType {
   INVOICE = 'invoice',
@@ -94,6 +95,10 @@ export class Invoice {
   @ApiPropertyOptional({ example: { projectId: 'proj-123', customField: 'value' } })
   @Column({ name: 'metadata_json', type: 'jsonb', nullable: true })
   metadataJson: Record<string, any>;
+
+  @ApiProperty({ description: 'Server-controlled revision; increases on every change (sync protocol 2)', example: 1 })
+  @Column({ type: 'bigint', default: 1, transformer: BIGINT_AS_NUMBER })
+  revision: number;
 
   @ApiProperty({ example: '2025-01-20T10:00:00.000Z' })
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })

@@ -56,7 +56,7 @@ in between the check and the write.
 | `base_revision` above the current revision | `failed`, `reason: invalid_base_revision` | unchanged |
 | `update` of a record that does not exist (no tombstone) | `failed`, `reason: not_found` | none |
 | Missing `change_id` / `base_revision` | `failed`, `reason: change_id_required` / `base_revision_required` | none |
-| Another user's record or reference, invalid data | `failed` (no reason, as before) | unchanged |
+| Another user's record or reference, invalid data, a database error | `failed`, `reason: rejected` (one reason for all, so ownership failures stay indistinguishable; clients count it and stop resending after repeated failures) | unchanged |
 
 **Items of sent, overdue or paid invoices.** An item's own revision does not
 move when its invoice is sent or paid, so every protocol-2 item change (create,

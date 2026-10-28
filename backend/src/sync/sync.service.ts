@@ -234,6 +234,13 @@ interface Outcome {
 const failed = (reason?: string): Outcome => ({ status: 'failed', reason });
 
 export const UPGRADE_REQUIRED = 'client_upgrade_required';
+/**
+ * Any failure not explained by a more specific reason: another user's record
+ * or reference, invalid data, a database error. One reason for all of them, so
+ * an ownership failure stays indistinguishable from the rest, while clients
+ * can still count repeated failures and stop resending.
+ */
+export const REJECTED = 'rejected';
 
 @Injectable()
 export class SyncService {
@@ -289,7 +296,7 @@ export class SyncService {
           outcome = await this.pushChange(userId, syncPushDto.deviceId, changeObj, protocol);
         } catch (error) {
           console.error(`Error processing change ${changeObj.object_id}:`, error);
-          outcome = failed();
+          outcome = failed(REJECTED);
         }
       }
       results.push({
@@ -353,7 +360,7 @@ export class SyncService {
       } catch (error) {
         await manager.query('ROLLBACK TO SAVEPOINT sync_apply');
         console.error(`Error processing change ${changeObj.object_id}:`, error);
-        return failed();
+        return failed(REJECTED);
       }
       if (outcome.status === 'failed') {
         await manager.query('ROLLBACK TO SAVEPOINT sync_apply');

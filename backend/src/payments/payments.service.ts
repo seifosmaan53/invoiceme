@@ -272,8 +272,10 @@ export class PaymentsService {
     const payments = await this.paymentRepository.find({ where: { invoiceId: invoice.id } });
     const totals = paymentTotals(payments, invoice.currency);
     const summary = paymentSummary(totals, invoice.status);
-    // Reopening only makes sense when part of the money went back.
-    summary.canReopen = summary.canReopen && totals.netCents < Math.round(Number(invoice.total) * 100);
+    // Reopening only makes sense when part of the money went back, and not
+    // while a dispute is open: if it is won, the customer would pay twice.
+    summary.canReopen =
+      summary.canReopen && totals.state !== 'disputed' && totals.netCents < Math.round(Number(invoice.total) * 100);
     return summary;
   }
 
@@ -442,6 +444,13 @@ export class PaymentsService {
   async startCheckout(invoice: Invoice): Promise<CheckoutAttempt> {
     return this.dataSource.transaction(async (manager) => {
       await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`pay:${invoice.id}`]);
+      // Read the invoice again under the lock: it may have been paid, cancelled
+      // or changed since the caller loaded it (review F6).
+      const fresh = await manager.getRepository(Invoice).findOne({ where: { id: invoice.id }, loadEagerRelations: false });
+      if (!fresh || fresh.deletedAt) throw new BadRequestException('Invoice not found');
+      if (fresh.status === InvoiceStatus.PAID) throw new BadRequestException('Invoice is already paid');
+      if (fresh.status === InvoiceStatus.CANCELLED) throw new BadRequestException('Cannot create payment for cancelled invoice');
+      invoice = { ...invoice, total: fresh.total, currency: fresh.currency, status: fresh.status } as Invoice;
       const payments = manager.getRepository(Payment);
       const all = await payments.find({ where: { invoiceId: invoice.id }, order: { createdAt: 'DESC' } });
       const currency = invoice.currency.trim().toUpperCase();

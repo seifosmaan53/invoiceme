@@ -28,6 +28,7 @@ import { Client } from '../src/entities/client.entity';
 import { Invoice, InvoiceType, InvoiceStatus } from '../src/entities/invoice.entity';
 import { Payment, PaymentStatus } from '../src/entities/payment.entity';
 import { PaymentEvent } from '../src/entities/payment-event.entity';
+import { PaymentsService } from '../src/payments/payments.service';
 import { StripeService } from '../src/core/services/stripe.service';
 import { NotificationService } from '../src/core/services/notification.service';
 import { EmailService } from '../src/core/services/email.service';
@@ -698,6 +699,21 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       expect(JSON.stringify(history.body)).not.toContain('secret');
     });
 
+    it('reopening waits for an open dispute to be decided', async () => {
+      const { pi, charge } = await paidInvoice();
+      await refund(charge, 1000).expect(200);
+      stripeDisputes.set('dp_open', { id: 'dp_open', payment_intent: pi, charge, amount: 10000, currency: 'usd', status: 'needs_response' });
+      await postWebhook(event('charge.dispute.created', { id: 'dp_open' })).expect(200);
+      expect((await summary(invoiceA)).paymentSummary).toMatchObject({ state: 'disputed', canReopen: false });
+      await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/reopen`).set('Authorization', `Bearer ${tokenA}`).expect(409);
+
+      // Positive control: once lost, the owner may reopen
+      stripeDisputes.get('dp_open').status = 'lost';
+      await postWebhook(event('charge.dispute.closed', { id: 'dp_open' })).expect(200);
+      expect((await summary(invoiceA)).paymentSummary).toMatchObject({ state: 'dispute_lost', canReopen: true });
+      await request(app.getHttpServer()).post(`/api/v1/invoices/${invoiceA.id}/reopen`).set('Authorization', `Bearer ${tokenA}`).expect(200);
+    });
+
     it('a dispute or refund for an intent this server did not create is recorded as unknown', async () => {
       stripeCharges.set('ch_x', { id: 'ch_x', payment_intent: 'pi_elsewhere', amount_refunded: 100, currency: 'usd' });
       await postWebhook(event('charge.refunded', { id: 'ch_x' })).expect(200);
@@ -780,6 +796,16 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
       expect(next.paymentIntentId).not.toBe(own);
       expect(next.clientSecret).toBe(`${next.paymentIntentId}_secret_e2e`);
       await payRaw(invoiceA, tokenB).expect(404);
+    });
+
+    it('re-reads the invoice under the lock: one paid in the meantime is not charged', async () => {
+      const stale = await invoiceRepository.findOneByOrFail({ id: invoiceA.id }); // loaded as sent
+      await invoiceRepository.update({ id: invoiceA.id }, { status: InvoiceStatus.PAID });
+      await expect(moduleFixture.get(PaymentsService).startCheckout(stale)).rejects.toThrow('Invoice is already paid');
+      expect(createPaymentIntent).not.toHaveBeenCalled();
+      // Positive control: back to sent, the same call starts a checkout
+      await invoiceRepository.update({ id: invoiceA.id }, { status: InvoiceStatus.SENT });
+      await expect(moduleFixture.get(PaymentsService).startCheckout(stale)).resolves.toMatchObject({ reused: false });
     });
 
     it('a paid invoice is not charged again; a Stripe check failure stops rather than risks a duplicate', async () => {

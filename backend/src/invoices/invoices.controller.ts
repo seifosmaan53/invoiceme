@@ -16,6 +16,7 @@ import {
   Req,
   HttpCode,
   HttpStatus,
+  ConflictException,
 } from '@nestjs/common';
 import { 
   ApiTags, 
@@ -845,6 +846,9 @@ export class InvoicesController {
   async reopen(@Param('id') id: string, @CurrentUser() user: any, @Req() req: any) {
     const invoice = await this.invoicesService.findOne(id, user.userId);
     const summary = await this.paymentsService.summaryFor(invoice);
+    if (summary.state === 'disputed') {
+      throw new ConflictException('A dispute on this invoice is still open; reopen it once the dispute is decided');
+    }
     const netCents = Math.round(Number(summary.net) * 100);
     const reopened = await this.invoicesService.reopen(id, user.userId, netCents);
     await this.auditService.log(

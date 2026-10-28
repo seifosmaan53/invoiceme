@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Delete, Body, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Post, Delete, Body, Param, UseGuards, BadRequestException } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiOkResponse, ApiCreatedResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { ApiKeysService } from './api-keys.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -27,10 +27,18 @@ export class ApiKeysController {
     @Body() body: { name: string; permissions?: string[]; expiresAt?: string },
     @CurrentUser() user: any,
   ) {
+    const permissions = body.permissions;
+    if (
+      !Array.isArray(permissions) ||
+      permissions.length === 0 ||
+      !permissions.every((p) => typeof p === 'string' && p.trim() !== '')
+    ) {
+      throw new BadRequestException("Choose at least one permission; '*' grants full access");
+    }
     return this.apiKeysService.generateApiKey(
       user.userId,
       body.name,
-      body.permissions || [],
+      permissions,
       body.expiresAt ? new Date(body.expiresAt) : undefined,
     );
   }

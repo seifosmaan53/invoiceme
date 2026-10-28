@@ -219,8 +219,13 @@ describe('API-key permissions on invoice and client routes (E2E)', () => {
     await http().get('/api/v1/clients/export/csv').set(ro.header, ro.value).expect(200);
   });
 
-  it('an unrestricted legacy key (no permissions) keeps full access', async () => {
-    const { key } = await apiKeys.generateApiKey(ownerId, 'legacy', []);
+  it("a key with no permissions has no access; '*' grants full access", async () => {
+    const { key: empty } = await apiKeys.generateApiKey(ownerId, 'no permissions', []);
+    await http().post(`/api/v1/invoices/${invoice.id}/duplicate`).set('X-API-Key', empty).expect(403);
+    await http().post('/api/v1/invoices/bulk-archive').set('X-API-Key', empty).send({ ids: [invoice.id] }).expect(403);
+    expect(await liveInvoices()).toBe(2);
+
+    const { key } = await apiKeys.generateApiKey(ownerId, 'full access', ['*']);
     await http().post(`/api/v1/invoices/${invoice.id}/duplicate`).set('X-API-Key', key).expect(201);
     await http().post('/api/v1/invoices/bulk-archive').set('X-API-Key', key).send({ ids: [invoice.id] }).expect(201);
   });

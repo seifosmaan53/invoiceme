@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, ConflictException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, IsNull } from 'typeorm';
 import { Invoice, InvoiceType, InvoiceStatus } from '../entities/invoice.entity';
@@ -617,28 +617,6 @@ export class InvoicesService {
       discountTotal: Math.round(discountTotal * 100) / 100,
       total: Math.round(total * 100) / 100,
     };
-  }
-
-  /**
-   * Reopen a paid invoice after money went back to the customer (refund or
-   * dispute). Explicit owner action: provider events never reopen an invoice.
-   * It becomes sent, or overdue when past its due date; online payment then
-   * asks only for the amount still due (PaymentsService.startCheckout).
-   */
-  async reopen(id: string, userId: string, netCents: number): Promise<Invoice> {
-    const invoice = await this.findOwned(id, userId);
-    if (invoice.status !== InvoiceStatus.PAID) {
-      throw new BadRequestException('Only a paid invoice can be reopened');
-    }
-    if (netCents >= Math.round(Number(invoice.total) * 100)) {
-      throw new ConflictException('Nothing would be due: the payments received still cover this invoice');
-    }
-    // Business-timezone "today" (common/calendar-date.ts), like overdue detection
-    const overdue = invoice.dueDate && toCalendarDate(invoice.dueDate) < businessToday();
-    invoice.status = overdue ? InvoiceStatus.OVERDUE : InvoiceStatus.SENT;
-    invoice.client = undefined;
-    await this.invoiceRepository.save(invoice);
-    return this.findOne(id, userId);
   }
 
   /**

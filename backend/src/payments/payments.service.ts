@@ -1,14 +1,15 @@
-import { BadRequestException, ConflictException, Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Not, Repository } from 'typeorm';
+import { DataSource, IsNull, Not, Repository } from 'typeorm';
 import { Payment, PaymentProvider, PaymentStatus } from '../entities/payment.entity';
 import { PaymentEvent } from '../entities/payment-event.entity';
 import { StripeService } from '../core/services/stripe.service';
-import { Invoice, InvoiceStatus } from '../entities/invoice.entity';
+import { Invoice, InvoiceStatus, InvoiceType } from '../entities/invoice.entity';
 import { NotificationService } from '../core/services/notification.service';
 import { User } from '../entities/user.entity';
 import { ownedClient } from '../core/utils/cross-owner.util';
-import { withoutClientSecret } from './payment-currency';
+import { isOnlinePaymentCurrency, UnsupportedPaymentCurrencyError, withoutClientSecret } from './payment-currency';
+import { businessToday, toCalendarDate } from '../common/calendar-date';
 import { paymentSummary, PaymentSummaryDto, paymentTotals } from './payment-state';
 
 /** The parts of a verified provider event the webhook acts on. */
@@ -450,11 +451,20 @@ export class PaymentsService {
       if (!fresh || fresh.deletedAt) throw new BadRequestException('Invoice not found');
       if (fresh.status === InvoiceStatus.PAID) throw new BadRequestException('Invoice is already paid');
       if (fresh.status === InvoiceStatus.CANCELLED) throw new BadRequestException('Cannot create payment for cancelled invoice');
+      // The caller's checks, again on the fresh row (review N4)
+      if (fresh.type === InvoiceType.ESTIMATE) throw new BadRequestException('Cannot create payment for estimate. Convert to invoice first.');
+      if (!(Number(fresh.total) > 0)) throw new BadRequestException('Invoice total must be greater than zero');
+      if (!isOnlinePaymentCurrency(fresh.currency)) throw new BadRequestException(new UnsupportedPaymentCurrencyError(fresh.currency).message);
       invoice = { ...invoice, total: fresh.total, currency: fresh.currency, status: fresh.status } as Invoice;
       const payments = manager.getRepository(Payment);
       const all = await payments.find({ where: { invoiceId: invoice.id }, order: { createdAt: 'DESC' } });
       const currency = invoice.currency.trim().toUpperCase();
-      const dueCents = Math.round(Number(invoice.total) * 100) - paymentTotals(all, currency).netCents;
+      const totals = paymentTotals(all, currency);
+      // An open dispute may still be won: asking again could make the customer pay twice (review N6)
+      if (totals.state === 'disputed') {
+        throw new ConflictException('A dispute on this invoice is open; online payment waits for its outcome');
+      }
+      const dueCents = Math.round(Number(invoice.total) * 100) - totals.netCents;
       if (dueCents <= 0) {
         throw new BadRequestException('Nothing is due on this invoice');
       }
@@ -513,6 +523,39 @@ export class PaymentsService {
         }),
       );
       return { clientSecret: intent.client_secret, paymentIntentId: intent.id, amount: dueCents / 100, currency, reused: false };
+    });
+  }
+
+  /**
+   * Reopen a paid invoice after money went back to the customer (refund or
+   * lost dispute). Explicit owner action: provider events never reopen an
+   * invoice. Decided under the same per-invoice lock as checkout, on the
+   * invoice and payments as they are inside it (review N5). The invoice
+   * becomes sent, or overdue past its due date (business-timezone today);
+   * online payment then asks only for the amount still due.
+   */
+  async reopenInvoice(invoiceId: string, userId: string): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`pay:${invoiceId}`]);
+      const invoices = manager.getRepository(Invoice);
+      const invoice = await invoices.findOne({
+        where: { id: invoiceId, userId, deletedAt: IsNull() },
+        loadEagerRelations: false,
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!invoice) throw new NotFoundException('Invoice not found');
+      if (invoice.status !== InvoiceStatus.PAID) {
+        throw new BadRequestException('Only a paid invoice can be reopened');
+      }
+      const totals = paymentTotals(await manager.getRepository(Payment).find({ where: { invoiceId } }), invoice.currency);
+      if (totals.state === 'disputed') {
+        throw new ConflictException('A dispute on this invoice is still open; reopen it once the dispute is decided');
+      }
+      if (totals.netCents >= Math.round(Number(invoice.total) * 100)) {
+        throw new ConflictException('Nothing would be due: the payments received still cover this invoice');
+      }
+      const overdue = invoice.dueDate && toCalendarDate(invoice.dueDate) < businessToday();
+      await invoices.update(invoice.id, { status: overdue ? InvoiceStatus.OVERDUE : InvoiceStatus.SENT });
     });
   }
 }

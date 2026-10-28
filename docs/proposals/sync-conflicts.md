@@ -4,6 +4,48 @@ Status: **proposal, not implemented.** Nothing here changes behaviour until
 the owner has made the decisions in [Decisions](#decisions-for-the-owner).
 Current behaviour is in [../SYNC-CONTRACT.md](../SYNC-CONTRACT.md).
 
+## Minimum decisions (summary, 2026-10-28)
+
+Only three choices change what users see; the owner must answer them. The
+rest have recommended defaults that apply once these three are answered.
+Already merged and unaffected: per-user replay protection (`change_id`),
+per-change results, per-object locking, and the ownership checks.
+
+**Q1. Two devices edit the same record (D1, D2).** Which version wins?
+- **(a) Recommended.** For an invoice that is no longer a draft (`sent`,
+  `paid`, `cancelled`), the offline edit is refused and the user sees "changed
+  on another device" with both versions to choose from. For drafts, clients
+  and items, fields edited on only one side are merged; for the same field the
+  later edit wins and the overwritten value is kept in the history.
+- (b) The later edit always wins (today's behaviour), but the overwritten
+  version is kept in the history so it can be restored.
+- (c) Always refuse and ask the user.
+
+**Q2. Edit and delete cross (D3).**
+- **(a) Recommended.** An edit to a record deleted elsewhere is discarded and
+  the user is told. A delete wins over an earlier remote edit. A device can no
+  longer un-delete through sync; restoring is a separate, explicit action.
+- (b) The edit brings the deleted record back.
+- (c) Ask the user each time.
+
+**Q3. Old app versions (D6).** After the mobile release, how long should
+unversioned writes from older apps be accepted (stale overwrites stay possible
+from those apps)?
+- **(a) Recommended.** Until a date you choose (for example 60 days after the
+  release), then those apps must update before they can sync.
+- (b) Indefinitely.
+
+Recommended defaults for the rest:
+
+| | Default | User-visible effect |
+|---|---|---|
+| D4 | A conflict response carries the full current record | The app can show both versions without another request |
+| D5 | Reason codes (validation, missing reference, retry later); the app shows a change that failed 3 times instead of retrying forever | A stuck change appears in a list the user can fix or discard |
+| D7 | REST/web edits take the same lock and accept an optional revision | Web edits get the same conflict handling; none without a revision |
+| D8 | Keep today's behaviour for old clients (implemented) | None |
+| D9 | Wait for the mobile release instead of deriving keys for old clients | None; replays from old apps stay possible until they update |
+| D10 | Deletes propagate on pull as tombstones (needed for Q2) | Records deleted on one device disappear from the others |
+
 ## Problem
 
 The server applies a sync change to whatever the record looks like when the

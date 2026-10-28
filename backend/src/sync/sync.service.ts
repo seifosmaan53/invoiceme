@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'util';
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, MoreThan, EntityManager } from 'typeorm';
+import { Repository, In, MoreThan, EntityManager, IsNull } from 'typeorm';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
@@ -454,7 +454,7 @@ export class SyncService {
       this.clientRepository.find({
         where: {
           userId,
-          deletedAt: null,
+          deletedAt: IsNull(),
           updatedAt: MoreThan(sinceDate),
         },
         order: { updatedAt: 'ASC' },
@@ -462,7 +462,7 @@ export class SyncService {
       this.invoiceRepository.find({
         where: {
           userId,
-          deletedAt: null,
+          deletedAt: IsNull(),
           updatedAt: MoreThan(sinceDate),
         },
         relations: ['client'],
@@ -590,13 +590,13 @@ export class SyncService {
   }
 
   private async assertOwnedClient(clientId: string, userId: string): Promise<void> {
-    if (!clientId || !(await this.clientRepository.exists({ where: { id: clientId, userId, deletedAt: null } }))) {
+    if (!clientId || !(await this.clientRepository.exists({ where: { id: clientId, userId, deletedAt: IsNull() } }))) {
       throw new SyncOwnershipError(`client ${clientId} does not belong to the user`);
     }
   }
 
   private async assertOwnedInvoice(invoiceId: string, userId: string): Promise<void> {
-    if (!invoiceId || !(await this.invoiceRepository.exists({ where: { id: invoiceId, userId, deletedAt: null } }))) {
+    if (!invoiceId || !(await this.invoiceRepository.exists({ where: { id: invoiceId, userId, deletedAt: IsNull() } }))) {
       throw new SyncOwnershipError(`invoice ${invoiceId} does not belong to the user`);
     }
   }

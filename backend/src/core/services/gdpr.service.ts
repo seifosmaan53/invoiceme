@@ -39,9 +39,11 @@ export class GdprService {
       throw new Error('User not found');
     }
 
-    // Get all clients (decrypt sensitive fields)
+    // Get all clients (decrypt sensitive fields). Soft-deleted records are
+    // still held, so the export includes them (this filter never excluded
+    // them: TypeORM ignores `deletedAt: null`).
     const clients = await this.clientRepository.find({
-      where: { userId, deletedAt: null },
+      where: { userId },
     });
     const decryptedClients = clients.map((client) =>
       this.encryptionService.decryptFields(client, ['email', 'phone', 'notes']),
@@ -51,7 +53,7 @@ export class GdprService {
     // relation is not loaded (legacy rows may point at another user's client).
     // Line items another user added through sync are left out.
     const invoices = await this.invoiceRepository.find({
-      where: { userId, deletedAt: null },
+      where: { userId },
       relations: ['items'],
       loadEagerRelations: false,
     });
@@ -147,6 +149,12 @@ export class GdprService {
 
     // Delete audit logs (hard delete for privacy)
     await this.auditLogRepository.delete({ userId });
+
+    // Sync conflicts hold copies of business fields: delete them. Tombstones
+    // stay (ids only) so devices cannot recreate the records, without the
+    // item snapshot kept for restores.
+    await this.auditLogRepository.manager.query('DELETE FROM sync_conflicts WHERE user_id = $1', [userId]);
+    await this.auditLogRepository.manager.query('UPDATE sync_tombstones SET last_state = NULL WHERE user_id = $1', [userId]);
 
     // Soft delete user account (remove deletedAt if User entity doesn't have it)
     await this.userRepository.update(

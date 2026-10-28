@@ -182,6 +182,8 @@ invoiceme/
 
 ## Upgrading an existing installation
 
+For the 2026-10-28 changes (sync protocol 2, payment state, business dates), follow the ordered checklist in [docs/operations/upgrade-2026-10-28.md](docs/operations/upgrade-2026-10-28.md).
+
 Changes merged on 2026-10-25 that an existing installation must account for:
 
 - **Database first.** Apply `backend/migrations/018_add_device_change_change_id.sql` before starting the new server; without it every pushed change is reported as failed. It is idempotent and refuses to run if existing rows would violate the new index. `docs/operations/customer-update.md` is the full procedure.

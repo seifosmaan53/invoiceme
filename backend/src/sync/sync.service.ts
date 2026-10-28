@@ -626,16 +626,20 @@ export class SyncService {
     return repository.findOne({ where: { id, userId } });
   }
 
-  /** Whether the record belongs to a sent, overdue or paid invoice (or is one). */
+  /**
+   * Whether the record belongs to a sent, overdue or paid invoice (or is one).
+   * An item is protected when its current invoice or the invoice it would be
+   * moved to is.
+   */
   async isProtected(objectType: string, existing: any | null, data: Record<string, any>, userId: string): Promise<boolean> {
     if (objectType === ChangeObjectType.INVOICE) {
       return !!existing && PROTECTED_INVOICE_STATUSES.has(existing.status);
     }
     if (objectType === ChangeObjectType.INVOICE_ITEM) {
-      const invoiceId = existing?.invoiceId ?? data.invoiceId;
-      if (!invoiceId) return false;
-      const invoice = await this.invoiceRepository.findOne({ where: { id: invoiceId, userId }, select: ['id', 'status'] });
-      return !!invoice && PROTECTED_INVOICE_STATUSES.has(invoice.status);
+      const invoiceIds = [...new Set([existing?.invoiceId, data.invoiceId].filter(Boolean))];
+      if (invoiceIds.length === 0) return false;
+      const invoices = await this.invoiceRepository.find({ where: { id: In(invoiceIds), userId }, select: ['id', 'status'] });
+      return invoices.some((invoice) => PROTECTED_INVOICE_STATUSES.has(invoice.status));
     }
     return false;
   }
@@ -864,11 +868,10 @@ export class SyncService {
 
     // No resurrection of deleted records.
     if (deleted) return failed('record_deleted');
-    if (existing) {
-      // Without a base revision the server cannot tell a stale write from a current one.
-      if (isProtected) return failed(UPGRADE_REQUIRED);
-      if (await this.openConflictFor(objectType, objectId, userId)) return failed('open_conflict');
-    }
+    // Without a base revision the server cannot tell a stale write from a
+    // current one (this includes an item created in a sent or paid invoice).
+    if (isProtected) return failed(UPGRADE_REQUIRED);
+    if (existing && (await this.openConflictFor(objectType, objectId, userId))) return failed('open_conflict');
     await this.writeRecord(objectType, objectId, existing, data, userId);
     return { status: 'applied' };
   }

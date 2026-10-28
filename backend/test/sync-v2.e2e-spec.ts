@@ -469,6 +469,42 @@ describe('Sync protocol 2 (E2E)', () => {
       expect((await clients.findOneByOrFail({ id: deletedClient })).deletedAt).not.toBeNull();
     });
 
+    it('refuses item creates in, and item moves into, a sent or paid invoice', async () => {
+      const paid = await seed(InvoiceStatus.PAID);
+      const draft = await seed();
+      const moved = uuidv4();
+      await push2(tokenA, [change('invoice_item', moved, 'create', { invoiceId: draft.invoiceId, description: 'Draft line', quantity: 1, unitPrice: 1, lineTotal: 1 })]);
+
+      const res = await push1(tokenA, [
+        {
+          object_type: 'invoice_item',
+          object_id: uuidv4(),
+          change_type: 'create',
+          data: { invoiceId: paid.invoiceId, description: 'Added offline', quantity: 1, unitPrice: 50, lineTotal: 50 },
+          device_id: 'd',
+        },
+        { object_type: 'invoice_item', object_id: moved, change_type: 'update', data: { invoiceId: paid.invoiceId }, device_id: 'd' },
+      ]);
+      expect(res.body.results.map((r: any) => [r.status, r.reason ?? null])).toEqual([
+        ['failed', 'client_upgrade_required'],
+        ['failed', 'client_upgrade_required'],
+      ]);
+      expect(await items.countBy({ invoiceId: paid.invoiceId })).toBe(0);
+
+      // Protocol 2: a stale move into a paid invoice is a protected conflict, never a merge.
+      await items.update({ id: moved }, { description: 'Changed on the server' });
+      const stale = await push2(tokenA, [change('invoice_item', moved, 'update', { invoiceId: paid.invoiceId }, 1)]);
+      expect(stale.body.results[0].status).toBe('conflict');
+      expect((await conflicts.findOneByOrFail({ id: stale.body.results[0].conflict_id })).kind).toBe('protected_invoice');
+      expect((await items.findOneByOrFail({ id: moved })).invoiceId).toBe(draft.invoiceId);
+
+      // Positive control: a protocol-1 item create in a draft invoice still applies.
+      const ok = await push1(tokenA, [
+        { object_type: 'invoice_item', object_id: uuidv4(), change_type: 'create', data: { invoiceId: draft.invoiceId, description: 'Fine', quantity: 1, unitPrice: 1, lineTotal: 1 }, device_id: 'd' },
+      ]);
+      expect(ok.body.results[0].status).toBe('applied');
+    });
+
     it('after the configured cutoff: every write refused with an upgrade notice; reads still work', async () => {
       const { clientId } = await seed();
       const saved = config.legacyWriteCutoff;

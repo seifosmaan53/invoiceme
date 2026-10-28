@@ -135,8 +135,9 @@ Requests without `"protocol": 2` are processed as before (whichever write is
 applied last wins; there is no concurrency guarantee for these apps), except
 where that would bypass a protection they cannot honour:
 
-- update or delete of a sent, overdue or paid invoice (or its items):
-  `failed`, `reason: client_upgrade_required`;
+- update or delete of a sent, overdue or paid invoice (or its items), and
+  creating an item in, or moving an item into, such an invoice: `failed`,
+  `reason: client_upgrade_required`;
 - edit or create of a deleted record: `failed`, `reason: record_deleted`
   (no resurrection, including a replayed old create);
 - update of a record with an open conflict: `failed`, `reason: open_conflict`;

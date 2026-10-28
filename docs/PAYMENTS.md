@@ -19,7 +19,7 @@ read (`GET /invoices/:id`) returns a **payment summary**:
 | `disputed` | amount in an open or lost dispute |
 | `net` | `grossPaid - refunded - disputed`: what the business keeps |
 | `state` | `none`, `paid`, `partially_refunded`, `refunded`, `disputed`, `dispute_lost` |
-| `canReopen` | the invoice is paid and `net` no longer covers the total |
+| `canReopen` | the invoice is paid, `net` no longer covers the total, and no dispute is open |
 
 The three amounts are separate figures; none of them is "the" total.
 Payments in another currency, or flagged for review (amount or currency
@@ -33,7 +33,8 @@ mismatch), are not counted at all.
   state to `paid`; `lost` shows `dispute_lost`. The provider's status and
   amount are recorded on the payment and every update in the event history.
 - **Reopen:** `POST /invoices/:id/reopen` (`write:invoices`) is the only way a
-  paid invoice owes money again. It is allowed when `canReopen` is true and
+  paid invoice owes money again. It is allowed when `canReopen` is true (never
+  while a dispute is open: if it were won the customer would pay twice) and
   sets the status to `sent` (or `overdue` past its due date). Online payment
   then asks only for the amount still due (`total - net`).
 - **Reads** recompute the status from **net** amounts, so a refunded payment
@@ -70,7 +71,8 @@ and dispute events to the webhook endpoint for these states to appear.
 ## Checkout attempts (`POST /invoices/:id/pay`)
 
 Requests for one invoice run one at a time (a database lock), so concurrent
-requests see each other's attempt.
+requests see each other's attempt; the invoice is read again under that lock,
+so one paid or cancelled in the meantime is not charged.
 
 | previous attempt (as Stripe reports it now) | result |
 |---|---|

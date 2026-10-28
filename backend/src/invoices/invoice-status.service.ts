@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThan } from 'typeorm';
+import { Repository, LessThan, IsNull } from 'typeorm';
 import { Invoice, InvoiceStatus } from '../entities/invoice.entity';
 import { NotificationService } from '../core/services/notification.service';
 import { User } from '../entities/user.entity';
@@ -40,7 +40,7 @@ export class InvoiceStatusService {
         where: {
           dueDate: LessThan(today),
           status: InvoiceStatus.SENT,
-          deletedAt: null,
+          deletedAt: IsNull(),
         },
         relations: ['client', 'user'],
       });
@@ -51,7 +51,7 @@ export class InvoiceStatusService {
           {
             dueDate: LessThan(today),
             status: InvoiceStatus.SENT,
-            deletedAt: null,
+            deletedAt: IsNull(),
           },
           {
             status: InvoiceStatus.OVERDUE,
@@ -99,7 +99,7 @@ export class InvoiceStatusService {
       {
         dueDate: LessThan(today),
         status: InvoiceStatus.SENT,
-        deletedAt: null,
+        deletedAt: IsNull(),
       },
       {
         status: InvoiceStatus.OVERDUE,

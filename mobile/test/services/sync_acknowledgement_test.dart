@@ -2,14 +2,12 @@
 import 'package:flutter_test/flutter_test.dart';
 
 // Local imports - Core
-import '../../lib/core/services/sync_service.dart';
+import 'package:invoiceme/core/services/sync_service.dart';
 
 void main() {
   group('acknowledgedChangeIds', () {
     final pending = <Map<String, Object?>>[
-      {'id': 'c0'},
-      {'id': 'c1'},
-      {'id': 'c2'},
+      for (final id in ['c0', 'c1', 'c2']) {'id': id, 'object_type': 'client', 'object_id': 'o-$id'},
     ];
 
     test('uses per-change results: a failure in the middle stays pending', () {
@@ -54,17 +52,27 @@ void main() {
       expect(acknowledgedChangeIds(pending, result), ['c2']);
     });
 
-    test('falls back to the first `synced` changes for servers without results', () {
-      expect(acknowledgedChangeIds(pending, {'synced': 2, 'failed': 1}), ['c0', 'c1']);
+    test('acknowledges merged changes', () {
+      final result = {
+        'results': [
+          {'index': 0, 'status': 'merged', 'revision': 3},
+        ],
+      };
+      expect(acknowledgedChangeIds(pending, result), ['c0']);
+    });
+
+    test('acknowledges nothing for servers without results (no protocol 2)', () {
+      expect(acknowledgedChangeIds(pending, {'synced': 2, 'failed': 1}), isEmpty);
     });
   });
 
   group('ChangeObject.toJson', () {
-    ChangeObject change({String? changeId}) => ChangeObject(
+    ChangeObject change({String? changeId, int? baseRevision, ChangeType type = ChangeType.update}) => ChangeObject(
           changeId: changeId,
+          baseRevision: baseRevision,
           objectType: ChangeObjectType.client,
           objectId: 'o1',
-          changeType: ChangeType.update,
+          changeType: type,
           data: {'name': 'Acme'},
           deviceId: 'd1',
           updatedAt: '2026-10-25T10:00:00.000',
@@ -74,8 +82,13 @@ void main() {
       expect(change(changeId: 'c1').toJson()['change_id'], 'c1');
     });
 
-    test('omits change_id when not set (format accepted by older servers)', () {
+    test('omits change_id when not set', () {
       expect(change().toJson().containsKey('change_id'), isFalse);
+    });
+
+    test('sends base_revision for update, never for create', () {
+      expect(change(baseRevision: 2).toJson()['base_revision'], 2);
+      expect(change(baseRevision: 2, type: ChangeType.create).toJson().containsKey('base_revision'), isFalse);
     });
   });
 }

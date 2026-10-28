@@ -430,6 +430,40 @@ rejects `change_id` with `400` and applies nothing, it resends once without
 different times. Its Dart code and test were not compiled or run in the
 environment that wrote it. CI runs the test (`flutter test test/services/`).
 
+### Protocol-2 client (branch `feat/mobile-sync-v2`, not released)
+
+- Local database version 3: `revision` on cached clients, invoices and
+  items; `pending_changes` gains `base_revision`, `status`
+  (`pending` | `conflict`), `conflict_id`, `last_reason`. The upgrade from
+  versions 1 and 2 checks existing columns, so it is idempotent.
+- Push body `{protocol: 2, deviceId, changes}`; `change_id` = local row id;
+  `base_revision` for update and delete (taken from the local record when the
+  change is queued), never for create; an update queued with the previous
+  values carries only the changed fields. At most one change per record is
+  sent per round (up to 10 rounds per sync); after an `applied` result, later
+  queued changes of that record on the same base move to the returned
+  revision. After `merged` they keep their base, so the server compares them
+  again.
+- Results: `applied`/`merged`/`duplicate` mark the row synced and store the
+  returned `revision`; `conflict` sets status `conflict` and the
+  `conflict_id`, and the row is never resent; `failed` stays pending with its
+  reason. `client_upgrade_required` (reason or notice) shows "update the
+  app".
+- No fallback to protocol 1: a `400` on push, or a response without
+  `results`, stops the sync, keeps the whole queue and shows "Sync needs a
+  server update".
+- Pull: stores `revision`; does not overwrite a record that has a pending
+  change; applies `tombstones` (an invoice also removes its local items and
+  attachments); on `fullResyncRequired` clears the cached tables (not
+  `pending_changes`, and not the rows that still have a pending change) and
+  `last_sync_timestamp`, then pulls once without `since`; stores
+  `openConflicts` for the Settings badge.
+- Conflicts screen (Settings > Data & Sync): list and detail from the
+  conflicts API, field table (your version | current version, conflicting
+  fields highlighted, omitted fields listed), and only the server's
+  `allowed_actions`, sent with `expected_revision` = `current.revision`.
+  Nothing from the API is cached except the open count.
+
 ## Compatibility and rollout
 
 | server \ app | released app (protocol 1) | protocol-2 app |

@@ -28,6 +28,9 @@ class Invoice {
   final Client? client;
   final List<InvoiceItem>? items;
 
+  /// Server revision (sync protocol 2); null until the record was pulled or synced.
+  final int? revision;
+
   Invoice({
     required this.id,
     required this.userId,
@@ -49,6 +52,7 @@ class Invoice {
     this.deletedAt,
     this.client,
     this.items,
+    this.revision,
   });
 
   Map<String, dynamic> toJson() {
@@ -73,6 +77,7 @@ class Invoice {
       'deleted_at': deletedAt?.toIso8601String(),
       'client': client?.toJson(),
       'items': items?.map((item) => item.toJson()).toList(),
+      if (revision != null) 'revision': revision,
     };
   }
 
@@ -112,6 +117,7 @@ class Invoice {
       items: json['items'] != null
           ? (json['items'] as List).map((item) => InvoiceItem.fromJson(item)).toList()
           : null,
+      revision: _parseRevision(json['revision']),
     );
   }
 
@@ -127,6 +133,13 @@ class Invoice {
     }
     if (value is num) return value.toDouble();
     return 0.0;
+  }
+
+  static int? _parseRevision(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
   }
 
   Map<String, dynamic> toDatabaseMap() {
@@ -149,6 +162,7 @@ class Invoice {
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
       'deleted_at': deletedAt?.toIso8601String(),
+      'revision': revision,
     };
   }
 
@@ -180,6 +194,7 @@ class Invoice {
       createdAt: DateTime.tryParse(map['created_at'] ?? '') ?? DateTime.now(),
       updatedAt: DateTime.tryParse(map['updated_at'] ?? '') ?? DateTime.now(),
       deletedAt: map['deleted_at'] != null ? DateTime.parse(map['deleted_at']) : null,
+      revision: _parseRevision(map['revision']),
     );
   }
 

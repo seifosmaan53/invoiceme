@@ -441,7 +441,7 @@ rejects `change_id` with `400` and applies nothing, it resends once without
 different times. Its Dart code and test were not compiled or run in the
 environment that wrote it. CI runs the test (`flutter test test/services/`).
 
-### Protocol-2 client (branch `feat/mobile-sync-v2`, not released)
+### Protocol-2 client (in the mobile source; no app build released yet)
 
 - Local database version 3: `revision` on cached clients, invoices and
   items; `pending_changes` gains `base_revision`, `status`

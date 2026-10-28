@@ -441,6 +441,64 @@ rejects `change_id` with `400` and applies nothing, it resends once without
 different times. Its Dart code and test were not compiled or run in the
 environment that wrote it. CI runs the test (`flutter test test/services/`).
 
+### Protocol-2 client (in the mobile source; no app build released yet)
+
+- Local database version 3: `revision` on cached clients, invoices and
+  items; `pending_changes` gains `base_revision`, `status`
+  (`pending` | `conflict`), `conflict_id`, `last_reason`. The upgrade from
+  versions 1 and 2 checks existing columns, so it is idempotent.
+- Push body `{protocol: 2, deviceId, changes}`; `change_id` = local row id;
+  `base_revision` for update and delete (taken from the local record when the
+  change is queued), never for create; an update queued with the previous
+  values carries only the changed fields. At most one change per record is
+  sent per round (up to 10 rounds per sync); after an `applied` result, later
+  queued changes of that record on the same base move to the returned
+  revision. After `merged` they keep their base, so the server compares them
+  again.
+- Results: `applied`/`merged`/`duplicate` mark the row synced and store the
+  returned `revision`; `conflict` sets status `conflict` and the
+  `conflict_id`, and the row is never resent; `failed` stays pending with its
+  reason. `client_upgrade_required` (reason or notice) shows "update the
+  app".
+- Invoice item changes also carry `parent_revision`: the local revision of
+  the item's invoice when the change was queued (the invoice it is created
+  in or moved to, else its current one; omitted when unknown). The invoice id
+  is kept in `pending_changes.parent_id`. An item change waits while a change
+  of its invoice is sent first; after an `applied` or `merged` invoice result,
+  queued item changes on the same invoice version move to the returned
+  revision. A rebase of a row that was already sent and answered `failed`
+  gives it a new `change_id` (the server stored the old revisions with the
+  old one, and a failed change was not applied); a row never sent keeps its
+  id; a row whose last send got no answer is not rebased (its resend is
+  answered from the stored outcome).
+- A change that keeps failing is given up (`status` `failed`, reason and
+  `attempts` kept) after 3 failed attempts, or at once for
+  `base_revision_required`, `change_id_required`, `change_id_reused`,
+  `invalid_object_id`, `invalid_base_revision`, `not_found`,
+  `record_deleted`. `rejected` (a refusal the server does not explain
+  further) counts. A `failed` result without a reason (older server), a
+  network error or a 5xx is not counted, and a row counts at most one
+  failure per sync. A given-up change is not sent and blocks neither later
+  changes of the record nor pull refreshes; the next pull is a full one
+  (no `since`), because earlier pulls skipped the record. The conflicts
+  screen lists these under "Changes that could not be synced", with
+  "Retry" (back to pending, attempts reset) and "Discard this change"
+  (local only, confirmed).
+- No fallback to protocol 1: a `400` on push, or a response without
+  `results`, stops the sync, keeps the whole queue and shows "Sync needs a
+  server update".
+- Pull: stores `revision`; does not overwrite a record that has a pending
+  change; applies `tombstones` (an invoice also removes its local items and
+  attachments); on `fullResyncRequired` clears the cached tables (not
+  `pending_changes`, and not the rows that still have a pending change) and
+  `last_sync_timestamp`, then pulls once without `since`; stores
+  `openConflicts` for the Settings badge.
+- Conflicts screen (Settings > Data & Sync): list and detail from the
+  conflicts API, field table (your version | current version, conflicting
+  fields highlighted, omitted fields listed), and only the server's
+  `allowed_actions`, sent with `expected_revision` = `current.revision`.
+  Nothing from the API is cached except the open count.
+
 ## Compatibility and rollout
 
 | server \ app | released app (protocol 1) | protocol-2 app |

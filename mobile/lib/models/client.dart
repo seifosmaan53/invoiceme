@@ -14,6 +14,9 @@ class Client {
   final DateTime updatedAt;
   final DateTime? deletedAt;
 
+  /// Server revision (sync protocol 2); null until the record was pulled or synced.
+  final int? revision;
+
   Client({
     required this.id,
     required this.userId,
@@ -27,6 +30,7 @@ class Client {
     required this.createdAt,
     required this.updatedAt,
     this.deletedAt,
+    this.revision,
   });
 
   Map<String, dynamic> toJson() {
@@ -43,6 +47,7 @@ class Client {
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
       'deleted_at': deletedAt?.toIso8601String(),
+      if (revision != null) 'revision': revision,
     };
   }
 
@@ -88,6 +93,7 @@ class Client {
       deletedAt: json['deleted_at'] != null || json['deletedAt'] != null
           ? DateTime.parse(json['deleted_at'] ?? json['deletedAt'])
           : null,
+      revision: _parseRevision(json['revision']),
     );
   }
 
@@ -105,6 +111,7 @@ class Client {
       'created_at': createdAt.toIso8601String(),
       'updated_at': updatedAt.toIso8601String(),
       'deleted_at': deletedAt?.toIso8601String(),
+      'revision': revision,
     };
   }
 
@@ -128,7 +135,15 @@ class Client {
       createdAt: DateTime.parse(map['created_at']),
       updatedAt: DateTime.parse(map['updated_at']),
       deletedAt: map['deleted_at'] != null ? DateTime.parse(map['deleted_at']) : null,
+      revision: _parseRevision(map['revision']),
     );
+  }
+
+  static int? _parseRevision(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) return int.tryParse(value);
+    return null;
   }
 }
 

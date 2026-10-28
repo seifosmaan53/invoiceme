@@ -24,11 +24,15 @@ import '../core/providers/providers.dart';
 import '../core/providers/refresh_provider.dart';
 import '../core/providers/theme_provider.dart';
 import '../core/services/csv_service.dart';
+import '../core/services/sync_conflicts_api.dart';
+import '../core/services/sync_service.dart'
+    show FailedChangesStore, SyncReport, SyncState, failedStatus, lastSyncTimestampKey, pendingStatus, syncOpenConflictsKey, syncStateFromName, syncStateKey, syncStateMessage;
 
 // Local imports - Screens
 import 'api_keys_screen.dart';
 import 'feedback_screen.dart';
 import 'login_screen.dart';
+import 'sync_conflicts_screen.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -1192,6 +1196,9 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
   String? _lastSyncTime;
   String? _syncStatus;
   int _pendingChanges = 0;
+  int _openConflicts = 0;
+  int _failedChanges = 0;
+  SyncState _syncState = SyncState.ok;
   Map<String, int>? _lastSyncStats;
 
   @override
@@ -1205,7 +1212,15 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
     
     try {
       final prefs = await SharedPreferences.getInstance();
-      final lastSync = prefs.getString('last_sync_timestamp');
+      final lastSync = prefs.getString(lastSyncTimestampKey);
+      final openConflicts = prefs.getInt(syncOpenConflictsKey) ?? 0;
+      final syncState = syncStateFromName(prefs.getString(syncStateKey));
+      if (mounted) {
+        setState(() {
+          _openConflicts = openConflicts;
+          _syncState = syncState;
+        });
+      }
       
       if (lastSync != null) {
         final dateTime = DateTime.parse(lastSync);
@@ -1232,13 +1247,21 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
       final db = await DatabaseHelper.getDatabase();
       final pending = await db.query(
         'pending_changes',
-        where: 'synced = ?',
-        whereArgs: [0],
+        where: 'synced = ? AND status = ?',
+        whereArgs: [0, pendingStatus],
+      );
+      
+      final failed = await db.query(
+        'pending_changes',
+        columns: ['id'],
+        where: 'synced = ? AND status = ?',
+        whereArgs: [0, failedStatus],
       );
       
       if (mounted) {
         setState(() {
           _pendingChanges = pending.length;
+          _failedChanges = failed.length;
         });
       }
     } catch (e) {
@@ -1284,17 +1307,26 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
       setState(() => _syncStatus = 'Pushing local changes...');
       
       // Perform sync
-      await widget.syncService.sync();
-      
-      // Get sync statistics
-      final prefs = await SharedPreferences.getInstance();
-      final lastSync = prefs.getString('last_sync_timestamp');
+      final report = await widget.syncService.sync();
       
       if (mounted) {
         Navigator.of(context).pop(); // Close progress dialog
         
         // Reload sync info
         await _loadSyncInfo();
+        if (!mounted) return;
+
+        final problem = report is SyncReport ? report.userMessage : null;
+        if (problem != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(problem),
+              backgroundColor: Colors.orange[800],
+              duration: const Duration(seconds: 6),
+            ),
+          );
+          return;
+        }
         
         // Show success message with stats
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1414,6 +1446,32 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
                 ),
           onTap: _isSyncing ? null : _performSync,
         ),
+        if (syncStateMessage(_syncState) != null && !_isSyncing)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Row(
+              children: [
+                Icon(Icons.system_update, color: Colors.orange[700], size: 20),
+                const SizedBox(width: 12),
+                Expanded(child: Text(syncStateMessage(_syncState)!, style: const TextStyle(fontSize: 13))),
+              ],
+            ),
+          ),
+        if (_openConflicts > 0 || _failedChanges > 0)
+          ListTile(
+            key: const ValueKey('sync-conflicts-tile'),
+            leading: Badge(
+              label: Text('${_openConflicts + _failedChanges}'),
+              child: const Icon(Icons.call_split, color: Colors.orange),
+            ),
+            title: Text([
+              if (_openConflicts > 0) '$_openConflicts sync conflict${_openConflicts == 1 ? '' : 's'} to review',
+              if (_failedChanges > 0) '$_failedChanges change${_failedChanges == 1 ? '' : 's'} could not be synced',
+            ].join(' · ')),
+            subtitle: const Text('Changes from this device that were not applied as sent'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: _openConflictsScreen,
+          ),
         if (_pendingChanges > 0 && !_isSyncing)
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -1443,6 +1501,26 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
           ),
       ],
     );
+  }
+
+  Future<void> _openConflictsScreen() async {
+    final api = ApiSyncConflictsApi(ref.read(apiClientProvider));
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => SyncConflictsScreen(
+        api: api,
+        failedChanges: widget.syncService is FailedChangesStore ? widget.syncService as FailedChangesStore : null,
+      ),
+    ));
+    await _loadSyncInfo();
+    // Refresh the count from the server (only a number is kept on the device).
+    try {
+      final open = await api.listOpen();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(syncOpenConflictsKey, open.length);
+      if (mounted) setState(() => _openConflicts = open.length);
+    } catch (_) {
+      // Keep the last known count; the next sync updates it.
+    }
   }
 
   Widget _buildSubtitle() {

@@ -2,7 +2,7 @@
 import 'dart:async';
 
 // Flutter imports
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 import 'package:sqflite/sqflite.dart';
 
@@ -13,13 +13,17 @@ import 'package:path_provider/path_provider.dart';
 class DatabaseHelper {
   static Database? _database;
 
+  /// 3: sync protocol 2 (record revisions; base revision, status and conflict
+  /// id on queued changes).
+  static const int schemaVersion = 4;
+
   static Future<Database> getDatabase() async {
     if (_database != null) return _database!;
 
     final path = await _getDatabasePath();
     _database = await openDatabase(
       path,
-      version: 2, // Incremented to trigger onUpgrade
+      version: schemaVersion,
       onCreate: _onCreate,
       onUpgrade: _onUpgrade,
     );
@@ -50,7 +54,8 @@ class DatabaseHelper {
         avatar_url TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        deleted_at TEXT
+        deleted_at TEXT,
+        revision INTEGER
       );
     ''');
 
@@ -74,7 +79,8 @@ class DatabaseHelper {
         metadata_json TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
-        deleted_at TEXT
+        deleted_at TEXT,
+        revision INTEGER
       );
     ''');
 
@@ -89,7 +95,8 @@ class DatabaseHelper {
         tax_rate REAL NOT NULL,
         discount_rate REAL NOT NULL,
         line_total REAL NOT NULL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        revision INTEGER
       );
     ''');
 
@@ -119,20 +126,55 @@ class DatabaseHelper {
         change_type TEXT NOT NULL,
         change_json TEXT NOT NULL,
         synced INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        base_revision INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        conflict_id TEXT,
+        last_reason TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        parent_id TEXT,
+        parent_base_revision INTEGER,
+        last_result TEXT
       );
     ''');
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    // Every step checks the existing columns, so running it twice (or on a
+    // database that already has a column) changes nothing.
     if (oldVersion < 2) {
-      // Add avatar_url column to clients_local table
-      try {
-        await db.execute('ALTER TABLE clients_local ADD COLUMN avatar_url TEXT');
-      } catch (e) {
-        // Column might already exist, ignore error
-        debugPrint('Note: avatar_url column may already exist: $e');
+      await _addColumnIfMissing(db, 'clients_local', 'avatar_url', 'TEXT');
+    }
+    // Version 4 repeats the version-3 steps: builds of the unreleased protocol-2
+    // branch created version 3 before every pending_changes column existed.
+    if (oldVersion < 4) {
+      for (final table in ['clients_local', 'invoices_local', 'invoice_items_local']) {
+        await _addColumnIfMissing(db, table, 'revision', 'INTEGER');
+      }
+      for (final column in v3PendingChangeColumns.entries) {
+        await _addColumnIfMissing(db, 'pending_changes', column.key, column.value);
       }
     }
+  }
+
+  /// Columns version 3 adds to pending_changes.
+  static const Map<String, String> v3PendingChangeColumns = {
+    'base_revision': 'INTEGER',
+    'status': "TEXT NOT NULL DEFAULT 'pending'",
+    'conflict_id': 'TEXT',
+    'last_reason': 'TEXT',
+    // Failed attempts with a server reason (given up at 3, see sync_protocol.dart).
+    'attempts': 'INTEGER NOT NULL DEFAULT 0',
+    // Invoice items: the item's invoice and its revision when queued (sent as parent_revision).
+    'parent_id': 'TEXT',
+    'parent_base_revision': 'INTEGER',
+    // What is known about the last send (see sync_protocol.dart rebaseModeOf).
+    'last_result': 'TEXT',
+  };
+
+  static Future<void> _addColumnIfMissing(Database db, String table, String column, String definition) async {
+    final columns = await db.rawQuery('PRAGMA table_info($table)');
+    if (columns.any((c) => c['name'] == column)) return;
+    await db.execute('ALTER TABLE $table ADD COLUMN $column $definition');
   }
 }

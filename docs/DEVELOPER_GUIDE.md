@@ -370,9 +370,22 @@ same file. Lower the baseline in the same change that removes debt.
 
 - **Naming:** snake_case for tables and columns
 - **Primary Keys:** Always UUID v4
-- **Timestamps:** UTC, stored as TIMESTAMPTZ
+- **Timestamps:** UTC, stored as TIMESTAMPTZ (calendar dates: see [Dates and time zones](#dates-and-time-zones))
 - **Soft Deletes:** Use `deleted_at` column
 - **Indexes:** Add indexes for frequently queried columns
+
+### Dates and time zones
+
+Two kinds of time value, handled differently:
+
+- **Calendar dates** (`date` columns: invoice `issue_date`/`due_date`, recurring `start_date`/`end_date`/`next_run_date`) are `YYYY-MM-DD` strings. They are stored and returned exactly as written and never converted through a JS `Date` (which would shift them a day west or east of UTC). Use `backend/src/common/calendar-date.ts`:
+  - `toCalendarDate(value)` / `calendarDateParts(value)`: the written date of a string, or the local date of a `Date`.
+  - `businessToday()`: today's date in `BUSINESS_TIMEZONE` (an IANA name, validated at startup in `main.ts`); unset, in the process's local timezone (`TZ`).
+  - `addCalendarDays(date, n)` / `addCalendarMonths(date, n)`: pure calendar arithmetic, no timezone or DST involved.
+  - Compare calendar dates as strings (`dueDate < businessToday()`) or pass the string to a TypeORM `date` condition.
+- **Instants** (`timestamptz`: `created_at`, `updated_at`, `deleted_at`, token expiry, audit, webhooks) stay UTC instants: `new Date()` is right for those.
+
+Never derive "today" with `new Date().toISOString().split('T')[0]` (that is the UTC date) or `new Date()` passed as a calendar date (server-local). Tests that depend on the date fix the clock (`jest.useFakeTimers({ now })`) and pick an instant where UTC, server and business dates differ; CI runs the date suites and the unit suite again with `TZ=America/New_York`.
 
 ---
 

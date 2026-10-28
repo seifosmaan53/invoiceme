@@ -26,7 +26,7 @@ import '../core/providers/theme_provider.dart';
 import '../core/services/csv_service.dart';
 import '../core/services/sync_conflicts_api.dart';
 import '../core/services/sync_service.dart'
-    show SyncReport, SyncState, lastSyncTimestampKey, pendingStatus, syncOpenConflictsKey, syncStateFromName, syncStateKey, syncStateMessage;
+    show FailedChangesStore, SyncReport, SyncState, failedStatus, lastSyncTimestampKey, pendingStatus, syncOpenConflictsKey, syncStateFromName, syncStateKey, syncStateMessage;
 
 // Local imports - Screens
 import 'api_keys_screen.dart';
@@ -1197,6 +1197,7 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
   String? _syncStatus;
   int _pendingChanges = 0;
   int _openConflicts = 0;
+  int _failedChanges = 0;
   SyncState _syncState = SyncState.ok;
   Map<String, int>? _lastSyncStats;
 
@@ -1250,9 +1251,17 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
         whereArgs: [0, pendingStatus],
       );
       
+      final failed = await db.query(
+        'pending_changes',
+        columns: ['id'],
+        where: 'synced = ? AND status = ?',
+        whereArgs: [0, failedStatus],
+      );
+      
       if (mounted) {
         setState(() {
           _pendingChanges = pending.length;
+          _failedChanges = failed.length;
         });
       }
     } catch (e) {
@@ -1448,14 +1457,17 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
               ],
             ),
           ),
-        if (_openConflicts > 0)
+        if (_openConflicts > 0 || _failedChanges > 0)
           ListTile(
             key: const ValueKey('sync-conflicts-tile'),
             leading: Badge(
-              label: Text('$_openConflicts'),
+              label: Text('${_openConflicts + _failedChanges}'),
               child: const Icon(Icons.call_split, color: Colors.orange),
             ),
-            title: Text('$_openConflicts sync conflict${_openConflicts == 1 ? '' : 's'} to review'),
+            title: Text([
+              if (_openConflicts > 0) '$_openConflicts sync conflict${_openConflicts == 1 ? '' : 's'} to review',
+              if (_failedChanges > 0) '$_failedChanges change${_failedChanges == 1 ? '' : 's'} could not be synced',
+            ].join(' · ')),
             subtitle: const Text('Changes from this device that were not applied as sent'),
             trailing: const Icon(Icons.chevron_right),
             onTap: _openConflictsScreen,
@@ -1494,8 +1506,12 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
   Future<void> _openConflictsScreen() async {
     final api = ApiSyncConflictsApi(ref.read(apiClientProvider));
     await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => SyncConflictsScreen(api: api),
+      builder: (_) => SyncConflictsScreen(
+        api: api,
+        failedChanges: widget.syncService is FailedChangesStore ? widget.syncService as FailedChangesStore : null,
+      ),
     ));
+    await _loadSyncInfo();
     // Refresh the count from the server (only a number is kept on the device).
     try {
       final open = await api.listOpen();

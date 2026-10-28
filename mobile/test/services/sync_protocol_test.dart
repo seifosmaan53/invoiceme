@@ -16,6 +16,9 @@ Map<String, Object?> row(
   String data = '{"name":"Acme"}',
   String status = 'pending',
   int synced = 0,
+  int attempts = 0,
+  String? parentId,
+  int? parentBase,
 }) =>
     {
       'id': id,
@@ -28,6 +31,9 @@ Map<String, Object?> row(
       'base_revision': base,
       'status': status,
       'synced': synced,
+      'attempts': attempts,
+      'parent_id': parentId,
+      'parent_base_revision': parentBase,
     };
 
 void main() {
@@ -101,7 +107,7 @@ void main() {
         PushActionKind.synced,
         PushActionKind.synced,
         PushActionKind.conflict,
-        PushActionKind.keepPending,
+        PushActionKind.giveUp,
       ]);
       expect(a[0].revision, 5);
       expect(a[1].revision, 9);
@@ -202,6 +208,130 @@ void main() {
         ],
       });
       expect(rebasedBaseRevisions(plan.actions.single, first, [row('a2', objectId: 'A', base: 3)]), isEmpty);
+    });
+  });
+
+  group('parent_revision (invoice items)', () {
+    test('present for item create, update and delete when known', () {
+      for (final change in ['create', 'update', 'delete']) {
+        final json = pendingRowToChange(
+          row('i-$change', type: 'invoice_item', change: change, base: 2, parentId: 'inv', parentBase: 5),
+        );
+        expect(json['parent_revision'], 5, reason: change);
+      }
+    });
+
+    test('absent for items when unknown, and for other object types', () {
+      expect(pendingRowToChange(row('i', type: 'invoice_item', parentId: 'inv')).containsKey('parent_revision'), isFalse);
+      expect(pendingRowToChange(row('c', type: 'client', parentBase: 5)).containsKey('parent_revision'), isFalse);
+      expect(pendingRowToChange(row('v', type: 'invoice', parentBase: 5)).containsKey('parent_revision'), isFalse);
+    });
+
+    test('item data names its invoice (create or move)', () {
+      expect(itemInvoiceIdFromData({'invoiceId': 'inv-2', 'quantity': 1}), 'inv-2');
+      expect(itemInvoiceIdFromData({'quantity': 1}), isNull);
+    });
+
+    test('an item change waits while a change of its invoice is in the batch', () {
+      final rows = [
+        row('v1', type: 'invoice', objectId: 'inv', base: 3),
+        row('i1', type: 'invoice_item', objectId: 'it1', parentId: 'inv', parentBase: 3),
+        row('i2', type: 'invoice_item', objectId: 'it1', parentId: 'inv', parentBase: 3),
+        row('j1', type: 'invoice_item', objectId: 'it2', parentId: 'other', parentBase: 1),
+      ];
+      expect(selectPushBatch(rows).map((r) => r['id']), ['v1', 'j1']);
+    });
+
+    for (final status in ['applied', 'merged']) {
+      test('$status invoice result moves queued item changes on the same invoice version', () {
+        final invoice = row('v1', type: 'invoice', objectId: 'inv', base: 3);
+        final later = [
+          invoice,
+          row('i1', type: 'invoice_item', objectId: 'it1', parentId: 'inv', parentBase: 3),
+          row('i2', type: 'invoice_item', objectId: 'it2', parentId: 'inv', parentBase: 2),
+          row('i3', type: 'invoice_item', objectId: 'it3', parentId: 'other', parentBase: 3),
+          row('i4', type: 'invoice_item', objectId: 'it4', parentId: 'inv', parentBase: 3, status: 'failed'),
+        ];
+        final plan = planPushResults([invoice], {
+          'results': [
+            {'index': 0, 'change_id': 'v1', 'status': status, 'revision': 4},
+          ],
+        });
+        expect(rebasedParentRevisions(plan.actions.single, invoice, later), {'i1': 4});
+      });
+    }
+
+    test('items of a newly created invoice get its first revision', () {
+      final invoice = row('v1', type: 'invoice', objectId: 'inv', change: 'create');
+      final item = row('i1', type: 'invoice_item', objectId: 'it1', change: 'create', parentId: 'inv');
+      final plan = planPushResults([invoice], {
+        'results': [
+          {'index': 0, 'change_id': 'v1', 'status': 'applied', 'revision': 1},
+        ],
+      });
+      expect(rebasedParentRevisions(plan.actions.single, invoice, [invoice, item]), {'i1': 1});
+    });
+
+    test('client results and conflicts do not move parent revisions', () {
+      final invoice = row('v1', type: 'invoice', objectId: 'inv', base: 3);
+      final item = row('i1', type: 'invoice_item', objectId: 'it1', parentId: 'inv', parentBase: 3);
+      final plan = planPushResults([invoice], {
+        'results': [
+          {'index': 0, 'change_id': 'v1', 'status': 'conflict', 'conflict_id': 'k'},
+        ],
+      });
+      expect(rebasedParentRevisions(plan.actions.single, invoice, [item]), isEmpty);
+    });
+  });
+
+  group('failed changes (give up)', () {
+    Map<String, dynamic> failedWith(String id, String? reason) => {
+          'results': [
+            {'index': 0, 'change_id': id, 'status': 'failed', if (reason != null) 'reason': reason},
+          ],
+        };
+
+    test('a retryable reason counts attempts and gives up at the third', () {
+      var r = row('c', attempts: 0);
+      var a = planPushResults([r], failedWith('c', 'open_conflict')).actions.single;
+      expect((a.kind, a.attempts), (PushActionKind.keepPending, 1));
+      r = row('c', attempts: 1);
+      a = planPushResults([r], failedWith('c', 'open_conflict')).actions.single;
+      expect((a.kind, a.attempts), (PushActionKind.keepPending, 2));
+      r = row('c', attempts: 2);
+      a = planPushResults([r], failedWith('c', 'open_conflict')).actions.single;
+      expect((a.kind, a.attempts, a.reason), (PushActionKind.giveUp, 3, 'open_conflict'));
+    });
+
+    test('non-retryable reasons give up at once', () {
+      for (final reason in nonRetryableReasons) {
+        final a = planPushResults([row('c')], failedWith('c', reason)).actions.single;
+        expect(a.kind, PushActionKind.giveUp, reason: reason);
+        expect(a.attempts, 1);
+      }
+    });
+
+    test('failed without a reason (server error) is not counted', () {
+      final a = planPushResults([row('c', attempts: 2)], failedWith('c', null)).actions.single;
+      expect((a.kind, a.attempts), (PushActionKind.keepPending, 2));
+    });
+
+    test('a given-up change blocks neither later changes of the record nor pull refreshes', () {
+      final rows = [row('a1', objectId: 'A', status: 'failed'), row('a2', objectId: 'A')];
+      expect(selectPushBatch(rows).map((r) => r['id']), ['a2']);
+      expect(pendingObjectKeys([row('a1', objectId: 'A', status: 'failed')]), isEmpty);
+    });
+
+    test('after a give-up or discard the next pull fetches everything', () {
+      expect(pullSince('2026-10-28T00:00:00Z', fullPullNeeded: true), isNull);
+      expect(pullSince('2026-10-28T00:00:00Z', fullPullNeeded: false), '2026-10-28T00:00:00Z');
+    });
+
+    test('failed change label and reason in plain words', () {
+      final f = FailedChange.fromRow(row('x', type: 'invoice_item', objectId: '1a2b3c4d-9999', status: 'failed')
+        ..['last_reason'] = 'record_deleted');
+      expect(f.label, 'Invoice item 1a2b3c4d (update)');
+      expect(f.reasonText, 'The record was deleted on the server.');
     });
   });
 

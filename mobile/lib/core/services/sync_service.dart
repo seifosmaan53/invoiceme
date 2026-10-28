@@ -30,6 +30,11 @@ const String lastSyncTimestampKey = 'last_sync_timestamp';
 const String syncStateKey = 'sync_state';
 const String syncOpenConflictsKey = 'sync_open_conflicts';
 
+/// Set when a change was given up or discarded: the next pull fetches
+/// everything, because earlier pulls skipped that record while it was queued.
+const String syncFullPullNeededKey = 'sync_full_pull_needed';
+
+
 /// Change object format (protocol 2):
 /// {change_id, base_revision?, object_type, object_id, change_type, data, device_id, updated_at}
 class ChangeObject {
@@ -116,7 +121,7 @@ class _PushOutcome {
 }
 
 /// Sync protocol 2 client (docs/SYNC-CONTRACT.md).
-class SyncService {
+class SyncService implements FailedChangesStore {
   final ApiClient _apiClient;
   // ignore: unused_field
   final DatabaseHelper _dbHelper;
@@ -200,12 +205,14 @@ class SyncService {
       await _applyPushPlan(db, batch, plan, pending);
       synced += plan.count(PushActionKind.synced);
       conflicts += plan.count(PushActionKind.conflict);
-      failed += plan.count(PushActionKind.keepPending);
+      failed += plan.count(PushActionKind.keepPending) + plan.count(PushActionKind.giveUp);
       debugPrint('Sync push round $round: ${plan.count(PushActionKind.synced)} synced, '
           '${plan.count(PushActionKind.conflict)} conflicts, ${plan.count(PushActionKind.keepPending)} pending');
 
-      // Stop when this round acknowledged nothing new: the rest is failing.
-      if (plan.count(PushActionKind.synced) + plan.count(PushActionKind.conflict) == 0) break;
+      // Stop when this round settled nothing: the rest is failing.
+      if (plan.count(PushActionKind.synced) + plan.count(PushActionKind.conflict) + plan.count(PushActionKind.giveUp) == 0) {
+        break;
+      }
     }
     return _PushOutcome(state, synced, conflicts, failed, message);
   }
@@ -231,6 +238,11 @@ class SyncService {
             await db.update('pending_changes', {'base_revision': entry.value},
                 where: 'id = ?', whereArgs: [entry.key]);
           }
+          final reparented = rebasedParentRevisions(action, batch[i], pending);
+          for (final entry in reparented.entries) {
+            await db.update('pending_changes', {'parent_base_revision': entry.value},
+                where: 'id = ?', whereArgs: [entry.key]);
+          }
           break;
         case PushActionKind.conflict:
           await db.update(
@@ -241,8 +253,17 @@ class SyncService {
           );
           break;
         case PushActionKind.keepPending:
-          await db.update('pending_changes', {'last_reason': action.reason},
+          await db.update('pending_changes', {'last_reason': action.reason, 'attempts': action.attempts},
               where: 'id = ?', whereArgs: [action.changeId]);
+          break;
+        case PushActionKind.giveUp:
+          await db.update(
+            'pending_changes',
+            {'status': failedStatus, 'last_reason': action.reason, 'attempts': action.attempts},
+            where: 'id = ?',
+            whereArgs: [action.changeId],
+          );
+          await _markFullPullNeeded();
           break;
       }
     }
@@ -252,7 +273,8 @@ class SyncService {
   Future<int> _pullChanges() async {
     final prefs = await SharedPreferences.getInstance();
     final db = await DatabaseHelper.getDatabase();
-    final lastSync = prefs.getString(lastSyncTimestampKey);
+    final fullPullNeeded = prefs.getBool(syncFullPullNeededKey) ?? false;
+    final lastSync = pullSince(prefs.getString(lastSyncTimestampKey), fullPullNeeded: fullPullNeeded);
 
     var data = await _pull(lastSync);
     if (pullStep(data, sentSince: lastSync != null) == PullStep.fullResync) {
@@ -265,6 +287,7 @@ class SyncService {
     await _applyPull(db, data);
 
     final openConflicts = openConflictsOf(data);
+    if (fullPullNeeded) await prefs.remove(syncFullPullNeededKey);
     await prefs.setInt(syncOpenConflictsKey, openConflicts);
     await prefs.setString(lastSyncTimestampKey, data['lastSyncTimestamp'] as String);
     debugPrint('Sync completed at ${data['lastSyncTimestamp']}');
@@ -351,6 +374,26 @@ class SyncService {
   Future<void> _upsert(Database db, String table, Map<String, dynamic> row) =>
       db.insert(table, row, conflictAlgorithm: ConflictAlgorithm.replace);
 
+  Future<void> _markFullPullNeeded() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(syncFullPullNeededKey, true);
+  }
+
+  @override
+  Future<List<FailedChange>> listFailed() async {
+    final db = await DatabaseHelper.getDatabase();
+    final rows = await db.query('pending_changes',
+        where: 'synced = ? AND status = ?', whereArgs: [0, failedStatus], orderBy: 'created_at ASC');
+    return rows.map(FailedChange.fromRow).toList();
+  }
+
+  @override
+  Future<void> discard(String id) async {
+    final db = await DatabaseHelper.getDatabase();
+    await db.delete('pending_changes', where: 'id = ? AND status = ?', whereArgs: [id, failedStatus]);
+    await _markFullPullNeeded();
+  }
+
   /// Queue a change for sync.
   ///
   /// [baseRevision] is the revision the change is based on; for update and
@@ -358,6 +401,10 @@ class SyncService {
   /// For an update, pass the record's [previous] values (same keys and format
   /// as [data]) and only the changed fields are queued; an update that changes
   /// nothing is not queued. Returns the queued row id, or null.
+  ///
+  /// An invoice item change also records its invoice ([parentId]: the
+  /// invoice it is created in or moved to, else its current one) and that
+  /// invoice's local revision ([parentRevision]), sent as `parent_revision`.
   Future<String?> queueChange({
     required ChangeObjectType objectType,
     required String objectId,
@@ -365,6 +412,8 @@ class SyncService {
     required Map<String, dynamic> data,
     Map<String, dynamic>? previous,
     int? baseRevision,
+    String? parentId,
+    int? parentRevision,
   }) async {
     final db = await DatabaseHelper.getDatabase();
     final prefs = await SharedPreferences.getInstance();
@@ -381,6 +430,13 @@ class SyncService {
       base = baseRevision ?? await _localRevision(db, objectType.name, objectId);
     }
 
+    String? parent;
+    int? parentBase;
+    if (objectType == ChangeObjectType.invoice_item) {
+      parent = parentId ?? itemInvoiceIdFromData(data) ?? await _localItemInvoiceId(db, objectId);
+      parentBase = parentRevision ?? (parent != null ? await _localRevision(db, 'invoice', parent) : null);
+    }
+
     final id = const Uuid().v4();
     await db.insert('pending_changes', {
       'id': id,
@@ -394,8 +450,17 @@ class SyncService {
       'created_at': DateTime.now().toIso8601String(),
       'base_revision': base,
       'status': pendingStatus,
+      'attempts': 0,
+      'parent_id': parent,
+      'parent_base_revision': parentBase,
     });
     return id;
+  }
+
+  Future<String?> _localItemInvoiceId(Database db, String itemId) async {
+    final rows = await db.query('invoice_items_local',
+        columns: ['invoice_id'], where: 'id = ?', whereArgs: [itemId], limit: 1);
+    return rows.isEmpty ? null : rows.first['invoice_id'] as String?;
   }
 
   Future<int?> _localRevision(Database db, String objectType, String objectId) async {

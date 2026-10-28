@@ -130,7 +130,10 @@ class DatabaseHelper {
         base_revision INTEGER,
         status TEXT NOT NULL DEFAULT 'pending',
         conflict_id TEXT,
-        last_reason TEXT
+        last_reason TEXT,
+        attempts INTEGER NOT NULL DEFAULT 0,
+        parent_id TEXT,
+        parent_base_revision INTEGER
       );
     ''');
   }
@@ -157,6 +160,11 @@ class DatabaseHelper {
     'status': "TEXT NOT NULL DEFAULT 'pending'",
     'conflict_id': 'TEXT',
     'last_reason': 'TEXT',
+    // Failed attempts with a server reason (given up at 3, see sync_protocol.dart).
+    'attempts': 'INTEGER NOT NULL DEFAULT 0',
+    // Invoice items: the item's invoice and its revision when queued (sent as parent_revision).
+    'parent_id': 'TEXT',
+    'parent_base_revision': 'INTEGER',
   };
 
   static Future<void> _addColumnIfMissing(Database db, String table, String column, String definition) async {

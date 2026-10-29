@@ -33,6 +33,7 @@ import { StripeService } from '../src/core/services/stripe.service';
 import { NotificationService } from '../src/core/services/notification.service';
 import { EmailService } from '../src/core/services/email.service';
 import { ApiKeysService } from '../src/api-keys/api-keys.service';
+import { listenForTests } from './listen';
 
 // Test-mode placeholders, never sent anywhere: createPaymentIntent is mocked.
 const FAKE_STRIPE_SECRET_KEY = 'sk_test_e2eFakeKeyNeverUsedOnTheNetwork';
@@ -146,7 +147,7 @@ describe('Payments authorization and Stripe webhooks (E2E)', () => {
     app.useGlobalPipes(new ValidationPipe(PRODUCTION_PIPE));
     app.use(express.json({ limit: '10mb' }));
     app.setGlobalPrefix('api');
-    await app.init();
+    await listenForTests(app);
 
     userRepository = moduleFixture.get(getRepositoryToken(User));
     clientRepository = moduleFixture.get(getRepositoryToken(Client));

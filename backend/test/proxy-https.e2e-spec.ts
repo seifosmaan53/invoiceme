@@ -25,6 +25,7 @@ import { AppModule } from '../src/app.module';
 import { User } from '../src/entities/user.entity';
 import { applyHttpSecurity, HttpSecurityEnv } from '../src/core/https-enforcement';
 import { createRateLimiters } from '../src/core/rate-limit';
+import { listenForTests } from './listen';
 
 const LAN = Object.values(os.networkInterfaces())
   .flat()
@@ -82,7 +83,7 @@ async function start(env: Omit<HttpSecurityEnv, 'NODE_ENV'>): Promise<Running> {
   app.use('/api/v1/auth/login', limiters.login);
   app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true }));
   app.setGlobalPrefix('api');
-  await app.init();
+  await listenForTests(app);
 
   const servers: http.Server[] = [];
   const port: Record<string, number> = {};

@@ -80,6 +80,10 @@ class FakeConflictsApi implements SyncConflictsApi {
     if (resolveErrors.isNotEmpty) throw resolveErrors.removeAt(0);
     final resolved = Map<String, dynamic>.from(detail)
       ..['status'] = action == 'dismiss' ? 'dismissed' : 'resolved'
+      // the server's record after the resolution: a new revision unless dismissed
+      ..['current'] = action == 'dismiss' || detail['current'] is! Map
+          ? detail['current']
+          : {...Map<String, dynamic>.from(detail['current'] as Map), 'revision': ((detail['current'] as Map)['revision'] as int) + 1}
       ..['resolution'] = action
       ..['allowed_actions'] = <String>[];
     detail = resolved;
@@ -101,7 +105,8 @@ class FakeFailedStore implements FailedChangesStore {
   final resolved = <String>[];
 
   @override
-  Future<void> conflictResolved(String conflictId, String action) async => resolved.add('$conflictId:$action');
+  Future<void> conflictResolved(String conflictId, String action, {int? currentRevision}) async =>
+      resolved.add('$conflictId:$action:$currentRevision');
   final List<FailedChange> waiting = [];
 
   @override
@@ -126,8 +131,8 @@ class FakeFailedStore implements FailedChangesStore {
   }
 }
 
-Future<void> pumpDetail(WidgetTester tester, FakeConflictsApi api) async {
-  await tester.pumpWidget(MaterialApp(home: SyncConflictDetailScreen(api: api, conflictId: 'k1')));
+Future<void> pumpDetail(WidgetTester tester, FakeConflictsApi api, {FailedChangesStore? localQueue}) async {
+  await tester.pumpWidget(MaterialApp(home: SyncConflictDetailScreen(api: api, conflictId: 'k1', localQueue: localQueue)));
   await tester.pumpAndSettle();
 }
 
@@ -197,10 +202,14 @@ void main() {
   testWidgets('use my version sends apply_client with expected_revision', (tester) async {
     final c = conflictJson();
     final api = FakeConflictsApi(list: [c], detail: detailJson(c, revision: 5));
-    await pumpDetail(tester, api);
+    final store = FakeFailedStore([]);
+    await pumpDetail(tester, api, localQueue: store);
     await tester.tap(find.text('Use my version'));
     await tester.pumpAndSettle();
     expect(api.resolves.single, (id: 'k1', action: 'apply_client', expected: 5));
+    // The local queue learns the record's revision after the resolution, so it
+    // drops only older held server rows
+    expect(store.resolved, ['k1:apply_client:6']);
   });
 
   testWidgets('restore of a deleted record sends restore with expected_revision', (tester) async {

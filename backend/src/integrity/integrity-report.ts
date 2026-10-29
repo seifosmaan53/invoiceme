@@ -106,6 +106,7 @@ export const SCHEMA_MARKERS: { migration: string; table: string; column?: string
   { migration: '019', table: 'sync_conflicts' },
   { migration: '020', table: 'payment_events' },
   { migration: '021', table: 'sync_tombstones', column: 'change_txid' },
+  { migration: '022', table: 'system_state' },
 ];
 
 export function missingRequirements(requires: SchemaRequirements, live: LiveSchema): string[] {

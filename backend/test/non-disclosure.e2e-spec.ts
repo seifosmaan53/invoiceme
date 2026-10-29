@@ -24,6 +24,7 @@ import { Client } from '../src/entities/client.entity';
 import { Invoice } from '../src/entities/invoice.entity';
 import { InvoiceTemplate } from '../src/entities/invoice-template.entity';
 import { ApiKey } from '../src/entities/api-key.entity';
+import { listenForTests } from './listen';
 
 type Method = 'get' | 'post' | 'patch' | 'delete';
 
@@ -68,7 +69,7 @@ describe('Non-disclosing responses for records of another user (E2E)', () => {
     app.useGlobalFilters(new GlobalExceptionFilter(config));
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true, transformOptions: { enableImplicitConversion: true } }));
     app.setGlobalPrefix('api');
-    await app.init();
+    await listenForTests(app);
 
     ds = moduleFixture.get(DataSource);
     await ds.query('TRUNCATE TABLE ' + ds.entityMetadatas.map((m) => `"${m.tableName}"`).join(', ') + ' RESTART IDENTITY CASCADE');

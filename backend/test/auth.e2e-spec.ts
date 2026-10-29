@@ -11,6 +11,7 @@ import { RefreshToken } from '../src/entities/refresh-token.entity';
 import { PasswordResetToken } from '../src/entities/password-reset-token.entity';
 import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
+import { listenForTests } from './listen';
 
 describe('Auth E2E Tests', () => {
   let app: INestApplication;
@@ -57,7 +58,7 @@ describe('Auth E2E Tests', () => {
 
     );
     app.setGlobalPrefix('api');
-    await app.init();
+    await listenForTests(app);
 
     userRepository = moduleFixture.get<Repository<User>>(getRepositoryToken(User));
     refreshTokenRepository = moduleFixture.get<Repository<RefreshToken>>(getRepositoryToken(RefreshToken));

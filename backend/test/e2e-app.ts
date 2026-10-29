@@ -18,6 +18,7 @@ import { EmailService } from '../src/core/services/email.service';
 import { NotificationService } from '../src/core/services/notification.service';
 import { PdfService } from '../src/core/services/pdf.service';
 import { S3Service } from '../src/core/services/s3.service';
+import { listenForTests } from './listen';
 
 export const mockEmailService = {
   sendInvoiceEmail: jest.fn(),
@@ -99,7 +100,7 @@ export async function createE2eApp(options: { controllers?: any[]; imports?: any
     }),
   );
   app.setGlobalPrefix('api');
-  await app.init();
+  await listenForTests(app);
 
   const users = moduleFixture.get<Repository<User>>(getRepositoryToken(User));
   const dataSource = users.manager.connection;

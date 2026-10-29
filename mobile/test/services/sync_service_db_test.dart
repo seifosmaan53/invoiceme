@@ -43,6 +43,10 @@ class FakeApi extends ApiClient {
   /// Closed conflicts: id -> resolution (dismiss, apply_client, restore).
   Map<String, String> closedConflicts = {};
 
+  /// Closed conflicts: id -> the record's revision after the resolution
+  /// (`current.revision` of the conflict detail); absent = not reported.
+  Map<String, int> closedRevisions = {};
+
   /// GET /sync/conflicts/:id answers this HTTP status instead.
   Map<String, int> detailErrors = {};
   final detailCalls = <String>[];
@@ -96,6 +100,7 @@ class FakeApi extends ApiClient {
           'id': id,
           'status': open ? 'open' : (closedConflicts[id] == 'dismiss' ? 'dismissed' : 'resolved'),
           'resolution': open ? null : closedConflicts[id],
+          if (closedRevisions.containsKey(id)) 'current': {'revision': closedRevisions[id], 'deleted': false},
         },
         statusCode: 200,
       );
@@ -530,21 +535,31 @@ void main() {
       await db.close();
     });
 
-    test('(e) upgrade to version 6 is idempotent and keeps held rows', () async {
+    test('(e) upgrades to versions 6 and 7 are idempotent and keep held rows and the check rotation', () async {
       var db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
-      expect(await db.getVersion(), 6);
-      // A version-5 database: no held-rows table yet.
+      expect(await db.getVersion(), DatabaseHelper.schemaVersion);
+      // A version-5 database: no held-rows or conflict-check table yet.
       await db.execute('DROP TABLE sync_held_rows');
+      await db.execute('DROP TABLE sync_conflict_checks');
       await db.setVersion(5);
       await db.close();
       db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
       await db.insert('sync_held_rows',
           {'object_type': 'client', 'object_id': 'x', 'revision': 2, 'row_json': '{}', 'held_at': 'now'});
-      // Upgrading again over an existing table changes nothing.
+      await db.insert('sync_conflict_checks', {'conflict_id': 'k', 'check_seq': 3});
+      // Upgrading again over existing tables changes nothing.
       await db.setVersion(5);
       await db.close();
       db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
-      expect(await db.getVersion(), 6);
+      expect(await db.getVersion(), DatabaseHelper.schemaVersion);
+      expect((await db.query('sync_held_rows')).single['object_id'], 'x');
+      expect((await db.query('sync_conflict_checks')).single['check_seq'], 3);
+      // A version-6 database gains only the check table.
+      await db.execute('DROP TABLE sync_conflict_checks');
+      await db.setVersion(6);
+      await db.close();
+      db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
+      expect(await db.query('sync_conflict_checks'), isEmpty);
       expect((await db.query('sync_held_rows')).single['object_id'], 'x');
       await db.close();
     });
@@ -628,12 +643,134 @@ void main() {
       await db.close();
     });
 
+    test('more than 50 conflicts: checks rotate across syncs and an app restart, so none is starved', () async {
+      var (service, db) = await open();
+      const n = 120;
+      for (var i = 0; i < n; i++) {
+        await db.insert('pending_changes', {
+          'id': 'row-$i', 'user_id': 'u', 'device_id': 'd', 'object_type': 'client', 'object_id': 'x$i',
+          'change_type': 'update', 'change_json': '{}', 'synced': 0,
+          'created_at': '2026-10-01T00:${(i ~/ 60).toString().padLeft(2, '0')}:${(i % 60).toString().padLeft(2, '0')}Z',
+          'status': 'conflict', 'conflict_id': 'k$i',
+        });
+      }
+      // All open on the server except the newest, resolved on the web; the
+      // clock never moves, so the rotation cannot depend on time.
+      api.openConflictIds = [for (var i = 0; i < n - 1; i++) 'k$i'];
+      api.closedConflicts = {'k${n - 1}': 'dismiss'};
+      final localConflicts = () async => (await db.query('pending_changes', where: 'status = ?', whereArgs: ['conflict'])).length;
+
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 0; i < 50; i++) 'k$i'], reason: 'first sync: oldest first');
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 50; i < 100; i++) 'k$i'], reason: 'second sync: the next 50, not the same ones');
+      expect(await localConflicts(), n);
+      await db.close();
+
+      // Restart: the rotation is stored in the database
+      (service, db) = await open();
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 100; i < n; i++) 'k$i', for (var i = 0; i < 30; i++) 'k$i'],
+          reason: 'after restart: the never-checked ones, then the least recently checked');
+      expect(await localConflicts(), n - 1, reason: 'the newest conflict, resolved elsewhere, is forgotten');
+      expect(await db.query('pending_changes', where: 'conflict_id = ?', whereArgs: ['k${n - 1}']), isEmpty);
+
+      // Every still-open conflict keeps being revisited
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 30; i < 80; i++) 'k$i']);
+      await db.close();
+    });
+
+    test('resolved elsewhere with the device version while a pull holds the re-delivered row: it is kept, not dropped', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'u3');
+      await pullDuringBackoff(service, db, 'u3'); // holds the server's revision 2
+      await conflictOn(service, 'u3', 'k-u3');
+
+      // The user edits the record again, so it has a pending change and pull
+      // deliveries are held. Meanwhile the conflict is resolved on the web with
+      // the device's version (revision 3). This sync's push fails temporarily,
+      // its conflict check fails, and its pull holds the re-delivered record.
+      await service.queueChange(
+          objectType: ChangeObjectType.client, objectId: 'u3', changeType: ChangeType.update, data: {'email': 'later@example.test'});
+      api.openConflictIds = [];
+      api.closedConflicts = {'k-u3': 'apply_client'};
+      api.closedRevisions = {'k-u3': 3};
+      api.detailErrors = {'k-u3': 500};
+      api.pushReplies.add((b) => resultFor(b, 'failed', reason: 'retry_later'));
+      api.pages = {'p1': FakeApi.emptyPage('p2', clients: [serverClient('u3', 'Device (resolved)', 3)])};
+      await service.sync();
+      var held = await db.query('sync_held_rows', where: 'object_id = ?', whereArgs: ['u3']);
+      expect(held.single['revision'], 3);
+
+      // The next check succeeds while the new change still waits: the held
+      // post-resolution row must survive (it is never delivered again)
+      api.detailErrors = {};
+      api.pages = {'p2': FakeApi.emptyPage('p3')};
+      await service.sync();
+      expect(await db.query('pending_changes', where: 'conflict_id = ?', whereArgs: ['k-u3']), isEmpty);
+      held = await db.query('sync_held_rows', where: 'object_id = ?', whereArgs: ['u3']);
+      expect(held.single['revision'], 3, reason: 'kept: it is the server state after the resolution');
+      await db.close();
+    });
+
+    test('resolved with the device version and no revision reported: held rows are kept, not dropped', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'u4');
+      await pullDuringBackoff(service, db, 'u4');
+      await conflictOn(service, 'u4', 'k-u4');
+      await service.conflictResolved('k-u4', 'apply_client');
+      // Nothing is lost: the held server row is applied (the server's re-delivery corrects it if older)
+      expect((await local(db, 'u4'))['revision'], 2);
+      expect(await heldCount(db), 0);
+      await db.close();
+    });
+
+    test('a burst of new conflicts cannot starve the ones already queued', () async {
+      final (service, db) = await open();
+      Future<void> addConflicts(String prefix, int count, int minute) async {
+        for (var i = 0; i < count; i++) {
+          await db.insert('pending_changes', {
+            'id': 'row-$prefix$i', 'user_id': 'u', 'device_id': 'd', 'object_type': 'client', 'object_id': 'x$prefix$i',
+            'change_type': 'update', 'change_json': '{}', 'synced': 0,
+            'created_at': '2026-10-01T00:${minute.toString().padLeft(2, '0')}:${i.toString().padLeft(2, '0')}Z',
+            'status': 'conflict', 'conflict_id': '$prefix$i',
+          });
+        }
+        api.openConflictIds = [...api.openConflictIds, for (var i = 0; i < count; i++) '$prefix$i'];
+      }
+
+      await addConflicts('old', 60, 0);
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 0; i < 50; i++) 'old$i']);
+
+      // 60 new conflicts arrive before every sync; the 10 remaining old ones still come next
+      // 60 new conflicts arrive before each sync. They join the back of the
+      // queue, so the 10 old ones never checked yet come first, not the newcomers.
+      await addConflicts('new-a', 60, 10);
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 50; i < 60; i++) 'old$i', for (var i = 0; i < 40; i++) 'old$i']);
+
+      await addConflicts('new-b', 60, 20);
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 40; i < 50; i++) 'old$i', for (var i = 0; i < 40; i++) 'new-a$i'],
+          reason: 'round-robin: each conflict waits at most one pass over the queue');
+      await db.close();
+    });
+
     test('C: after "Use my version" the held (older) server row is dropped, not applied', () async {
       final (service, db) = await open();
       await localEdit(service, db, 'u1');
       await pullDuringBackoff(service, db, 'u1');
       await conflictOn(service, 'u1', 'k-u1');
-      await service.conflictResolved('k-u1', 'apply_client');
+      await service.conflictResolved('k-u1', 'apply_client', currentRevision: 3);
       expect((await local(db, 'u1'))['name'], 'Device');
       expect(await heldCount(db), 0);
       expect(await db.query('pending_changes', where: 'status = ?', whereArgs: ['conflict']), isEmpty);
@@ -647,6 +784,7 @@ void main() {
       await conflictOn(service, 'u2', 'k-u2');
       api.openConflictIds = [];
       api.closedConflicts = {'k-u2': 'apply_client'};
+      api.closedRevisions = {'k-u2': 3};
       await service.sync();
       expect((await local(db, 'u2'))['name'], 'Device');
       expect(await heldCount(db), 0);

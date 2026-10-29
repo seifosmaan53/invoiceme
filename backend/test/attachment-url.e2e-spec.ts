@@ -22,6 +22,7 @@ import { Invoice, InvoiceType, InvoiceStatus } from '../src/entities/invoice.ent
 import { Attachment, AttachmentOwnerType } from '../src/entities/attachment.entity';
 import { ChangeType, ChangeObjectType } from '../src/entities/device-change.entity';
 import { S3Service } from '../src/core/services/s3.service';
+import { listenForTests } from './listen';
 
 // Same options as src/main.ts
 const PRODUCTION_PIPE: ValidationPipeOptions = {
@@ -107,7 +108,7 @@ describe('Attachment URLs (E2E)', () => {
     app = moduleFixture.createNestApplication();
     app.useGlobalPipes(new ValidationPipe(PRODUCTION_PIPE));
     app.setGlobalPrefix('api');
-    await app.init();
+    await listenForTests(app);
 
     userRepository = moduleFixture.get(getRepositoryToken(User));
     clientRepository = moduleFixture.get(getRepositoryToken(Client));

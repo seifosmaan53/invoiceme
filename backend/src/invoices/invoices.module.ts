@@ -10,6 +10,7 @@ import { InvoiceItem } from '../entities/invoice-item.entity';
 import { Client } from '../entities/client.entity';
 import { Attachment } from '../entities/attachment.entity';
 import { Payment } from '../entities/payment.entity';
+import { SystemState } from '../entities/system-state.entity';
 import { CoreServicesModule } from '../core/core-services.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { ApiKeysModule } from '../api-keys/api-keys.module';
@@ -17,7 +18,7 @@ import { UserSettingsModule } from '../user-settings/user-settings.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Invoice, InvoiceItem, Client, Attachment, User, Payment]),
+    TypeOrmModule.forFeature([Invoice, InvoiceItem, Client, Attachment, User, Payment, SystemState]),
     CoreServicesModule,
     PaymentsModule,
     ApiKeysModule,

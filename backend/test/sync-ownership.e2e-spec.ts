@@ -14,6 +14,7 @@ import { Invoice, InvoiceType, InvoiceStatus } from '../src/entities/invoice.ent
 import { InvoiceItem } from '../src/entities/invoice-item.entity';
 import { Attachment, AttachmentOwnerType } from '../src/entities/attachment.entity';
 import { ChangeType, ChangeObjectType } from '../src/entities/device-change.entity';
+import { listenForTests } from './listen';
 
 /**
  * Regression tests for cross-account access through /api/v1/sync.
@@ -64,7 +65,7 @@ async function createApp(pipeOptions: ValidationPipeOptions): Promise<{ app: INe
   const app = moduleFixture.createNestApplication();
   app.useGlobalPipes(new ValidationPipe(pipeOptions));
   app.setGlobalPrefix('api');
-  await app.init();
+  await listenForTests(app);
   return { app, moduleFixture };
 }
 

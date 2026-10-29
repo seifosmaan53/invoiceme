@@ -530,7 +530,11 @@ class SyncService implements FailedChangesStore {
     }
   }
 
-  /// Conflicts checked per pull (oldest first).
+  /// Conflicts checked per pull, round-robin: a queue stored in
+  /// sync_conflict_checks (a sequence, not a clock) that new conflicts join
+  /// at the back (oldest first) and checked ones return to. A conflict is
+  /// checked within ceil(q / 50) pulls, q = the queue length when it joined
+  /// or was last checked, however many new conflicts arrive; across restarts.
   static const int maxConflictChecksPerSync = 50;
 
   /// Local conflict rows whose conflict is no longer open on the server
@@ -539,23 +543,35 @@ class SyncService implements FailedChangesStore {
   /// is checked on its own (`GET /sync/conflicts/:id`; the list is capped by
   /// the server): 404 or not open => forget it; any other error => keep it.
   Future<void> _forgetResolvedConflicts(Database db) async {
-    final local = await db.query('pending_changes',
-        columns: ['conflict_id'],
-        where: 'synced = ? AND status = ? AND conflict_id IS NOT NULL',
-        whereArgs: [0, conflictStatus],
-        orderBy: 'created_at ASC');
-    final ids = <String>[];
-    for (final row in local) {
-      final id = row['conflict_id'] as String;
-      if (!ids.contains(id)) ids.add(id);
-      if (ids.length >= maxConflictChecksPerSync) break;
+    // Conflicts no longer held locally leave the queue
+    await db.rawDelete('''
+        DELETE FROM sync_conflict_checks WHERE conflict_id NOT IN (
+          SELECT conflict_id FROM pending_changes WHERE synced = 0 AND status = ? AND conflict_id IS NOT NULL)''',
+        [conflictStatus]);
+    // New conflicts join the back of the queue, oldest first
+    final joining = await db.rawQuery('''
+        SELECT p.conflict_id AS conflict_id FROM pending_changes p
+         WHERE p.synced = 0 AND p.status = ? AND p.conflict_id IS NOT NULL
+           AND p.conflict_id NOT IN (SELECT conflict_id FROM sync_conflict_checks)
+         GROUP BY p.conflict_id ORDER BY MIN(p.created_at), p.conflict_id''', [conflictStatus]);
+    for (final row in joining) {
+      await _moveToBackOfChecks(db, row['conflict_id'] as String);
     }
+    final front = await db.query('sync_conflict_checks',
+        columns: ['conflict_id'], orderBy: 'check_seq ASC', limit: maxConflictChecksPerSync);
+    final ids = [for (final row in front) row['conflict_id'] as String];
     for (final id in ids) {
+      // Back of the queue before the request, so a failing check is retried
+      // only after the others
+      await _moveToBackOfChecks(db, id);
       try {
         final res = await _apiClient.get('/sync/conflicts/${Uri.encodeComponent(id)}', useCache: false);
         final data = res.data;
         if (data is! Map || data['status'] == 'open') continue;
-        await _forgetConflict(db, id, dropHeld: data['resolution'] != 'dismiss');
+        final current = data['current'];
+        await _forgetConflict(db, id,
+            dropHeld: data['resolution'] != 'dismiss',
+            currentRevision: current is Map ? parseRevision(current['revision']) : null);
       } on DioException catch (e) {
         if (e.response?.statusCode == 404) {
           // Gone (pruned after retention): the server row stands.
@@ -569,22 +585,37 @@ class SyncService implements FailedChangesStore {
     }
   }
 
+  Future<void> _moveToBackOfChecks(Database db, String conflictId) => db.rawInsert('''
+      INSERT OR REPLACE INTO sync_conflict_checks (conflict_id, check_seq)
+      VALUES (?, (SELECT COALESCE(MAX(check_seq), 0) + 1 FROM sync_conflict_checks))''', [conflictId]);
+
   @override
-  Future<void> conflictResolved(String conflictId, String action) async {
+  Future<void> conflictResolved(String conflictId, String action, {int? currentRevision}) async {
     final db = await _db();
-    await _forgetConflict(db, conflictId, dropHeld: action != 'dismiss');
+    await _forgetConflict(db, conflictId, dropHeld: action != 'dismiss', currentRevision: currentRevision);
     await _applyHeldRows(db);
   }
 
-  /// Removes the local rows of [conflictId]; with [dropHeld], also the server
-  /// rows held for those records (a resolution wrote a newer server version).
-  Future<void> _forgetConflict(Database db, String conflictId, {required bool dropHeld}) async {
+  /// Removes the local rows of [conflictId]. With [dropHeld] (resolved with
+  /// the device's version), also the server rows held for those records that
+  /// are older than [currentRevision], the record's revision after the
+  /// resolution: a held row at or above it already is the server's state
+  /// after the resolution (the server re-delivers resolved records, and a
+  /// pull may have held that delivery before this conflict was checked), so
+  /// it stays and is applied. With [currentRevision] unknown nothing is
+  /// dropped; an older held row then shows until the re-delivery replaces it.
+  Future<void> _forgetConflict(Database db, String conflictId, {required bool dropHeld, int? currentRevision}) async {
     final rows = await db.query('pending_changes',
         where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, conflictId]);
     await db.delete('pending_changes',
         where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, conflictId]);
-    if (dropHeld) {
-      await _dropHeld(db, [for (final r in rows) (r['object_type'] as String, r['object_id'] as String)]);
+    await db.delete('sync_conflict_checks', where: 'conflict_id = ?', whereArgs: [conflictId]);
+    if (dropHeld && currentRevision != null) {
+      for (final r in rows) {
+        await db.delete('sync_held_rows',
+            where: 'object_type = ? AND object_id = ? AND (revision IS NULL OR revision < ?)',
+            whereArgs: [r['object_type'], r['object_id'], currentRevision]);
+      }
     }
   }
 

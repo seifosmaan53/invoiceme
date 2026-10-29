@@ -15,6 +15,7 @@ import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
 import { StripeService } from '../src/core/services/stripe.service';
 import { InvoiceType, InvoiceStatus } from '../src/entities/invoice.entity';
+import { listenForTests } from './listen';
 
 describe('Payments E2E Tests', () => {
   let app: INestApplication;
@@ -75,7 +76,7 @@ describe('Payments E2E Tests', () => {
 
     );
     app.setGlobalPrefix('api');
-    await app.init();
+    await listenForTests(app);
 
     userRepository = moduleFixture.get<Repository<User>>(getRepositoryToken(User));
     clientRepository = moduleFixture.get<Repository<Client>>(getRepositoryToken(Client));

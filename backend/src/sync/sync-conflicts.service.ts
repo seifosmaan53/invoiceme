@@ -15,6 +15,16 @@ import { SyncTombstone } from '../entities/sync-tombstone.entity';
 import { conflictFields } from './conflict-fields';
 import { SyncSchemaService } from './sync-schema.service';
 import { SyncService } from './sync.service';
+import { Invoice } from '../entities/invoice.entity';
+import { InvoiceItem } from '../entities/invoice-item.entity';
+import { calculateLineTotal, calculateTotals } from '../invoices/invoice-totals';
+import { PROTECTED_INVOICE_STATUSES } from './sync.service';
+
+/** Derived amounts a resolution never takes from the device. */
+const DERIVED_FIELDS: Record<string, string[]> = {
+  [ChangeObjectType.INVOICE]: ['subtotal', 'taxTotal', 'discountTotal', 'total'],
+  [ChangeObjectType.INVOICE_ITEM]: ['lineTotal'],
+};
 
 export type ConflictAction = 'apply_client' | 'restore' | 'dismiss';
 
@@ -207,15 +217,30 @@ export class SyncConflictsService {
     });
   }
 
+  /**
+   * Fields a resolution may write for this record type. Invoice totals and an
+   * item's line total are never taken from the device: they are derived from
+   * the lines (invoices/invoice-totals.ts) after the write.
+   */
+  private editableFields(bound: SyncService, objectType: string, fields: Record<string, any>): Record<string, any> {
+    const data = bound.writableFields(bound.repositoryFor(objectType), fields);
+    for (const derived of DERIVED_FIELDS[objectType] ?? []) delete data[derived];
+    return data;
+  }
+
   private async applyClient(bound: SyncService, manager: any, conflict: SyncConflict, userId: string, expected: number) {
     const record = await bound.findOwnedRecord(conflict.objectType, conflict.objectId, userId);
     if (!record || record.deletedAt) throw new ConflictException('The record was deleted; restore it instead');
     if (record.revision !== expected) this.stale(record.revision);
-    const data = bound.writableFields(bound.repositoryFor(conflict.objectType), conflict.clientFields);
+    const data = this.editableFields(bound, conflict.objectType, conflict.clientFields);
     if (await bound.isProtected(conflict.objectType, record, data, userId)) {
       throw new UnprocessableEntityException('This invoice is sent or paid; edit it directly instead');
     }
+    if (conflict.objectType === ChangeObjectType.INVOICE_ITEM) {
+      data.lineTotal = calculateLineTotal({ ...record, ...data });
+    }
     await bound.writeRecord(conflict.objectType, conflict.objectId, record, data, userId);
+    await this.recomputeTotalsAfter(manager, conflict.objectType, conflict.objectType === ChangeObjectType.INVOICE ? conflict.objectId : record.invoiceId, userId);
   }
 
   private async restore(bound: SyncService, manager: any, conflict: SyncConflict, userId: string, expected: number) {
@@ -226,9 +251,7 @@ export class SyncConflictsService {
     if (record && !record.deletedAt) throw new ConflictException('The record is not deleted');
 
     const clientEdits =
-      conflict.kind === SyncConflictKind.EDIT_AFTER_DELETE
-        ? bound.writableFields(bound.repositoryFor(objectType), conflict.clientFields)
-        : {};
+      conflict.kind === SyncConflictKind.EDIT_AFTER_DELETE ? this.editableFields(bound, objectType, conflict.clientFields) : {};
 
     if (record) {
       // Soft-deleted client or invoice: undo the delete (the trigger removes the tombstone).
@@ -246,23 +269,51 @@ export class SyncConflictsService {
         const restored = await bound.findOwnedRecord(objectType, objectId, userId);
         await bound.writeRecord(objectType, objectId, restored, clientEdits, userId);
       }
+      if (objectType === ChangeObjectType.INVOICE) await this.recomputeTotalsAfter(manager, objectType, objectId, userId);
       return;
     }
 
-    // Hard-deleted invoice item: recreate it from the state kept with its tombstone.
+    // Hard-deleted invoice item: recreate it from the state kept with its
+    // tombstone, through the invoice rules: only into the same, active,
+    // still-editable invoice, with its line total and the invoice totals
+    // recomputed in this transaction.
     if (!tombstone || objectType !== ChangeObjectType.INVOICE_ITEM || !tombstone.lastState) {
       throw new UnprocessableEntityException('The deleted record can no longer be restored');
     }
     if (tombstone.revision !== expected) this.stale(tombstone.revision);
-    const state = bound.writableFields(bound.repositoryFor(objectType), bound.fromColumns(objectType, tombstone.lastState));
-    const data = { ...state, ...clientEdits, invoiceId: state.invoiceId };
-    if (await bound.isProtected(objectType, null, data, userId)) {
-      if (Object.keys(clientEdits).length > 0) {
-        throw new UnprocessableEntityException('This invoice is sent or paid; restore the item without the offline edits or edit the invoice directly');
-      }
+    const state = this.editableFields(bound, objectType, bound.fromColumns(objectType, tombstone.lastState));
+    const data: Record<string, any> = { ...state, ...clientEdits, invoiceId: state.invoiceId };
+    const [parent] = await bound.itemInvoices(null, data, userId); // row-locked
+    if (!parent) {
+      throw new UnprocessableEntityException("The line's invoice no longer exists; the line cannot be restored");
     }
+    if (PROTECTED_INVOICE_STATUSES.has(parent.status)) {
+      throw new UnprocessableEntityException(
+        'This invoice is sent or paid; a line cannot be restored into it. Edit the invoice directly, or dismiss this conflict.',
+      );
+    }
+    data.lineTotal = calculateLineTotal(data as any);
     await tombstones.delete({ objectType, objectId });
     await bound.writeRecord(objectType, objectId, null, data, userId);
+    await this.recomputeTotalsAfter(manager, objectType, data.invoiceId, userId);
+  }
+
+  /**
+   * Recompute an invoice's subtotal, tax, discount and total from its lines
+   * (the same rules as the REST service), on the locked invoice row, when it
+   * has lines. Runs in the resolution's transaction.
+   */
+  private async recomputeTotalsAfter(manager: any, objectType: string, invoiceId: string | null | undefined, userId: string) {
+    if (!invoiceId || (objectType !== ChangeObjectType.INVOICE_ITEM && objectType !== ChangeObjectType.INVOICE)) return;
+    const owned = await manager.query(
+      'SELECT id FROM invoices WHERE id::text = $1 AND user_id::text = $2 AND deleted_at IS NULL FOR UPDATE',
+      [String(invoiceId), String(userId)],
+    );
+    if (owned.length === 0) return;
+    const lines = await manager.getRepository(InvoiceItem).find({ where: { invoiceId } });
+    if (lines.length === 0) return;
+    const totals = calculateTotals(lines);
+    await manager.getRepository(Invoice).update(invoiceId, totals);
   }
 
   private async assertActiveClient(manager: any, clientId: string, userId: string) {

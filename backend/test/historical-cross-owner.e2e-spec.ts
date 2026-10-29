@@ -581,7 +581,16 @@ describe('Historical cross-owner rows (E2E)', () => {
       const past = new Date('2020-01-01');
       await invoiceRepository.update({ id: invoiceBad.id }, { status: InvoiceStatus.SENT, dueDate: past });
       await invoiceRepository.update({ id: invoiceA.id }, { status: InvoiceStatus.SENT, dueDate: past });
-      await app.get(InvoiceStatusService).markOverdueInvoices();
+      // Due in 2020: outside the default notification window, so notify the
+      // backlog explicitly (OVERDUE_NOTIFY_MAX_AGE_DAYS=all) to test its contents
+      const savedWindow = process.env.OVERDUE_NOTIFY_MAX_AGE_DAYS;
+      process.env.OVERDUE_NOTIFY_MAX_AGE_DAYS = 'all';
+      try {
+        await app.get(InvoiceStatusService).markOverdueInvoices();
+      } finally {
+        if (savedWindow === undefined) delete process.env.OVERDUE_NOTIFY_MAX_AGE_DAYS;
+        else process.env.OVERDUE_NOTIFY_MAX_AGE_DAYS = savedWindow;
+      }
       const overdue = mockNotificationService.notifyInvoiceOverdue.mock.calls.map((c) => c[0]);
       overdue.forEach(expectNoVictimData);
       expect(overdue.map((d) => d.clientName).sort()).toEqual(['Own Client A', 'Unknown']);

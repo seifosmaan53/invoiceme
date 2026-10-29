@@ -211,7 +211,7 @@ describe('SyncController', () => {
 
       syncService.pullChanges.mockResolvedValue(syncData as any);
 
-      const result = await controller.pull(since, mockUser);
+      const result = await controller.pull(since, undefined as any, undefined as any, undefined as any, mockUser);
 
       expect(syncService.pullChanges).toHaveBeenCalledWith(mockUser.userId, since);
       expect(result).toEqual(syncData);
@@ -232,9 +232,18 @@ describe('SyncController', () => {
 
       syncService.pullChanges.mockResolvedValue(syncData as any);
 
-      await controller.pull(undefined, mockUser);
+      await controller.pull(undefined as any, undefined as any, undefined as any, undefined as any, mockUser);
 
       expect(syncService.pullChanges).toHaveBeenCalledWith(mockUser.userId, undefined);
+    });
+
+    it('protocol=2 (or a cursor) uses the cursor pull, with the limit as a number', async () => {
+      (syncService as any).pullByCursor = jest.fn().mockResolvedValue({ cursor: 'c', hasMore: false });
+      await controller.pull(undefined as any, '2', undefined as any, '50', mockUser);
+      expect((syncService as any).pullByCursor).toHaveBeenCalledWith(mockUser.userId, undefined, 50);
+      await controller.pull(undefined as any, undefined as any, 'abc', undefined as any, mockUser);
+      expect((syncService as any).pullByCursor).toHaveBeenLastCalledWith(mockUser.userId, 'abc', undefined);
+      expect(syncService.pullChanges).not.toHaveBeenCalled();
     });
 
     it('should return sync data: { clients: [], invoices: [], invoiceItems: [], attachments: [], lastSyncTimestamp: string }', async () => {
@@ -256,7 +265,7 @@ describe('SyncController', () => {
 
       syncService.pullChanges.mockResolvedValue(syncData as any);
 
-      const result = await controller.pull(undefined, mockUser);
+      const result = await controller.pull(undefined, undefined as any, undefined as any, undefined as any, mockUser);
 
       expect(result).toHaveProperty('clients');
       expect(result).toHaveProperty('invoices');
@@ -282,7 +291,7 @@ describe('SyncController', () => {
 
       syncService.pullChanges.mockResolvedValue(syncData as any);
 
-      await controller.pull(undefined, mockUser);
+      await controller.pull(undefined as any, undefined as any, undefined as any, undefined as any, mockUser);
 
       expect(syncService.pullChanges).toHaveBeenCalledWith(mockUser.userId, undefined);
     });
@@ -306,7 +315,7 @@ describe('SyncController', () => {
 
       syncService.pullChanges.mockResolvedValue(syncData as any);
 
-      const result = await controller.pull(since, mockUser);
+      const result = await controller.pull(since, undefined as any, undefined as any, undefined as any, mockUser);
 
       expect(syncService.pullChanges).toHaveBeenCalledWith(mockUser.userId, since);
       expect(result.lastSyncTimestamp).toBeDefined();
@@ -329,7 +338,7 @@ describe('SyncController', () => {
 
       syncService.pullChanges.mockResolvedValue(syncData as any);
 
-      const result = await controller.pull(since, mockUser);
+      const result = await controller.pull(since, undefined as any, undefined as any, undefined as any, mockUser);
 
       expect(result.clients).toEqual([]);
       expect(result.invoices).toEqual([]);
@@ -410,7 +419,7 @@ describe('SyncController', () => {
 
       syncService.pullChanges.mockResolvedValue(syncData as any);
 
-      await controller.pull(since, mockUser);
+      await controller.pull(since, undefined as any, undefined as any, undefined as any, mockUser);
 
       expect(syncService.pullChanges).toHaveBeenCalledWith(mockUser.userId, since);
       expect(syncService.pullChanges).toHaveBeenCalledTimes(1);
@@ -457,7 +466,7 @@ describe('SyncController', () => {
 
       syncService.pullChanges.mockResolvedValue(syncData as any);
 
-      await controller.pull(since, mockUser);
+      await controller.pull(since, undefined as any, undefined as any, undefined as any, mockUser);
 
       expect(syncService.pullChanges).toHaveBeenCalledWith(mockUser.userId, since);
     });

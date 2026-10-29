@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'util';
-import { Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, MoreThan, EntityManager, IsNull } from 'typeorm';
 import { ApiProperty } from '@nestjs/swagger';
@@ -31,6 +31,7 @@ import { toCalendarDate } from '../common/calendar-date';
 import { conflictFields } from './conflict-fields';
 import { SYNC_CONFIG, SyncConfig } from './sync-config';
 import { SyncSchemaService } from './sync-schema.service';
+import { decodeCursor, encodeCursor, PullCursor } from './sync-pull-cursor';
 
 /**
  * Fields a device may never set: the primary key comes from object_id, the
@@ -224,6 +225,31 @@ export interface SyncPullResponse {
   lastSyncTimestamp: string;
 }
 
+/** A protocol-2 pull page (pullByCursor). */
+export interface SyncPullPage extends SyncPullResponse {
+  /** Send it with the next request: the next page while hasMore, else the next pull. */
+  cursor: string | null;
+  hasMore: boolean;
+}
+
+/** Order in which a cursor pull walks the record types. */
+const PULL_TYPES = [
+  ChangeObjectType.CLIENT,
+  ChangeObjectType.INVOICE,
+  ChangeObjectType.INVOICE_ITEM,
+  ChangeObjectType.ATTACHMENT,
+  'tombstone',
+] as const;
+
+const emptyPage = () => ({
+  protocol: 2,
+  clients: [] as Client[],
+  invoices: [] as Invoice[],
+  invoiceItems: [] as InvoiceItem[],
+  attachments: [] as Attachment[],
+  tombstones: [] as SyncTombstoneDto[],
+});
+
 interface Outcome {
   status: ChangeStatus;
   reason?: string;
@@ -241,6 +267,36 @@ export const UPGRADE_REQUIRED = 'client_upgrade_required';
  * can still count repeated failures and stop resending.
  */
 export const REJECTED = 'rejected';
+/** A temporary server or database failure: nothing was applied; send the same change again later. */
+export const RETRY_LATER = 'retry_later';
+
+/** PostgreSQL error classes after which the same change can succeed unchanged. */
+const TRANSIENT_SQLSTATES = new Set([
+  '40001', // serialization_failure
+  '40P01', // deadlock_detected
+  '55P03', // lock_not_available
+  '57014', // query_canceled (e.g. statement_timeout)
+  '57P01', // admin_shutdown
+  '57P02', // crash_shutdown
+  '57P03', // cannot_connect_now
+  '53000', // insufficient_resources
+  '53100', // disk_full
+  '53200', // out_of_memory
+  '53300', // too_many_connections
+]);
+
+/** Whether a failure is temporary (retry_later) rather than a rejection of the change itself. */
+export function isTransientFailure(error: any): boolean {
+  const code = error?.driverError?.code ?? error?.code;
+  if (typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || code.startsWith('08'))) return true;
+  if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE'].includes(code)) return true;
+  // node-postgres raises these without a code: a dropped connection, or no
+  // pool connection free within the timeout
+  const message = String(error?.driverError?.message ?? error?.message ?? '');
+  return /Connection terminated|timeout exceeded when trying to connect|Client has encountered a connection error|Connection is not established/i.test(message);
+}
+
+const failureReason = (error: unknown) => (isTransientFailure(error) ? RETRY_LATER : REJECTED);
 
 @Injectable()
 export class SyncService {
@@ -296,7 +352,7 @@ export class SyncService {
           outcome = await this.pushChange(userId, syncPushDto.deviceId, changeObj, protocol);
         } catch (error) {
           console.error(`Error processing change ${changeObj.object_id}:`, error);
-          outcome = failed(REJECTED);
+          outcome = failed(failureReason(error));
         }
       }
       results.push({
@@ -359,6 +415,7 @@ export class SyncService {
         outcome = await this.bindTo(manager).processChange(change, userId, protocol);
       } catch (error) {
         await manager.query('ROLLBACK TO SAVEPOINT sync_apply');
+        if (isTransientFailure(error)) throw error; // the transaction is unusable: roll it back whole (retry_later)
         console.error(`Error processing change ${changeObj.object_id}:`, error);
         return failed(REJECTED);
       }
@@ -567,6 +624,151 @@ export class SyncService {
     };
   }
 
+  /**
+   * Protocol-2 pull by snapshot cursor (sync-pull-cursor.ts; docs
+   * "Delivery guarantee"): paged, every committed change delivered.
+   */
+  async pullByCursor(userId: string, token: string | undefined, limitRaw?: number): Promise<SyncPullPage> {
+    await this.schema.assertReady(); // change_txid and its triggers (migration 021)
+    const limit = Math.min(Math.max(Number.isInteger(limitRaw) ? (limitRaw as number) : 500, 1), 1000);
+    const now = new Date();
+    let from: string | null = null;
+    let upto: string;
+    let type = 0;
+    let after: string | null = null;
+    let issued = now.toISOString();
+    const openConflicts = await this.conflictRepository.count({ where: { userId, status: SyncConflictStatus.OPEN } });
+
+    const cursor = token ? decodeCursor(token) : null;
+    if (cursor) await this.assertValidSnapshots([cursor.snap, cursor.from, cursor.upto]);
+    const known = cursor?.upto ?? cursor?.snap;
+    if (known) {
+      // A cursor from ahead of this database's transaction counter means the
+      // database was restored or replaced since (new transactions could reuse
+      // ids the cursor counts as delivered): start over.
+      const [{ ahead }] = await this.deviceChangeRepository.manager.query(
+        'SELECT pg_snapshot_xmax($1::pg_snapshot) > pg_snapshot_xmax(pg_current_snapshot()) AS ahead',
+        [known],
+      );
+      if (ahead) {
+        return { ...emptyPage(), fullResyncRequired: true, openConflicts, lastSyncTimestamp: issued, cursor: null, hasMore: false };
+      }
+    }
+    if (cursor?.upto) {
+      ({ from = null, upto, t: type = 0, after = null, issued } = cursor as Required<PullCursor>);
+    } else {
+      if (cursor?.snap) {
+        const horizon = now.getTime() - this.config.retentionDays * 86_400_000;
+        if (Date.parse(cursor.issued) < horizon) {
+          // Tombstones older than this cursor may be pruned: start over.
+          return { ...emptyPage(), fullResyncRequired: true, openConflicts, lastSyncTimestamp: issued, cursor: null, hasMore: false };
+        }
+        from = cursor.snap;
+      }
+      upto = (await this.deviceChangeRepository.manager.query('SELECT pg_current_snapshot()::text AS s'))[0].s;
+    }
+
+    const page = emptyPage();
+    let remaining = limit;
+    let next: { t: number; after: string } | null = null;
+    for (let t = type; t < PULL_TYPES.length; t++) {
+      const rows = await this.pullRows(t, userId, from, upto, t === type ? after : null, remaining);
+      const lastKey: string | undefined = rows[rows.length - 1]?.__key; // before addToPage strips it
+      await this.addToPage(page, t, rows, userId);
+      if (rows.length === remaining) {
+        next = { t, after: lastKey };
+        break;
+      }
+      remaining -= rows.length;
+    }
+
+    return {
+      ...page,
+      fullResyncRequired: false,
+      openConflicts,
+      lastSyncTimestamp: issued,
+      hasMore: next !== null,
+      cursor: encodeCursor(next ? { v: 1, from, upto, t: next.t, after: next.after, issued } : { v: 1, snap: upto, issued }),
+    };
+  }
+
+  /** Rows of one record type changed by transactions visible in `upto` but not in `from`, in key order. */
+  /** Snapshots PostgreSQL accepts (the regex lets through e.g. xmin > xmax): else 400 invalid_cursor. */
+  private async assertValidSnapshots(values: Array<string | null | undefined>): Promise<void> {
+    for (const value of values) {
+      if (!value) continue;
+      try {
+        await this.deviceChangeRepository.manager.query('SELECT $1::pg_snapshot', [value]);
+      } catch {
+        throw new BadRequestException({ message: 'Invalid sync cursor; pull again without it', reason: 'invalid_cursor' });
+      }
+    }
+  }
+
+  private async pullRows(t: number, userId: string, from: string | null, upto: string, after: string | null, limit: number): Promise<any[]> {
+    const kind = PULL_TYPES[t];
+    const qb = (this.repositoryFor(kind === 'tombstone' ? 'tombstone' : kind) as Repository<any>).createQueryBuilder('r');
+    const key = kind === 'tombstone' ? "r.object_type || ':' || r.object_id" : 'r.id::text';
+    switch (kind) {
+      case ChangeObjectType.CLIENT:
+        qb.where('r.user_id::text = :userId AND r.deleted_at IS NULL', { userId });
+        break;
+      case ChangeObjectType.INVOICE:
+        qb.leftJoinAndSelect('r.client', 'client').where('r.user_id::text = :userId AND r.deleted_at IS NULL', { userId });
+        break;
+      case ChangeObjectType.INVOICE_ITEM:
+        qb.innerJoin('r.invoice', 'inv').where('inv.user_id::text = :userId AND inv.deleted_at IS NULL', { userId });
+        break;
+      case ChangeObjectType.ATTACHMENT:
+        qb.where(
+          `((r.owner_type::text = 'invoice' AND r.owner_id::text IN (SELECT id::text FROM invoices WHERE user_id::text = :userId AND deleted_at IS NULL))
+            OR (r.owner_type::text = 'client' AND r.owner_id::text IN (SELECT id::text FROM clients WHERE user_id::text = :userId AND deleted_at IS NULL)))`,
+          { userId },
+        );
+        break;
+      default:
+        qb.where('r.user_id::text = :userId', { userId });
+    }
+    if (from) qb.andWhere('NOT pg_visible_in_snapshot(r.change_txid, CAST(:from AS pg_snapshot))', { from });
+    qb.andWhere('pg_visible_in_snapshot(r.change_txid, CAST(:upto AS pg_snapshot))', { upto });
+    if (after) qb.andWhere(`${key} > :after`, { after });
+    qb.addSelect(key, 'r___key').orderBy(key, 'ASC').limit(limit);
+    const { entities, raw } = await qb.getRawAndEntities();
+    // getRawAndEntities keeps order; attach each row's key for the cursor
+    return entities.map((entity, i) => Object.assign(entity, { __key: raw[i]?.r___key ?? String(entity.id) }));
+  }
+
+  private async addToPage(page: ReturnType<typeof emptyPage>, t: number, rows: any[], userId: string): Promise<void> {
+    const strip = (row: any) => {
+      delete row.__key;
+      return row;
+    };
+    switch (PULL_TYPES[t]) {
+      case ChangeObjectType.CLIENT:
+        page.clients.push(...rows.map(strip));
+        break;
+      case ChangeObjectType.INVOICE:
+        page.invoices.push(...rows.map(strip).map((invoice) => (withoutForeignClient(invoice), invoice)));
+        break;
+      case ChangeObjectType.INVOICE_ITEM:
+        page.invoiceItems.push(
+          ...(await withoutForeignSyncHistory(this.deviceChangeRepository.manager, ChangeObjectType.INVOICE_ITEM, rows.map(strip), userId)),
+        );
+        break;
+      case ChangeObjectType.ATTACHMENT:
+        page.attachments.push(
+          ...withValidAttachmentUrls(
+            await withoutForeignSyncHistory(this.deviceChangeRepository.manager, ChangeObjectType.ATTACHMENT, rows.map(strip), userId),
+          ),
+        );
+        break;
+      default:
+        page.tombstones.push(
+          ...rows.map((tomb: SyncTombstone) => ({ object_type: tomb.objectType, object_id: tomb.objectId, deleted_at: tomb.deletedAt.toISOString() })),
+        );
+    }
+  }
+
   private async processChange(change: DeviceChange, userId: string, protocol: number): Promise<Outcome> {
     if (change.objectType === ChangeObjectType.ATTACHMENT) {
       return this.processAttachmentChange(change, userId);
@@ -582,6 +784,8 @@ export class SyncService {
         return this.invoiceRepository;
       case ChangeObjectType.INVOICE_ITEM:
         return this.invoiceItemRepository;
+      case 'tombstone':
+        return this.tombstoneRepository;
       default:
         return this.attachmentRepository;
     }

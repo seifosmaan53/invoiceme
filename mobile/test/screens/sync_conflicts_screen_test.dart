@@ -97,6 +97,21 @@ class FakeFailedStore implements FailedChangesStore {
   Future<List<FailedChange>> listFailed() async => List.of(rows);
 
   final retried = <String>[];
+  final retriedNow = <String>[];
+  final resolved = <String>[];
+
+  @override
+  Future<void> conflictResolved(String conflictId, String action) async => resolved.add('$conflictId:$action');
+  final List<FailedChange> waiting = [];
+
+  @override
+  Future<List<FailedChange>> listWaiting() async => List.of(waiting);
+
+  @override
+  Future<void> retryNow(String id) async {
+    retriedNow.add(id);
+    waiting.removeWhere((r) => r.id == id);
+  }
 
   @override
   Future<void> retry(String id) async {
@@ -292,6 +307,31 @@ void main() {
     expect(store.retried, ['p1']);
     expect(store.discarded, isEmpty);
     expect(find.text('Changes that could not be synced'), findsNothing);
+  });
+
+  testWidgets('Waiting to retry: last error, attempts, next attempt, Retry now', (tester) async {
+    final api = FakeConflictsApi(list: [], detail: {});
+    final store = FakeFailedStore([]);
+    store.waiting.add(FailedChange(
+      id: 'w1',
+      objectType: 'invoice',
+      objectId: 'inv12345678',
+      changeType: 'update',
+      reason: 'retry_later',
+      attempts: 3,
+      nextAttemptAt: DateTime.utc(2026, 10, 28, 12, 30),
+    ));
+    await tester.pumpWidget(MaterialApp(home: SyncConflictsScreen(api: api, failedChanges: store)));
+    await tester.pumpAndSettle();
+    expect(find.text('Waiting to retry'), findsOneWidget);
+    expect(find.text('Invoice inv12345 (update)'), findsOneWidget);
+    expect(find.text('The server could not process the change right now.'), findsOneWidget);
+    expect(find.textContaining('Attempts: 3 · next attempt'), findsOneWidget);
+    expect(find.text('Discard this change'), findsNothing, reason: 'temporary failures are never abandoned');
+    await tester.tap(find.text('Retry now'));
+    await tester.pumpAndSettle();
+    expect(store.retriedNow, ['w1']);
+    expect(find.text('Waiting to retry'), findsNothing);
   });
 
   testWidgets('failed changes are shown even when the conflicts API fails', (tester) async {

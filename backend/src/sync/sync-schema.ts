@@ -17,12 +17,26 @@
  *   is written so devices learn about the delete and cannot recreate the id.
  *   Restoring a soft-deleted record removes its tombstone.
  *
+ * Delivery (migration 021): every client, invoice, item, attachment and
+ * tombstone row carries change_txid, the id of the transaction that last
+ * changed it (restoring a client or invoice also sets it on its items and
+ * attachments, which pulls skipped while it was deleted). Pull compares it with PostgreSQL snapshots (sync-pull-cursor.ts),
+ * so a change is delivered by the first pull whose snapshot sees it committed,
+ * whatever its timestamps.
+ *
  * Must stay byte-identical to the block between the BEGIN/END SYNC SCHEMA
- * markers in backend/migrations/019_sync_revisions_conflicts.sql (a unit test
- * checks this). Ids and owner columns are compared as text and cast to uuid
+ * markers in the latest migration that defines it,
+ * backend/migrations/021_sync_delivery_cursor.sql (a unit test checks this);
+ * 019 keeps the first version as applied. Ids and owner columns are compared as text and cast to uuid
  * because databases built with DB_SYNCHRONIZE store them as varchar.
  */
 export const SYNC_SCHEMA_SQL = `
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS change_txid xid8 NOT NULL DEFAULT pg_current_xact_id();
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS change_txid xid8 NOT NULL DEFAULT pg_current_xact_id();
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS change_txid xid8 NOT NULL DEFAULT pg_current_xact_id();
+ALTER TABLE attachments ADD COLUMN IF NOT EXISTS change_txid xid8 NOT NULL DEFAULT pg_current_xact_id();
+ALTER TABLE sync_tombstones ADD COLUMN IF NOT EXISTS change_txid xid8 NOT NULL DEFAULT pg_current_xact_id();
+
 CREATE OR REPLACE FUNCTION sync_bump_revision() RETURNS trigger AS $fn$
 DECLARE
   changed text[];
@@ -30,13 +44,16 @@ BEGIN
   SELECT coalesce(array_agg(n.key ORDER BY n.key), '{}')
     INTO changed
     FROM jsonb_each(to_jsonb(NEW)) AS n
-   WHERE n.key NOT IN ('revision', 'updated_at')
+   WHERE n.key NOT IN ('revision', 'updated_at', 'change_txid')
      AND (to_jsonb(OLD) -> n.key) IS DISTINCT FROM n.value;
   IF cardinality(changed) = 0 THEN
+    -- No data change: same revision. change_txid stays as written, so a
+    -- touch (SET change_txid = pg_current_xact_id()) re-delivers the row.
     NEW.revision := OLD.revision;
     RETURN NEW;
   END IF;
   NEW.revision := OLD.revision + 1;
+  NEW.change_txid := pg_current_xact_id();
   INSERT INTO sync_record_revisions (object_type, object_id, revision, changed_fields)
   VALUES (TG_ARGV[0], NEW.id::text, NEW.revision, changed)
   ON CONFLICT (object_type, object_id, revision)
@@ -56,9 +73,16 @@ BEGIN
       INSERT INTO sync_tombstones (object_type, object_id, user_id, revision, deleted_at)
       VALUES (TG_ARGV[0], NEW.id::text, NEW.user_id::text::uuid, NEW.revision, NEW.deleted_at)
       ON CONFLICT (object_type, object_id)
-      DO UPDATE SET revision = EXCLUDED.revision, deleted_at = EXCLUDED.deleted_at;
+      DO UPDATE SET revision = EXCLUDED.revision, deleted_at = EXCLUDED.deleted_at, change_txid = pg_current_xact_id();
     ELSIF OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL THEN
       DELETE FROM sync_tombstones WHERE object_type = TG_ARGV[0] AND object_id = NEW.id::text;
+      -- Devices dropped the children with the tombstone, and pulls skipped
+      -- their changes while the parent was deleted: deliver them again.
+      IF TG_ARGV[0] = 'invoice' THEN
+        UPDATE invoice_items SET change_txid = pg_current_xact_id() WHERE invoice_id::text = NEW.id::text;
+      END IF;
+      UPDATE attachments SET change_txid = pg_current_xact_id()
+       WHERE owner_type::text = TG_ARGV[0] AND owner_id::text = NEW.id::text;
     END IF;
     RETURN NEW;
   END IF;
@@ -82,9 +106,18 @@ BEGIN
     INSERT INTO sync_tombstones (object_type, object_id, user_id, revision, deleted_at, last_state)
     VALUES (TG_ARGV[0], OLD.id::text, owner, rev, now(), state)
     ON CONFLICT (object_type, object_id)
-    DO UPDATE SET revision = EXCLUDED.revision, deleted_at = EXCLUDED.deleted_at, last_state = EXCLUDED.last_state;
+    DO UPDATE SET revision = EXCLUDED.revision, deleted_at = EXCLUDED.deleted_at, last_state = EXCLUDED.last_state,
+                  change_txid = pg_current_xact_id();
   END IF;
   RETURN OLD;
+END
+$fn$ LANGUAGE plpgsql;
+
+-- Attachments have no revision, but their changes are delivered by transaction too.
+CREATE OR REPLACE FUNCTION sync_touch_change_txid() RETURNS trigger AS $fn$
+BEGIN
+  NEW.change_txid := pg_current_xact_id();
+  RETURN NEW;
 END
 $fn$ LANGUAGE plpgsql;
 
@@ -97,6 +130,10 @@ CREATE TRIGGER sync_revision BEFORE UPDATE ON invoices
 DROP TRIGGER IF EXISTS sync_revision ON invoice_items;
 CREATE TRIGGER sync_revision BEFORE UPDATE ON invoice_items
   FOR EACH ROW EXECUTE FUNCTION sync_bump_revision('invoice_item');
+
+DROP TRIGGER IF EXISTS sync_change_txid ON attachments;
+CREATE TRIGGER sync_change_txid BEFORE UPDATE ON attachments
+  FOR EACH ROW EXECUTE FUNCTION sync_touch_change_txid();
 
 DROP TRIGGER IF EXISTS sync_tombstone_soft ON clients;
 CREATE TRIGGER sync_tombstone_soft AFTER UPDATE OF deleted_at ON clients
@@ -129,4 +166,5 @@ export const SYNC_REQUIRED_TRIGGERS: ReadonlyArray<{ table: string; name: string
   { table: 'invoices', name: 'sync_tombstone_delete' },
   { table: 'invoice_items', name: 'sync_tombstone_delete' },
   { table: 'attachments', name: 'sync_tombstone_delete' },
+  { table: 'attachments', name: 'sync_change_txid' },
 ];

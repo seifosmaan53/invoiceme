@@ -55,7 +55,7 @@ answers 5xx so Stripe redelivers.
 |---|---|
 | `payment_intent.succeeded` | payment completed if amount and currency match; invoice paid when net covers the total |
 | `payment_intent.payment_failed`, `.canceled` | pending payment marked failed |
-| `charge.refunded`, `charge.refund.updated`, `refund.*` | the **charge is retrieved from Stripe** and its `amount_refunded` recorded |
+| `charge.refunded`, `charge.refund.updated`, `refund.created`, `refund.updated`, `refund.failed` | the **charge is retrieved from Stripe** and its `amount_refunded` recorded |
 | `charge.dispute.*` | the **dispute is retrieved from Stripe** and its status and amount recorded |
 | anything else | recorded as `ignored` |
 
@@ -67,6 +67,29 @@ differs from the payment, or whose amount exceeds it, is recorded as
 `mismatch` and not applied. Events for intents this server did not create are
 recorded as `unknown_payment`. Stripe must be configured to send the refund
 and dispute events to the webhook endpoint for these states to appear.
+
+### Webhook endpoint setup (owner, in the Stripe Dashboard)
+
+Endpoint URL `https://<your-server>/api/v1/webhooks/stripe`; its signing
+secret goes in `STRIPE_WEBHOOK_SECRET`. Select these events:
+
+- `payment_intent.succeeded`, `payment_intent.payment_failed`,
+  `payment_intent.canceled`
+- `charge.refunded`, `charge.refund.updated`
+- `refund.created`, `refund.updated`, `refund.failed`
+- `charge.dispute.created`, `charge.dispute.updated`,
+  `charge.dispute.closed`, `charge.dispute.funds_withdrawn`,
+  `charge.dispute.funds_reinstated`
+
+The names were checked on 2026-10-28 against Stripe's event list
+(docs.stripe.com/api/events/types) and the installed SDK (`stripe` 14.25,
+`EventTypes.d.ts`). Two notes: Stripe sends `charge.refund.updated` only for
+some payment methods, so subscribe to the `refund.*` events as well (the
+handler reads the charge either way and duplicates are harmless); and
+`refund.failed` is in Stripe's list but not in the SDK 14.25 type
+definitions, so the handler matches it by name. Events not listed are
+recorded as `ignored`. Stripe's test mode (test keys, `stripe trigger`) is
+the way to check the endpoint; nothing in this repository calls Stripe live.
 
 ## Checkout attempts (`POST /invoices/:id/pay`)
 
@@ -97,7 +120,14 @@ until the owner reopens it. New intents carry the Stripe idempotency key
 ## Not handled
 
 - Refunds and disputes created before migration 020 are not reconstructed;
-  only events received afterwards are applied.
+  only events received afterwards are applied. An invoice that was refunded
+  or disputed before the update keeps showing `paid` (net = gross) until a
+  later event for that charge arrives (any later refund or dispute event
+  retrieves the charge or dispute and records its current totals). There is
+  no backfill command; reconciling those invoices is a manual check in the
+  Stripe Dashboard.
+- Events missed while the endpoint was not subscribed are not fetched;
+  Stripe redelivers only failed deliveries of events it sent.
 - Zero- and three-decimal currencies are refused for online payment (see
   `payments/payment-currency.ts`).
 - Stored `client_secret` values from before PR #16: see

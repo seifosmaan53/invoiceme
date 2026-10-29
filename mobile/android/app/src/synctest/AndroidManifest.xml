@@ -1,0 +1,7 @@
+<!-- Used only for the sync test build (-PinvoicemeTestBuild=true, see
+     build.gradle.kts): the emulator test talks to a local backend over plain
+     HTTP (http://10.0.2.2:3000). Normal builds never include this file. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <application android:usesCleartextTraffic="true" />
+</manifest>

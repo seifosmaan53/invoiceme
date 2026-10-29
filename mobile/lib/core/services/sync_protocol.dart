@@ -26,23 +26,56 @@ const String serverUpdateRequiredMessage =
 const String pendingStatus = 'pending';
 const String conflictStatus = 'conflict';
 
-/// Given up after [maxFailedAttempts] failures or a non-retryable reason;
-/// no longer sent, until the user discards it.
+/// Permanently rejected (any server reason other than [retryLaterReason]);
+/// no longer sent until the user retries or discards it.
 const String failedStatus = 'failed';
 
-/// Failed attempts (with a server reason) before a change is given up.
-const int maxFailedAttempts = 3;
+/// Server reason for a temporary failure (for example a database error).
+const String retryLaterReason = 'retry_later';
 
-/// Server reasons that cannot succeed on a resend: the change is given up at once.
-const Set<String> nonRetryableReasons = {
-  'base_revision_required',
-  'change_id_required',
-  'change_id_reused',
-  'invalid_object_id',
-  'invalid_base_revision',
-  'not_found',
-  'record_deleted',
-};
+/// Local reasons of temporary failures (no answer from the server).
+const String networkErrorReason = 'network_error';
+const String serverErrorReason = 'server_error';
+const String noResultReason = 'no_result';
+
+/// Temporary failures: the change stays pending and is retried with backoff.
+/// A `failed` result without a reason comes from an older server.
+bool isTemporaryFailure(String? reason) =>
+    reason == null ||
+    reason == retryLaterReason ||
+    reason == networkErrorReason ||
+    reason == serverErrorReason ||
+    reason == noResultReason;
+
+/// Backoff: 30 s, doubling per attempt, at most 1 h.
+const Duration backoffBase = Duration(seconds: 30);
+const Duration backoffMax = Duration(hours: 1);
+
+/// Delay before the next attempt after [attempts] temporary failures (>= 1).
+/// [jitter] in [0, 1) spreads devices: the delay is 75 % to 100 % of the
+/// nominal one, so it never exceeds [backoffMax].
+Duration backoffDelay(int attempts, double jitter) {
+  final n = attempts < 1 ? 1 : attempts;
+  var nominal = backoffBase.inMilliseconds;
+  for (var i = 1; i < n && nominal < backoffMax.inMilliseconds; i++) {
+    nominal *= 2;
+  }
+  if (nominal > backoffMax.inMilliseconds) nominal = backoffMax.inMilliseconds;
+  final j = jitter.clamp(0.0, 0.999999);
+  return Duration(milliseconds: (nominal * (0.75 + 0.25 * j)).round());
+}
+
+/// When a change may be sent again (`next_attempt_at`, UTC ISO-8601).
+DateTime nextAttemptAt(DateTime now, int attempts, double jitter) =>
+    now.toUtc().add(backoffDelay(attempts, jitter));
+
+/// Whether a pending row is waiting for its next attempt at [now].
+bool isWaiting(Map<String, Object?> row, DateTime now) {
+  final next = row['next_attempt_at'];
+  if (next is! String) return false;
+  final at = DateTime.tryParse(next);
+  return at != null && at.isAfter(now.toUtc());
+}
 
 /// A failure reason in plain words.
 String failureReasonText(String? reason) {
@@ -63,11 +96,20 @@ String failureReasonText(String? reason) {
       return 'The record was deleted on the server.';
     case 'rejected':
       return 'The server refused the change (for example invalid data, or a record that is not yours).';
+    case retryLaterReason:
+      return 'The server could not process the change right now.';
+    case networkErrorReason:
+      return 'The server could not be reached.';
+    case serverErrorReason:
+      return 'The server had an error.';
+    case noResultReason:
+      return 'The server did not report a result for the change.';
     case 'open_conflict':
       return 'The record has an unresolved sync conflict.';
     case upgradeRequiredReason:
       return 'The server needs a newer version of the app for this change.';
     case null:
+      return 'The server did not process the change (no reason given).';
     case 'failed':
       return 'The server did not accept the change.';
     default:
@@ -168,14 +210,21 @@ Map<String, dynamic> buildPushBody(String deviceId, List<Map<String, Object?>> r
 /// with the same base would make the server compare the device against its
 /// own earlier change. For the same reason an item change waits when a
 /// change of its invoice is sent first (its `parent_revision` moves then).
-/// Rows given up ('failed') or in conflict block nothing.
-List<Map<String, Object?>> selectPushBatch(List<Map<String, Object?>> rows) {
+/// Rows rejected ('failed') or in conflict block nothing. A row waiting for
+/// its next attempt ([isWaiting] at [now]) is not sent and holds back later
+/// changes of the same record; other records' changes still go.
+List<Map<String, Object?>> selectPushBatch(List<Map<String, Object?>> rows, {DateTime? now}) {
+  final at = now ?? DateTime.now();
   final seen = <String>{};
   final batch = <Map<String, Object?>>[];
   for (final row in rows) {
     if ((row['status'] ?? pendingStatus) != pendingStatus) continue;
     if ((row['synced'] ?? 0) != 0) continue;
     final key = '${row['object_type']}:${row['object_id']}';
+    if (isWaiting(row, at)) {
+      seen.add(key);
+      continue;
+    }
     final parent = row['parent_id'];
     if (row['object_type'] == 'invoice_item' && parent is String && seen.contains('invoice:$parent')) {
       seen.add(key);
@@ -193,11 +242,12 @@ enum PushActionKind {
   /// Keep the row, status 'conflict', never resend; resolved through the conflicts API.
   conflict,
 
-  /// failed (or no usable result): stays pending and is resent next sync.
+  /// Temporary failure ([isTemporaryFailure], or no usable result): stays
+  /// pending, one more attempt, retried after a backoff. Never abandoned.
   keepPending,
 
-  /// failed with a non-retryable reason, or for the [maxFailedAttempts]th
-  /// time: status 'failed', no longer sent, does not block anything.
+  /// Permanent rejection (any other reason): status 'failed', no longer
+  /// sent, blocks nothing; the user can retry or discard it.
   giveUp,
 }
 
@@ -213,7 +263,7 @@ class PushAction {
   final String? conflictId;
   final String? reason;
 
-  /// Failed attempts after this result (only for keepPending / giveUp).
+  /// Attempts after this result (temporary failures; kept on rejection).
   final int attempts;
 
   const PushAction({
@@ -263,54 +313,28 @@ class PushPlan {
 ///
 /// - `applied`, `merged`, `duplicate` => synced (with the returned revision);
 /// - `conflict` => conflict (with `conflict_id`), never resent;
-/// - `failed` with a reason => one more attempt (row `attempts`); given up
-///   at [maxFailedAttempts] or at once for [nonRetryableReasons];
-/// - `failed` without a reason (server error, ownership check) and a missing
-///   or mismatched result => stays pending; not counted as an attempt.
+/// - `failed` with `retry_later`, `failed` without a reason (older server),
+///   or no result for the row => temporary: one more attempt, backoff;
+/// - `failed` with any other reason => permanently rejected (status 'failed').
 ///
 /// A response without `results` (an older server that only counts) marks
-/// nothing: no change is treated as synced or as a conflict.
-///
-/// [countedThisSync]: rows whose failure was already counted in an earlier
-/// round of the same sync; a failure counts at most once per sync.
-PushPlan planPushResults(
-  List<Map<String, Object?>> sent,
-  Map<String, dynamic> response, {
-  Set<String> countedThisSync = const {},
-}) {
+/// nothing: no change is treated as synced, failed or as a conflict.
+PushPlan planPushResults(List<Map<String, Object?>> sent, Map<String, dynamic> response) {
   final notice = response['notice'] as String?;
   final message = response['message'] is String ? response['message'] as String : null;
   final results = response['results'];
 
-  PushAction pending(Map<String, Object?> row, {String? status, String? reason}) => PushAction(
+  PushAction untouched(Map<String, Object?> row) => PushAction(
         kind: PushActionKind.keepPending,
         changeId: row['id'] as String,
         objectType: row['object_type'] as String,
         objectId: row['object_id'] as String,
-        status: status,
-        reason: reason,
         attempts: parseRevision(row['attempts']) ?? 0,
       );
 
-  PushAction failure(Map<String, Object?> row, String reason) {
-    final previous = parseRevision(row['attempts']) ?? 0;
-    final counted = countedThisSync.contains(row['id']);
-    final attempts = counted ? previous : previous + 1;
-    final giveUp = nonRetryableReasons.contains(reason) || (!counted && attempts >= maxFailedAttempts);
-    return PushAction(
-      kind: giveUp ? PushActionKind.giveUp : PushActionKind.keepPending,
-      changeId: row['id'] as String,
-      objectType: row['object_type'] as String,
-      objectId: row['object_id'] as String,
-      status: 'failed',
-      reason: reason,
-      attempts: attempts,
-    );
-  }
-
   if (results is! List) {
     return PushPlan(
-      actions: sent.map((row) => pending(row)).toList(),
+      actions: sent.map(untouched).toList(),
       resultsMissing: true,
       notice: notice,
       message: message,
@@ -331,7 +355,7 @@ PushPlan planPushResults(
     final entry = byIndex[i];
     final changeId = entry?['change_id'];
     if (entry == null || (changeId != null && changeId != id)) {
-      actions.add(pending(row));
+      actions.add(temporaryFailure(row, noResultReason));
       continue;
     }
     final status = entry['status'] as String?;
@@ -363,14 +387,41 @@ PushPlan planPushResults(
         ));
         break;
       case 'failed':
-        actions.add(reason != null ? failure(row, reason) : pending(row, status: status));
+        actions.add(isTemporaryFailure(reason)
+            ? temporaryFailure(row, reason, status: 'failed')
+            : PushAction(
+                kind: PushActionKind.giveUp,
+                changeId: id,
+                objectType: row['object_type'] as String,
+                objectId: row['object_id'] as String,
+                status: 'failed',
+                reason: reason,
+                attempts: parseRevision(row['attempts']) ?? 0,
+              ));
         break;
       default:
-        actions.add(pending(row, status: status, reason: reason));
+        actions.add(temporaryFailure(row, reason ?? noResultReason, status: status));
     }
   }
   return PushPlan(actions: actions, notice: notice, message: message);
 }
+
+/// A temporary failure of [row]: stays pending with one more attempt.
+/// [status] is the server's status when it answered (`failed`: not applied).
+PushAction temporaryFailure(Map<String, Object?> row, String? reason, {String? status}) => PushAction(
+      kind: PushActionKind.keepPending,
+      changeId: row['id'] as String,
+      objectType: row['object_type'] as String,
+      objectId: row['object_id'] as String,
+      status: status,
+      reason: reason,
+      attempts: (parseRevision(row['attempts']) ?? 0) + 1,
+    );
+
+/// No answer for the whole push (network error, timeout, HTTP 5xx): every
+/// sent row has a temporary failure.
+PushPlan transportFailure(List<Map<String, Object?>> sent, String reason) =>
+    PushPlan(actions: [for (final row in sent) temporaryFailure(row, reason)]);
 
 /// New `base_revision` for later pending rows of the same record after
 /// [action] was applied.
@@ -504,10 +555,6 @@ String? itemInvoiceIdFromData(Map<String, dynamic> data) {
   return v is String && v.isNotEmpty ? v : null;
 }
 
-/// `since` for the next pull: none (everything) after a change was given up
-/// or discarded, because pulls skipped that record while it was queued.
-String? pullSince(String? lastSync, {required bool fullPullNeeded}) => fullPullNeeded ? null : lastSync;
-
 /// A local delete: `DELETE FROM table WHERE where`.
 class LocalDelete {
   final String table;
@@ -551,22 +598,141 @@ List<LocalDelete> tombstoneDeletes(Object? tombstones) {
   return deletes;
 }
 
-/// What to do with a pull response.
+/// What to do with a pull page.
 enum PullStep {
-  /// Store the data.
+  /// Store the page.
   apply,
 
-  /// `fullResyncRequired`: drop the local cache and pull again without `since`.
+  /// `fullResyncRequired`: drop the local cache and the cursor, pull from the start.
   fullResync,
 }
 
-/// [sentSince]: whether this pull sent `since`. A full pull is never asked to
-/// resync again (no loop).
-PullStep pullStep(Map<String, dynamic> response, {required bool sentSince}) =>
-    sentSince && response['fullResyncRequired'] == true ? PullStep.fullResync : PullStep.apply;
+/// [sentCursor]: whether this page was asked for with a cursor. A pull from
+/// the start is never asked to resync again (no loop).
+PullStep pullStep(Map<String, dynamic> response, {required bool sentCursor}) =>
+    sentCursor && response['fullResyncRequired'] == true ? PullStep.fullResync : PullStep.apply;
+
+/// Records per pull page (server range 1..1000).
+const int pullPageLimit = 500;
+
+/// Upper bound of pages in one pull (500,000 records at the default limit).
+const int maxPullPages = 1000;
+
+/// Query of one pull page. No cursor = from the start.
+/// `protocol=2` on every pull: without it (and without a cursor, as on the
+/// first pull) the server answers with the protocol-1 timestamp pull, which
+/// returns no cursor.
+Map<String, dynamic> pullQuery(String? cursor, {int limit = pullPageLimit}) => {
+      'protocol': '2',
+      if (cursor != null) 'cursor': cursor,
+      'limit': limit,
+    };
+
+/// The cursor to start from: none (everything) when there is no stored
+/// cursor (first pull, or an app that synced with `since` before) or after a
+/// change was rejected or discarded (earlier pulls skipped that record).
+String? startCursor(String? stored, {required bool fullPullNeeded}) => fullPullNeeded ? null : stored;
+
+/// The server refused the cursor (400 `reason: invalid_cursor`).
+class InvalidCursorException implements Exception {
+  const InvalidCursorException();
+}
+
+bool isInvalidCursorResponse(int? statusCode, Object? data) =>
+    statusCode == 400 && data is Map && data['reason'] == 'invalid_cursor';
+
+class PullRunResult {
+  /// Cursor to store (from the last page, hasMore false).
+  final String? cursor;
+  final int openConflicts;
+  final String? lastSyncTimestamp;
+  final int pages;
+
+  /// The run restarted from the start (fullResyncRequired or invalid cursor).
+  final bool restarted;
+
+  const PullRunResult({this.cursor, this.openConflicts = 0, this.lastSyncTimestamp, this.pages = 0, this.restarted = false});
+}
+
+/// Runs a cursor pull: fetch a page, apply it, continue while `hasMore`.
+/// The caller stores [PullRunResult.cursor] only after this returns, so an
+/// interrupted pull restarts from the previously stored cursor (pages may be
+/// delivered again; applying them is idempotent).
+///
+/// - `fullResyncRequired`: [clearCache], [dropCursor], start again without cursor;
+/// - [InvalidCursorException] from [fetch]: [dropCursor], start again without cursor.
+/// Each happens at most once per run.
+Future<PullRunResult> runCursorPull({
+  required String? storedCursor,
+  required Future<Map<String, dynamic>> Function(String? cursor) fetch,
+  required Future<void> Function(Map<String, dynamic> page) applyPage,
+  required Future<void> Function() clearCache,
+  required Future<void> Function() dropCursor,
+  int maxPages = maxPullPages,
+}) async {
+  var start = storedCursor;
+  var restarted = false;
+  while (true) {
+    String? next = start;
+    var pages = 0;
+    try {
+      while (true) {
+        final page = await fetch(next);
+        if (pullStep(page, sentCursor: next != null) == PullStep.fullResync) {
+          if (restarted) throw StateError('fullResyncRequired on a pull from the start');
+          restarted = true;
+          await clearCache();
+          await dropCursor();
+          break;
+        }
+        await applyPage(page);
+        pages++;
+        final cursor = page['cursor'];
+        if (page['hasMore'] == true) {
+          if (cursor is! String || cursor.isEmpty) throw const FormatException('hasMore without a cursor');
+          if (pages >= maxPages) throw StateError('pull exceeded $maxPages pages');
+          next = cursor;
+          continue;
+        }
+        return PullRunResult(
+          cursor: cursor is String && cursor.isNotEmpty ? cursor : null,
+          openConflicts: openConflictsOf(page),
+          lastSyncTimestamp: page['lastSyncTimestamp'] as String?,
+          pages: pages,
+          restarted: restarted,
+        );
+      }
+    } on InvalidCursorException {
+      if (restarted || next == null) rethrow;
+      restarted = true;
+      await dropCursor();
+    }
+    start = null;
+  }
+}
 
 /// `openConflicts` of a pull response (0 when absent).
 int openConflictsOf(Map<String, dynamic> response) => parseRevision(response['openConflicts']) ?? 0;
+
+/// A newly delivered server row replaces a held one unless it is older.
+/// Rows without a revision (attachments) always replace.
+bool deliveredReplacesHeld(int? deliveredRevision, int? heldRevision) =>
+    deliveredRevision == null || heldRevision == null || deliveredRevision >= heldRevision;
+
+/// A held server row is written locally unless the local copy is already at
+/// the same or a newer revision (for example after the device's change was
+/// applied and its new revision stored). Without revisions it is written.
+bool heldRowApplies(int? heldRevision, int? localRevision) =>
+    heldRevision == null || localRevision == null || heldRevision > localRevision;
+
+/// Keys `object_type:object_id` of records with a pending or conflict
+/// change: held server rows of these wait.
+Set<String> heldBackObjectKeys(List<Map<String, Object?>> rows) => {
+      for (final row in rows)
+        if ((row['synced'] ?? 0) == 0 &&
+            ((row['status'] ?? pendingStatus) == pendingStatus || row['status'] == conflictStatus))
+          '${row['object_type']}:${row['object_id']}',
+    };
 
 /// Keys `object_type:object_id` of rows that are still waiting to be sent.
 /// Pulled copies of these records do not overwrite the local one.
@@ -576,7 +742,8 @@ Set<String> pendingObjectKeys(List<Map<String, Object?>> rows) => {
           '${row['object_type']}:${row['object_id']}',
     };
 
-/// A queued change that was given up (status 'failed').
+/// A queued change that was rejected (status 'failed'), or one waiting to
+/// retry after temporary failures (status 'pending', attempts > 0).
 class FailedChange {
   final String id;
   final String objectType;
@@ -586,6 +753,9 @@ class FailedChange {
   final int attempts;
   final DateTime? createdAt;
 
+  /// Temporary failures: when the next attempt is due (null = now).
+  final DateTime? nextAttemptAt;
+
   const FailedChange({
     required this.id,
     required this.objectType,
@@ -594,6 +764,7 @@ class FailedChange {
     this.reason,
     this.attempts = 0,
     this.createdAt,
+    this.nextAttemptAt,
   });
 
   factory FailedChange.fromRow(Map<String, Object?> row) => FailedChange(
@@ -604,6 +775,7 @@ class FailedChange {
         reason: row['last_reason'] as String?,
         attempts: parseRevision(row['attempts']) ?? 0,
         createdAt: DateTime.tryParse(row['created_at'] as String? ?? ''),
+        nextAttemptAt: DateTime.tryParse(row['next_attempt_at'] as String? ?? ''),
       );
 
   /// For example "Invoice item 1a2b3c4d (update)".
@@ -616,13 +788,26 @@ class FailedChange {
   String get reasonText => failureReasonText(reason);
 }
 
-/// Changes that could not be synced (local only).
+/// Changes that could not be synced, and changes waiting to retry (local only).
 abstract class FailedChangesStore {
+  /// Permanently rejected changes.
   Future<List<FailedChange>> listFailed();
+
+  /// Pending changes with temporary failures (attempts > 0).
+  Future<List<FailedChange>> listWaiting();
+
+  /// Sends a waiting change now (clears its wait and syncs).
+  Future<void> retryNow(String id);
 
   /// Removes the queued change from this device; nothing is sent.
   Future<void> discard(String id);
 
-  /// Queues the change again (status pending, attempts 0).
+  /// A conflict was resolved with [action] (`dismiss`, `apply_client`,
+  /// `restore`): forget its local change rows. After `dismiss` the server row
+  /// held for the record is applied; after a resolution that wrote a new
+  /// version on the server it is dropped (the next pull delivers the new one).
+  Future<void> conflictResolved(String conflictId, String action);
+
+  /// Queues a rejected change again (status pending, attempts 0, no wait).
   Future<void> retry(String id);
 }

@@ -14,6 +14,7 @@ import { ChangeObjectType } from '../entities/device-change.entity';
 import { ownedClient, withoutForeignClient, withoutForeignSyncHistory } from '../core/utils/cross-owner.util';
 import { businessToday, calendarDateParts, toCalendarDate } from '../common/calendar-date';
 import { paymentTotals } from '../payments/payment-state';
+import { calculateLineTotal, calculateTotals, InvoiceTotals, TotalsInput } from './invoice-totals';
 
 // Shown when an invoice still points at a client of another user (a row
 // written before ownership was enforced). That client is never returned.
@@ -372,6 +373,9 @@ export class InvoicesService {
         invoice.metadataJson = updateInvoiceDto.metadataJson;
       }
 
+      // The loaded items are stale once they were replaced above; saving the
+      // relation would detach the new rows (invoice_id = null) and fail.
+      delete (invoice as Partial<Invoice>).items;
       await queryRunner.manager.save(invoice);
       await queryRunner.commitTransaction();
 
@@ -571,52 +575,12 @@ export class InvoicesService {
     return this.invoiceNumberFormatter.format(format, type, sequence, issueDate);
   }
 
-  private calculateLineTotal(item: { quantity: number; unitPrice: number; taxRate?: number; discountRate?: number }): number {
-    let lineTotal = item.quantity * item.unitPrice;
-
-    if (item.discountRate && item.discountRate > 0) {
-      lineTotal -= (lineTotal * item.discountRate) / 100;
-    }
-
-    if (item.taxRate && item.taxRate > 0) {
-      lineTotal += (lineTotal * item.taxRate) / 100;
-    }
-
-    return Math.round(lineTotal * 100) / 100;
+  private calculateLineTotal(item: TotalsInput): number {
+    return calculateLineTotal(item);
   }
 
-  private calculateTotals(items: Array<{ quantity: number; unitPrice: number; taxRate?: number; discountRate?: number }>): {
-    subtotal: number;
-    taxTotal: number;
-    discountTotal: number;
-    total: number;
-  } {
-    let subtotal = 0;
-    let taxTotal = 0;
-    let discountTotal = 0;
-
-    items.forEach((item) => {
-      const itemSubtotal = item.quantity * item.unitPrice;
-      subtotal += itemSubtotal;
-
-      if (item.discountRate && item.discountRate > 0) {
-        discountTotal += (itemSubtotal * item.discountRate) / 100;
-      }
-
-      const afterDiscount = itemSubtotal - (item.discountRate ? (itemSubtotal * item.discountRate) / 100 : 0);
-      if (item.taxRate && item.taxRate > 0) {
-        taxTotal += (afterDiscount * item.taxRate) / 100;
-      }
-    });
-
-    const total = subtotal - discountTotal + taxTotal;
-
-    return {
-      subtotal: Math.round(subtotal * 100) / 100,
-      taxTotal: Math.round(taxTotal * 100) / 100,
-      discountTotal: Math.round(discountTotal * 100) / 100,
-      total: Math.round(total * 100) / 100,
-    };
+  private calculateTotals(items: TotalsInput[]): InvoiceTotals {
+    return calculateTotals(items);
   }
 
   /**

@@ -56,7 +56,29 @@ in between the check and the write.
 | `base_revision` above the current revision | `failed`, `reason: invalid_base_revision` | unchanged |
 | `update` of a record that does not exist (no tombstone) | `failed`, `reason: not_found` | none |
 | Missing `change_id` / `base_revision` | `failed`, `reason: change_id_required` / `base_revision_required` | none |
-| Another user's record or reference, invalid data, a database error | `failed`, `reason: rejected` (one reason for all, so ownership failures stay indistinguishable; clients count it and stop resending after repeated failures) | unchanged |
+| Another user's record or reference, invalid data, an unexpected server error | `failed`, `reason: rejected` (one reason for all, so ownership failures stay indistinguishable) | unchanged |
+| A temporary database failure: deadlock, serialization failure, lock or statement timeout, lost connection, too many connections, out of memory or disk | `failed`, `reason: retry_later` | unchanged; nothing recorded, so the same `change_id` can be sent again |
+
+**Three kinds of outcome.** A client must keep them apart:
+
+- **Temporary** (`retry_later`, and transport errors or 5xx without a
+  result): the change was not applied and is still valid. Resend the same
+  change, with the same `change_id`, after a delay. Never give it up because
+  of these alone.
+- **Permanent** (`rejected` and the other `failed` reasons): the server will
+  refuse the same change again. The user decides: retry it later (for
+  example after fixing the data elsewhere) or discard it.
+- **Conflict** (`conflict` with `conflict_id`): the change is kept on the
+  server, in the conflicts API, for the owner to resolve; it is never resent.
+
+A temporary failure rolls back the whole change transaction (the
+`device_changes` row too), so a resend is processed as new, not answered
+from a stored outcome. Classification is by PostgreSQL SQLSTATE (classes
+`08`, `53`, and `40001`, `40P01`, `55P03`, `57014`, `57P01`-`57P03`) and
+Node connection errors (including node-postgres' "Connection terminated" and
+pool-timeout errors, which carry no code); every other error stays
+`rejected`. A protocol-2 pull on a database without migration 021 answers
+503, like pushes.
 
 **Items of sent, overdue or paid invoices.** An item's own revision does not
 move when its invoice is sent or paid, so every protocol-2 item change (create,
@@ -116,7 +138,69 @@ compared after normalising numbers (`"100.00"` = `100`), dates and JSON.
   characters and large JSON dropped; never metadata, credentials or payment
   data. Fields left out are listed in `omitted_fields`.
 
-### Pull additions
+### Pull (`GET /api/v1/sync/pull?protocol=2[&cursor=...][&limit=...]`)
+
+Protocol-2 clients pull with an opaque `cursor` instead of `since`. The first
+pull sends none; every response carries `cursor` and `hasMore`. While
+`hasMore` is true, pull again at once with the returned cursor (same pull,
+next page); when it is false, store the cursor and send it on the next sync.
+`limit` is records per page (default 500, 1-1000). Response fields are those
+below, plus `cursor` and `hasMore`.
+
+#### Delivery guarantee
+
+**Every change committed to a record of the user (create, update, soft or
+hard delete, restore) is delivered by some later pull of a client that keeps
+pulling with the cursors it is given, whatever the change's timestamps and
+however long its transaction ran.** Precisely:
+
+- Each tracked row (clients, invoices, invoice items, attachments,
+  tombstones) carries `change_txid`, the id of the transaction that last
+  changed it, set by the database triggers (migration 021), never by the
+  application or a device clock.
+- A complete pull reads up to a database snapshot `upto` taken when it
+  starts, and the cursor it ends with holds that snapshot. The next pull
+  returns the rows whose `change_txid` was **not** visible in the previous
+  snapshot and **is** visible in its own. A transaction still running at a
+  pull's snapshot is invisible to that pull and visible to a later one; one
+  that committed before is in the previous pull. So no committed change falls
+  between two pulls.
+- Pages of one pull share the same two snapshots and are keyset-ordered by
+  id (tombstones by type and id), so a pull's pages return each matching row
+  exactly once even while other writes go on. A row changed during paging
+  is returned by the next pull (its new transaction is not in `upto`).
+- Duplicates are possible, losses are not: a row can be delivered again
+  (for example after a client retries a page, or a row changed twice); apply
+  pulls idempotently by id and `revision`.
+- A record deleted and recreated between pulls arrives as its current state;
+  a hard delete arrives as a tombstone (tombstones page like records).
+- Restoring a client or invoice re-delivers its items and attachments
+  (devices dropped them with the tombstone, and pulls skip children of a
+  deleted parent, including edits made meanwhile): the restoring
+  transaction sets their `change_txid` without changing their revision.
+- Records of other users are never returned (same ownership filters as
+  before).
+- Limits: a cursor older than `SYNC_RETENTION_DAYS` gets
+  `fullResyncRequired` (tombstones may be pruned). A damaged or forged
+  cursor is refused with 400 `reason: invalid_cursor` (the client pulls
+  again without one). Transaction ids are 64-bit (`xid8`) and do not wrap.
+  The guarantee is for this server's database. A cursor whose snapshot is
+  ahead of the database's transaction counter (the database was restored
+  from a backup or replaced) gets `fullResyncRequired`. Not detected: a
+  point-in-time restore after which, before a device's next pull, at least
+  as many new transactions ran as the restore rolled back; after any
+  restore, the operator should have devices resync fully.
+- Why `upto` exists: it is not what prevents loss (the lower bound is); it
+  keeps all pages of one pull on the same set of changes, so a change made
+  while paging is not returned twice in one pull or half-applied across
+  pages. Tests: `backend/test/sync-delivery.e2e-spec.ts` (writes held open
+  in a separate session across a pull; pagination with concurrent edits;
+  tombstone paging; ownership).
+
+Older apps (protocol 1, `since=<timestamp>`) keep the timestamp pull and its
+gap (known gap 8).
+
+#### Other pull fields
 
 - `tombstones`: `{object_type, object_id, deleted_at}` of the user's records
   deleted after `since` (clients, invoices, items, attachments). A protocol-2
@@ -443,10 +527,13 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
 
 ### Protocol-2 client (in the mobile source; no app build released yet)
 
-- Local database version 3: `revision` on cached clients, invoices and
+- Local database version 6: `revision` on cached clients, invoices and
   items; `pending_changes` gains `base_revision`, `status`
-  (`pending` | `conflict`), `conflict_id`, `last_reason`. The upgrade from
-  versions 1 and 2 checks existing columns, so it is idempotent.
+  (`pending` | `conflict` | `failed`), `conflict_id`, `last_reason`,
+  `attempts`, `parent_id`, `parent_base_revision`, `last_result`,
+  `next_attempt_at`; version 6 adds the `sync_held_rows` table. The upgrade from versions 1 to 5 checks existing
+  columns, so it is idempotent (tested from a version-2 database on the host
+  and in the Android emulator workflow).
 - Push body `{protocol: 2, deviceId, changes}`; `change_id` = local row id;
   `base_revision` for update and delete (taken from the local record when the
   change is queued), never for create; an update queued with the previous
@@ -457,9 +544,8 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   again.
 - Results: `applied`/`merged`/`duplicate` mark the row synced and store the
   returned `revision`; `conflict` sets status `conflict` and the
-  `conflict_id`, and the row is never resent; `failed` stays pending with its
-  reason. `client_upgrade_required` (reason or notice) shows "update the
-  app".
+  `conflict_id`, and the row is never resent; `failed` is classified below.
+  `client_upgrade_required` (reason or notice) shows "update the app".
 - Invoice item changes also carry `parent_revision`: the local revision of
   the item's invoice when the change was queued (the invoice it is created
   in or moved to, else its current one; omitted when unknown). The invoice id
@@ -471,28 +557,55 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   old one, and a failed change was not applied); a row never sent keeps its
   id; a row whose last send got no answer is not rebased (its resend is
   answered from the stored outcome).
-- A change that keeps failing is given up (`status` `failed`, reason and
-  `attempts` kept) after 3 failed attempts, or at once for
-  `base_revision_required`, `change_id_required`, `change_id_reused`,
-  `invalid_object_id`, `invalid_base_revision`, `not_found`,
-  `record_deleted`. `rejected` (a refusal the server does not explain
-  further) counts. A `failed` result without a reason (older server), a
-  network error or a 5xx is not counted, and a row counts at most one
-  failure per sync. A given-up change is not sent and blocks neither later
-  changes of the record nor pull refreshes; the next pull is a full one
-  (no `since`), because earlier pulls skipped the record. The conflicts
-  screen lists these under "Changes that could not be synced", with
-  "Retry" (back to pending, attempts reset) and "Discard this change"
-  (local only, confirmed).
+- Three outcomes are kept apart and persisted:
+  - **conflict**, as above;
+  - **permanent rejection**: `failed` with any reason other than
+    `retry_later` (`rejected`, `change_id_reused`, `base_revision_required`,
+    `invalid_*`, `not_found`, `record_deleted`, `client_upgrade_required`,
+    ...): `status` `failed`, not sent again, blocks neither later changes of
+    the record nor pull refreshes; the next pull is a full one (no cursor),
+    because earlier pulls skipped the record. Listed under "Changes that
+    could not be synced" with "Retry" and "Discard this change" (local only,
+    confirmed);
+  - **temporary**: `failed` with `retry_later`, `failed` without a reason
+    (older server), no result for the change, HTTP 5xx, timeouts and network
+    errors: the change stays `pending`, `attempts` + 1, `last_reason`, and
+    `next_attempt_at` = now + 30 s doubling per attempt, at most 1 h, times a
+    random 75-100 %. It is never abandoned. Until `next_attempt_at` it is not
+    sent and holds back later changes of the same record; other records'
+    changes still go. The state is in SQLite, so it survives a restart.
+    Listed under "Waiting to retry" (last error, attempts, next attempt)
+    with "Retry now". A success clears `attempts` and `next_attempt_at`.
 - No fallback to protocol 1: a `400` on push, or a response without
   `results`, stops the sync, keeps the whole queue and shows "Sync needs a
   server update".
-- Pull: stores `revision`; does not overwrite a record that has a pending
-  change; applies `tombstones` (an invoice also removes its local items and
-  attachments); on `fullResyncRequired` clears the cached tables (not
-  `pending_changes`, and not the rows that still have a pending change) and
-  `last_sync_timestamp`, then pulls once without `since`; stores
-  `openConflicts` for the Settings badge.
+- Pull by cursor (`GET /sync/pull?protocol=2&cursor=&limit=500`): no stored cursor
+  (first sync, or an app that synced with `since` before) means a full
+  download. Pages are applied as they arrive while `hasMore`; the returned
+  cursor is stored only after the last page, so an interrupted pull restarts
+  from the previous cursor (re-delivered pages are upserts). `since` and
+  `last_sync_timestamp` are no longer used for pulling (the timestamp is
+  kept for the "Last synced" label). Each page: stores `revision`; does not
+  overwrite a record that has a pending change; applies `tombstones` (an
+  invoice also removes its local items and attachments). `fullResyncRequired`
+  clears the cached tables (not `pending_changes`, and not rows that still
+  have a pending change) and the cursor, then pulls from the start; `400`
+  `reason: invalid_cursor` drops the cursor and pulls from the start. Each
+  restart happens at most once per pull; at most 1,000 pages per pull.
+  `openConflicts` of the last page feeds the Settings badge.
+- A pulled server row of a record with a pending change is not lost when
+  the cursor moves past it: it is held in `sync_held_rows` (database
+  version 6; a newer delivery replaces it) and written locally once the
+  record has no pending or conflict change left (after a push outcome,
+  Retry/Discard, a conflict resolved here, or a conflict found no longer
+  open at the start of a pull), unless the local copy is already at that or
+  a newer revision. It is dropped instead when the device's own delete of
+  the record was applied (with an invoice's items and attachments), when
+  the conflict was resolved with the device's version (`apply_client`,
+  `restore`: the next pull delivers the new server version), and by
+  tombstones. Local conflicts are checked one by one
+  (`GET /sync/conflicts/:id`, at most 50 per pull, oldest first): 404 or
+  not open forgets them, any other error keeps them.
 - Conflicts screen (Settings > Data & Sync): list and detail from the
   conflicts API, field table (your version | current version, conflicting
   fields highlighted, omitted fields listed), and only the server's
@@ -527,6 +640,12 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   triggers stay, they keep revisions and tombstones current. A protocol-2 app
   needs a protocol-2 server.
 - Migration 018 remains required (`device_changes.change_id`).
+- Migration 021 (`backend/migrations/021_sync_delivery_cursor.sql`) adds
+  `change_txid` to the five tracked tables and updates the trigger functions
+  to set it. Additive and idempotent; existing rows get the id of the
+  migrating transaction, so the first cursor pull after it is complete. Run
+  it after 019 and 020, before the new server. Without it the server's
+  startup check refuses sync writes (503).
 
 ## Known gaps
 
@@ -547,11 +666,17 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
    about them only on a full resync.
 7. **REST invoice edits replace all items** (delete and recreate), so a
    device's offline edit of one of those items becomes an
-   `edit_after_delete` conflict; restoring it can duplicate a line, and
-   invoice totals are not recalculated by sync or by a restore.
-8. **Pull uses server timestamps** (`updatedAt > since`). A write that commits
-   just after a pull, with a timestamp before `lastSyncTimestamp`, is missed
-   until a later change touches the record or a full resync.
+   `edit_after_delete` conflict; restoring it can duplicate a line (the
+   restored line is added beside the new ones). Totals are kept consistent:
+   restoring or applying a device's item version recalculates the line total
+   and the invoice totals in the same transaction, and a restore into a sent,
+   overdue or paid invoice, or into an invoice that no longer exists, is
+   refused (422) and the conflict stays open.
+8. **Protocol-1 pulls use server timestamps** (`updatedAt > since`). For
+   older apps, a write that commits just after a pull, with a timestamp
+   before `lastSyncTimestamp`, is missed until a later change touches the
+   record or a full resync. Protocol-2 pulls use the snapshot cursor and do
+   not have this gap (see "Delivery guarantee").
 9. **The startup check** confirms the trigger names exist, not the bodies of
    the trigger functions; a hand-edited function would not be detected.
 10. **Items removed by hard-deleting an invoice row** get no tombstone of

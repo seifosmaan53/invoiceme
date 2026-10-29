@@ -1254,8 +1254,8 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
       final failed = await db.query(
         'pending_changes',
         columns: ['id'],
-        where: 'synced = ? AND status = ?',
-        whereArgs: [0, failedStatus],
+        where: 'synced = ? AND (status = ? OR (status = ? AND attempts > 0))',
+        whereArgs: [0, failedStatus, pendingStatus],
       );
       
       if (mounted) {
@@ -1466,7 +1466,7 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
             ),
             title: Text([
               if (_openConflicts > 0) '$_openConflicts sync conflict${_openConflicts == 1 ? '' : 's'} to review',
-              if (_failedChanges > 0) '$_failedChanges change${_failedChanges == 1 ? '' : 's'} could not be synced',
+              if (_failedChanges > 0) '$_failedChanges change${_failedChanges == 1 ? '' : 's'} waiting to retry or rejected',
             ].join(' · ')),
             subtitle: const Text('Changes from this device that were not applied as sent'),
             trailing: const Icon(Icons.chevron_right),

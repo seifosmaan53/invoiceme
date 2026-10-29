@@ -134,7 +134,7 @@ void main() {
           {'index': 0, 'change_id': 'c0', 'status': 'failed', 'reason': 'client_upgrade_required'},
         ],
       });
-      expect(plan.actions.single.kind, PushActionKind.keepPending);
+      expect(plan.actions.single.kind, PushActionKind.giveUp);
       expect(plan.state, SyncState.appUpdateRequired);
       expect(syncStateMessage(plan.state), contains('Update the app'));
     });
@@ -161,7 +161,7 @@ void main() {
       expect(syncStateMessage(plan.state), contains('Sync needs a server update'));
     });
 
-    test('missing, out-of-range or mismatched results stay pending', () {
+    test('missing, out-of-range or mismatched results stay pending (temporary)', () {
       final plan = planPushResults(sent.sublist(0, 3), {
         'results': [
           {'index': 0, 'change_id': 'other', 'status': 'applied'},
@@ -351,70 +351,229 @@ void main() {
     });
   });
 
-  group('failed changes (give up)', () {
+  group('retry model: conflict / permanent / temporary', () {
     Map<String, dynamic> failedWith(String id, String? reason) => {
           'results': [
             {'index': 0, 'change_id': id, 'status': 'failed', if (reason != null) 'reason': reason},
           ],
         };
 
-    test('a retryable reason counts attempts and gives up at the third', () {
-      var r = row('c', attempts: 0);
-      var a = planPushResults([r], failedWith('c', 'open_conflict')).actions.single;
-      expect((a.kind, a.attempts), (PushActionKind.keepPending, 1));
-      r = row('c', attempts: 1);
-      a = planPushResults([r], failedWith('c', 'open_conflict')).actions.single;
-      expect((a.kind, a.attempts), (PushActionKind.keepPending, 2));
-      r = row('c', attempts: 2);
-      a = planPushResults([r], failedWith('c', 'open_conflict')).actions.single;
-      expect((a.kind, a.attempts, a.reason), (PushActionKind.giveUp, 3, 'open_conflict'));
-    });
+    test('classification', () {
+      final conflict = planPushResults([row('c')], {
+        'results': [
+          {'index': 0, 'change_id': 'c', 'status': 'conflict', 'conflict_id': 'k'},
+        ],
+      }).actions.single;
+      expect(conflict.kind, PushActionKind.conflict);
 
-    test('non-retryable reasons give up at once', () {
-      for (final reason in nonRetryableReasons) {
-        final a = planPushResults([row('c')], failedWith('c', reason)).actions.single;
+      for (final reason in [
+        'rejected',
+        'change_id_reused',
+        'base_revision_required',
+        'invalid_base_revision',
+        'invalid_object_id',
+        'not_found',
+        'record_deleted',
+        'client_upgrade_required',
+      ]) {
+        final a = planPushResults([row('c', attempts: 2)], failedWith('c', reason)).actions.single;
         expect(a.kind, PushActionKind.giveUp, reason: reason);
-        expect(a.attempts, 1);
+        expect(a.attempts, 2, reason: 'a rejection does not add an attempt');
+      }
+
+      for (final reason in ['retry_later', null]) {
+        final a = planPushResults([row('c', attempts: 4)], failedWith('c', reason)).actions.single;
+        expect((a.kind, a.attempts, a.status), (PushActionKind.keepPending, 5, 'failed'), reason: '$reason');
       }
     });
 
-    test('"rejected" is counted and given up at the third failure', () {
-      final a1 = planPushResults([row('c')], failedWith('c', 'rejected')).actions.single;
-      expect((a1.kind, a1.attempts), (PushActionKind.keepPending, 1));
-      final a3 = planPushResults([row('c', attempts: 2)], failedWith('c', 'rejected')).actions.single;
-      expect((a3.kind, a3.attempts), (PushActionKind.giveUp, 3));
-      expect(failureReasonText('rejected'), contains('refused'));
+    test('transport errors and 5xx are temporary for every sent row, never abandoned', () {
+      final plan = transportFailure([row('a', attempts: 9), row('b')], serverErrorReason);
+      expect(plan.actions.map((a) => (a.kind, a.attempts, a.reason)), [
+        (PushActionKind.keepPending, 10, serverErrorReason),
+        (PushActionKind.keepPending, 1, serverErrorReason),
+      ]);
+      expect(plan.actions.first.status, isNull, reason: 'outcome unknown: not rebased under a new id');
     });
 
-    test('a failure counts at most once per sync (later rounds do not count)', () {
-      final a = planPushResults([row('c', attempts: 2)], failedWith('c', 'rejected'), countedThisSync: {'c'}).actions.single;
-      expect((a.kind, a.attempts), (PushActionKind.keepPending, 2));
-      // A non-retryable reason still gives up at once.
-      final b = planPushResults([row('c', attempts: 1)], failedWith('c', 'not_found'), countedThisSync: {'c'}).actions.single;
-      expect(b.kind, PushActionKind.giveUp);
+    test('backoff: 30 s doubling, capped at 1 h, jitter 75-100 %', () {
+      expect(backoffDelay(1, 0.999999), lessThanOrEqualTo(const Duration(seconds: 30)));
+      expect(backoffDelay(1, 0), const Duration(milliseconds: 22500));
+      expect(backoffDelay(2, 0.999999).inSeconds, 60);
+      expect(backoffDelay(3, 0).inSeconds, 90);
+      final delays = [for (var n = 1; n <= 12; n++) backoffDelay(n, 0.999999)];
+      for (var i = 1; i < delays.length; i++) {
+        expect(delays[i] >= delays[i - 1], isTrue);
+      }
+      expect(delays.last, lessThanOrEqualTo(const Duration(hours: 1)));
+      expect(backoffDelay(100, 0.999999), greaterThan(const Duration(minutes: 59)));
+      expect(backoffDelay(100, 0.999999), lessThanOrEqualTo(const Duration(hours: 1)));
     });
 
-    test('failed without a reason (older server, server error) is not counted', () {
-      final a = planPushResults([row('c', attempts: 2)], failedWith('c', null)).actions.single;
-      expect((a.kind, a.attempts), (PushActionKind.keepPending, 2));
+    test('a waiting row is not sent and holds back later changes of the same record only', () {
+      final now = DateTime.utc(2026, 10, 28, 12);
+      final later = now.add(const Duration(minutes: 5)).toIso8601String();
+      final rows = [
+        {...row('a1', objectId: 'A'), 'next_attempt_at': later},
+        row('a2', objectId: 'A'),
+        row('b1', objectId: 'B'),
+      ];
+      expect(selectPushBatch(rows, now: now).map((r) => r['id']), ['b1']);
+      expect(selectPushBatch(rows, now: now.add(const Duration(minutes: 6))).map((r) => r['id']), ['a1', 'b1']);
     });
 
-    test('a given-up change blocks neither later changes of the record nor pull refreshes', () {
+    test('a rejected change blocks neither later changes of the record nor pull refreshes', () {
       final rows = [row('a1', objectId: 'A', status: 'failed'), row('a2', objectId: 'A')];
       expect(selectPushBatch(rows).map((r) => r['id']), ['a2']);
       expect(pendingObjectKeys([row('a1', objectId: 'A', status: 'failed')]), isEmpty);
     });
 
-    test('after a give-up or discard the next pull fetches everything', () {
-      expect(pullSince('2026-10-28T00:00:00Z', fullPullNeeded: true), isNull);
-      expect(pullSince('2026-10-28T00:00:00Z', fullPullNeeded: false), '2026-10-28T00:00:00Z');
-    });
-
-    test('failed change label and reason in plain words', () {
+    test('labels and reasons in plain words', () {
       final f = FailedChange.fromRow(row('x', type: 'invoice_item', objectId: '1a2b3c4d-9999', status: 'failed')
         ..['last_reason'] = 'record_deleted');
       expect(f.label, 'Invoice item 1a2b3c4d (update)');
       expect(f.reasonText, 'The record was deleted on the server.');
+      expect(failureReasonText('retry_later'), contains('right now'));
+      expect(failureReasonText(networkErrorReason), contains('could not be reached'));
+    });
+  });
+
+  group('held server rows', () {
+    test('a delivered row replaces a held one unless it is older', () {
+      expect(deliveredReplacesHeld(3, 2), isTrue);
+      expect(deliveredReplacesHeld(2, 2), isTrue);
+      expect(deliveredReplacesHeld(1, 2), isFalse);
+      expect(deliveredReplacesHeld(null, 2), isTrue);
+    });
+
+    test('a held row applies unless the local copy is as new', () {
+      expect(heldRowApplies(3, 2), isTrue);
+      expect(heldRowApplies(2, 2), isFalse);
+      expect(heldRowApplies(2, 3), isFalse);
+      expect(heldRowApplies(2, null), isTrue);
+      expect(heldRowApplies(null, 5), isTrue);
+    });
+
+    test('pending and conflict changes hold rows back; rejected and synced do not', () {
+      expect(
+        heldBackObjectKeys([
+          row('1', objectId: 'A'),
+          row('2', objectId: 'B', status: 'conflict'),
+          row('3', objectId: 'C', status: 'failed'),
+          row('4', objectId: 'D', synced: 1),
+        ]),
+        {'client:A', 'client:B'},
+      );
+    });
+  });
+
+  group('cursor pull', () {
+    Map<String, dynamic> page(String cursor, {bool hasMore = false, bool full = false, int open = 0, List<String> clients = const []}) => {
+          'protocol': 2,
+          'clients': [for (final id in clients) {'id': id}],
+          'invoices': [],
+          'invoiceItems': [],
+          'attachments': [],
+          'tombstones': [],
+          'fullResyncRequired': full,
+          'openConflicts': open,
+          'lastSyncTimestamp': '2026-10-28T12:00:00.000Z',
+          'cursor': cursor,
+          'hasMore': hasMore,
+        };
+
+    test('query: no cursor = from the start; limit is sent', () {
+      expect(pullQuery(null), {'protocol': '2', 'limit': 500});
+      expect(pullQuery('abc'), {'protocol': '2', 'cursor': 'abc', 'limit': 500});
+      expect(startCursor(null, fullPullNeeded: false), isNull, reason: 'no stored cursor (migrating from since): full pull');
+      expect(startCursor('abc', fullPullNeeded: true), isNull);
+      expect(startCursor('abc', fullPullNeeded: false), 'abc');
+    });
+
+    test('follows hasMore and returns the last cursor only at the end', () async {
+      final asked = <String?>[];
+      final applied = <String>[];
+      final pages = {null: page('c1', hasMore: true, clients: ['a']), 'c1': page('c2', hasMore: true, clients: ['b']), 'c2': page('c3', open: 2)};
+      final result = await runCursorPull(
+        storedCursor: null,
+        fetch: (c) async {
+          asked.add(c);
+          return pages[c]!;
+        },
+        applyPage: (p) async => applied.add(p['cursor'] as String),
+        clearCache: () async => fail('no clear'),
+        dropCursor: () async => fail('no drop'),
+      );
+      expect(asked, [null, 'c1', 'c2']);
+      expect(applied, ['c1', 'c2', 'c3']);
+      expect((result.cursor, result.openConflicts, result.pages, result.restarted), ('c3', 2, 3, false));
+    });
+
+    test('an interrupted pull returns no cursor (the stored one is kept by the caller)', () async {
+      var calls = 0;
+      await expectLater(
+        runCursorPull(
+          storedCursor: 'old',
+          fetch: (c) async {
+            if (++calls == 2) throw Exception('network');
+            return page('n1', hasMore: true);
+          },
+          applyPage: (_) async {},
+          clearCache: () async {},
+          dropCursor: () async => fail('no drop'),
+        ),
+        throwsException,
+      );
+    });
+
+    test('fullResyncRequired: clear cache, drop cursor, pull from the start', () async {
+      final asked = <String?>[];
+      var cleared = 0, dropped = 0;
+      final result = await runCursorPull(
+        storedCursor: 'old',
+        fetch: (c) async {
+          asked.add(c);
+          return c == 'old' ? page('x', full: true) : page('fresh');
+        },
+        applyPage: (_) async {},
+        clearCache: () async => cleared++,
+        dropCursor: () async => dropped++,
+      );
+      expect(asked, ['old', null]);
+      expect((cleared, dropped, result.cursor, result.restarted), (1, 1, 'fresh', true));
+    });
+
+    test('invalid_cursor: drop the cursor and pull from the start (cache kept)', () async {
+      final asked = <String?>[];
+      var cleared = 0, dropped = 0;
+      final result = await runCursorPull(
+        storedCursor: 'bad',
+        fetch: (c) async {
+          asked.add(c);
+          if (c == 'bad') throw const InvalidCursorException();
+          return page('fresh');
+        },
+        applyPage: (_) async {},
+        clearCache: () async => cleared++,
+        dropCursor: () async => dropped++,
+      );
+      expect(asked, ['bad', null]);
+      expect((cleared, dropped, result.cursor), (0, 1, 'fresh'));
+      expect(isInvalidCursorResponse(400, {'reason': 'invalid_cursor'}), isTrue);
+      expect(isInvalidCursorResponse(400, {'message': 'x'}), isFalse);
+    });
+
+    test('hasMore without a cursor is an error, not a loop', () async {
+      await expectLater(
+        runCursorPull(
+          storedCursor: null,
+          fetch: (_) async => {...page(''), 'hasMore': true},
+          applyPage: (_) async {},
+          clearCache: () async {},
+          dropCursor: () async {},
+        ),
+        throwsFormatException,
+      );
     });
   });
 
@@ -442,11 +601,11 @@ void main() {
       expect(tombstoneDeletes(null), isEmpty);
     });
 
-    test('fullResyncRequired with since => full resync; never loops on a full pull', () {
-      expect(pullStep({'fullResyncRequired': true}, sentSince: true), PullStep.fullResync);
-      expect(pullStep({'fullResyncRequired': true}, sentSince: false), PullStep.apply);
-      expect(pullStep({'fullResyncRequired': false}, sentSince: true), PullStep.apply);
-      expect(pullStep({}, sentSince: true), PullStep.apply);
+    test('fullResyncRequired with a cursor => full resync; never loops on a pull from the start', () {
+      expect(pullStep({'fullResyncRequired': true}, sentCursor: true), PullStep.fullResync);
+      expect(pullStep({'fullResyncRequired': true}, sentCursor: false), PullStep.apply);
+      expect(pullStep({'fullResyncRequired': false}, sentCursor: true), PullStep.apply);
+      expect(pullStep({}, sentCursor: true), PullStep.apply);
     });
 
     test('openConflicts is read, 0 when absent', () {

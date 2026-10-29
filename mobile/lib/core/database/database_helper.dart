@@ -15,7 +15,8 @@ class DatabaseHelper {
 
   /// 3: sync protocol 2 (record revisions; base revision, status and conflict
   /// id on queued changes).
-  static const int schemaVersion = 4;
+  /// 5: next_attempt_at on queued changes (retry with backoff).
+  static const int schemaVersion = 5;
 
   static Future<Database> getDatabase() async {
     if (_database != null) return _database!;
@@ -29,6 +30,13 @@ class DatabaseHelper {
     );
     return _database!;
   }
+
+  /// Opens (creating or upgrading) the app database at [path] with
+  /// [factory]; used by tests and the on-device migration test.
+  static Future<Database> openAt(DatabaseFactory factory, String path) => factory.openDatabase(
+        path,
+        options: OpenDatabaseOptions(version: schemaVersion, onCreate: _onCreate, onUpgrade: _onUpgrade),
+      );
 
   static Future<String> _getDatabasePath() async {
     if (kIsWeb) {
@@ -134,7 +142,8 @@ class DatabaseHelper {
         attempts INTEGER NOT NULL DEFAULT 0,
         parent_id TEXT,
         parent_base_revision INTEGER,
-        last_result TEXT
+        last_result TEXT,
+        next_attempt_at TEXT
       );
     ''');
   }
@@ -145,9 +154,10 @@ class DatabaseHelper {
     if (oldVersion < 2) {
       await _addColumnIfMissing(db, 'clients_local', 'avatar_url', 'TEXT');
     }
-    // Version 4 repeats the version-3 steps: builds of the unreleased protocol-2
-    // branch created version 3 before every pending_changes column existed.
-    if (oldVersion < 4) {
+    // Versions 4 and 5 repeat the version-3 steps (each skips existing
+    // columns): unreleased protocol-2 builds created versions 3 and 4 before
+    // every pending_changes column existed.
+    if (oldVersion < 5) {
       for (final table in ['clients_local', 'invoices_local', 'invoice_items_local']) {
         await _addColumnIfMissing(db, table, 'revision', 'INTEGER');
       }
@@ -170,6 +180,8 @@ class DatabaseHelper {
     'parent_base_revision': 'INTEGER',
     // What is known about the last send (see sync_protocol.dart rebaseModeOf).
     'last_result': 'TEXT',
+    // Temporary failures: when the change may be sent again (UTC ISO-8601).
+    'next_attempt_at': 'TEXT',
   };
 
   static Future<void> _addColumnIfMissing(Database db, String table, String column, String definition) async {

@@ -41,6 +41,7 @@ class SyncConflictsScreen extends StatefulWidget {
 class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
   List<SyncConflict>? _conflicts;
   List<FailedChange> _failed = const [];
+  List<FailedChange> _waiting = const [];
   String? _error;
   bool _loading = true;
 
@@ -56,10 +57,12 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
       _error = null;
     });
     List<FailedChange> failed = const [];
+    List<FailedChange> waiting = const [];
     try {
       failed = await widget.failedChanges?.listFailed() ?? const [];
+      waiting = await widget.failedChanges?.listWaiting() ?? const [];
     } catch (_) {
-      failed = const [];
+      // Local queue unavailable: show the conflicts only.
     }
     try {
       final conflicts = await widget.api.listOpen();
@@ -67,6 +70,7 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
       setState(() {
         _conflicts = conflicts;
         _failed = failed;
+        _waiting = waiting;
         _loading = false;
       });
     } catch (e) {
@@ -74,6 +78,7 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
       setState(() {
         _conflicts = null;
         _failed = failed;
+        _waiting = waiting;
         _error = e is SyncConflictsApiException ? e.message : 'Could not load conflicts.';
         _loading = false;
       });
@@ -84,6 +89,21 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => SyncConflictDetailScreen(api: widget.api, conflictId: conflict.id),
     ));
+    if (mounted) await _load();
+  }
+
+  Future<void> _retryNow(FailedChange change) async {
+    final store = widget.failedChanges;
+    if (store == null) return;
+    try {
+      await store.retryNow(change.id);
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not sync now. The change will be retried later.')),
+        );
+      }
+    }
     if (mounted) await _load();
   }
 
@@ -128,7 +148,7 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
     Widget body;
     if (_loading) {
       body = const Center(child: CircularProgressIndicator());
-    } else if (_error == null && _conflicts!.isEmpty && _failed.isEmpty) {
+    } else if (_error == null && _conflicts!.isEmpty && _failed.isEmpty && _waiting.isEmpty) {
       body = const Center(child: Text('No sync conflicts to review.'));
     } else {
       body = RefreshIndicator(
@@ -153,6 +173,37 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
                 onTap: () => _open(c),
               ),
               const Divider(height: 1),
+            ],
+            if (_waiting.isNotEmpty) ...[
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 24, 16, 4),
+                child: Text('Waiting to retry', style: theme.textTheme.titleMedium),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16),
+                child: Text('These could not be sent because of a temporary problem. They are retried automatically.'),
+              ),
+              for (final w in _waiting)
+                ListTile(
+                  key: ValueKey('waiting-${w.id}'),
+                  leading: const Icon(Icons.schedule, color: Colors.orange),
+                  title: Text(w.label),
+                  subtitle: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(w.reasonText),
+                      Text(
+                        'Attempts: ${w.attempts}'
+                        '${w.nextAttemptAt != null ? ' · next attempt ${_formatDate(w.nextAttemptAt)}' : ' · next attempt on the next sync'}',
+                      ),
+                      TextButton(
+                        key: ValueKey('retry-now-${w.id}'),
+                        onPressed: () => _retryNow(w),
+                        child: const Text('Retry now'),
+                      ),
+                    ],
+                  ),
+                ),
             ],
             if (_failed.isNotEmpty) ...[
               Padding(

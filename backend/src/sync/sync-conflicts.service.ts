@@ -228,7 +228,7 @@ export class SyncConflictsService {
   private async touchForDelivery(manager: any, objectType: string, objectId: string): Promise<void> {
     const table = TOUCH_TABLES[objectType];
     if (!table) return;
-    await manager.query(`UPDATE ${table} SET change_txid = pg_current_xact_id() WHERE id::text = $1`, [String(objectId)]);
+    await manager.query(`UPDATE ${table} SET change_txid = pg_current_xact_id() WHERE id = $1::uuid`, [String(objectId)]);
   }
 
   private stale(current: number | null | undefined): never {
@@ -277,7 +277,7 @@ export class SyncConflictsService {
     if (objectType === ChangeObjectType.INVOICE) {
       // Restoring an invoice also touches its items (sync trigger). Lock them
       // first, as an item push does (item, then invoice), so the two cannot deadlock.
-      await manager.query('SELECT id FROM invoice_items WHERE invoice_id::text = $1 ORDER BY id FOR UPDATE', [String(objectId)]);
+      await manager.query('SELECT id FROM invoice_items WHERE invoice_id = $1::uuid ORDER BY id FOR UPDATE', [String(objectId)]);
     }
     const record = await bound.findOwnedRecord(objectType, objectId, userId);
     if (record && !record.deletedAt) throw new ConflictException('The record is not deleted');

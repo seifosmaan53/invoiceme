@@ -6,6 +6,8 @@
  * - every later run notifies every invoice it marks (newly overdue);
  * - an invoice is notified at most once, also with concurrent runs.
  */
+import { readFileSync } from 'fs';
+import { join } from 'path';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Client } from '../src/entities/client.entity';
@@ -148,5 +150,18 @@ describe('Overdue notifications after an upgrade (E2E)', () => {
     await expect(status.markOverdueInvoices()).rejects.toThrow(/OVERDUE_NOTIFY_HISTORICAL/);
     expect((await statuses())['A-1d']).toBe(InvoiceStatus.SENT);
     expect(await state.countBy({ key: OVERDUE_FIRST_RUN_KEY })).toBe(0);
+  });
+
+  it('without migration 022 the job fails loudly and marks nothing', async () => {
+    await make('A-1d', 1);
+    const ds = invoices.manager.connection;
+    await ds.query('DROP TABLE system_state');
+    try {
+      await expect(status.markOverdueInvoices()).rejects.toThrow(/Migration 022 \(system_state\) is not applied/);
+      expect((await statuses())['A-1d']).toBe(InvoiceStatus.SENT);
+      expect(notify).not.toHaveBeenCalled();
+    } finally {
+      await ds.query(readFileSync(join(__dirname, '../migrations/022_system_state.sql'), 'utf8'));
+    }
   });
 });

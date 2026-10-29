@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationBootstrap } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Repository, LessThan } from 'typeorm';
@@ -21,6 +21,10 @@ export function overdueNotifyHistorical(raw: string | undefined): boolean {
   throw new Error(`OVERDUE_NOTIFY_HISTORICAL must be "true" or "false", not "${raw}"`);
 }
 
+const MISSING_022 =
+  'Migration 022 (system_state) is not applied: the daily overdue check cannot run and no invoice is marked overdue. ' +
+  'Apply backend/migrations/022_system_state.sql (docs/operations/upgrade-2026-10-28.md).';
+
 /** system_state key (migration 022): business date of the first overdue run. */
 export const OVERDUE_FIRST_RUN_KEY = 'overdue.first_run';
 
@@ -37,7 +41,7 @@ export interface OverdueRunResult {
  * Runs daily at midnight to mark overdue invoices
  */
 @Injectable()
-export class InvoiceStatusService {
+export class InvoiceStatusService implements OnApplicationBootstrap {
   private readonly logger = new Logger(InvoiceStatusService.name);
 
   constructor(
@@ -66,6 +70,16 @@ export class InvoiceStatusService {
    * Runs daily at midnight in the server process's timezone; "today" is the
    * business date (BUSINESS_TIMEZONE).
    */
+  /** Migration 022 must be applied, or no invoice is ever marked overdue: say so at startup. */
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      const [{ present }] = await this.invoiceRepository.manager.query("SELECT to_regclass('system_state') IS NOT NULL AS present");
+      if (!present) this.logger.error(MISSING_022);
+    } catch (error) {
+      this.logger.error(`Could not check for migration 022: ${(error as Error).message}`);
+    }
+  }
+
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
   async markOverdueInvoices(): Promise<OverdueRunResult> {
     this.logger.log('Starting overdue invoice check...');
@@ -138,6 +152,10 @@ export class InvoiceStatusService {
       );
       return { marked: markedIds.length, notified: toNotify.length, silent, firstRun };
     } catch (error) {
+      if ((error as any)?.driverError?.code === '42P01' || (error as any)?.code === '42P01') {
+        this.logger.error(MISSING_022);
+        throw new Error(MISSING_022);
+      }
       this.logger.error('Error marking overdue invoices:', error);
       throw error;
     }

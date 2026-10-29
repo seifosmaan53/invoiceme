@@ -206,5 +206,17 @@ describe('Sync pull delivery guarantee (E2E)', () => {
     const ancient = encodeCursor({ v: 1, snap: '1:1:', issued: '2000-01-01T00:00:00.000Z' });
     const res = await pull(ancient).expect(200);
     expect(res.body).toMatchObject({ fullResyncRequired: true, hasMore: false, clients: [] });
+
+    // A cursor from a transaction counter ahead of the database's (restored
+    // or replaced database): start over rather than skip new writes
+    const ahead = '9000000000000:9000000000000:';
+    for (const c of [
+      encodeCursor({ v: 1, snap: ahead, issued: new Date().toISOString() }),
+      encodeCursor({ v: 1, from: null, upto: ahead, t: 0, after: null, issued: new Date().toISOString() }),
+    ]) {
+      expect((await pull(c).expect(200)).body).toMatchObject({ fullResyncRequired: true, hasMore: false, clients: [] });
+    }
+    const current = (await pullAll()).cursor;
+    expect((await pull(current).expect(200)).body.fullResyncRequired).toBeFalsy();
   });
 });

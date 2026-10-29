@@ -635,6 +635,19 @@ export class SyncService {
     const openConflicts = await this.conflictRepository.count({ where: { userId, status: SyncConflictStatus.OPEN } });
 
     const cursor = token ? decodeCursor(token) : null;
+    const known = cursor?.upto ?? cursor?.snap;
+    if (known) {
+      // A cursor from ahead of this database's transaction counter means the
+      // database was restored or replaced since (new transactions could reuse
+      // ids the cursor counts as delivered): start over.
+      const [{ ahead }] = await this.deviceChangeRepository.manager.query(
+        'SELECT pg_snapshot_xmax($1::pg_snapshot) > pg_snapshot_xmax(pg_current_snapshot()) AS ahead',
+        [known],
+      );
+      if (ahead) {
+        return { ...emptyPage(), fullResyncRequired: true, openConflicts, lastSyncTimestamp: issued, cursor: null, hasMore: false };
+      }
+    }
     if (cursor?.upto) {
       ({ from = null, upto, t: type = 0, after = null, issued } = cursor as Required<PullCursor>);
     } else {

@@ -177,10 +177,12 @@ however long its transaction ran.** Precisely:
   `fullResyncRequired` (tombstones may be pruned). A damaged or forged
   cursor is refused with 400 `reason: invalid_cursor` (the client pulls
   again without one). Transaction ids are 64-bit (`xid8`) and do not wrap.
-  The guarantee is for this server's database: restoring a backup or
-  replacing the database invalidates cursors in the same way as retention
-  (the client must resync fully; such a restore is an operator action that
-  should be followed by telling devices to resync).
+  The guarantee is for this server's database. A cursor whose snapshot is
+  ahead of the database's transaction counter (the database was restored
+  from a backup or replaced) gets `fullResyncRequired`. Not detected: a
+  point-in-time restore after which, before a device's next pull, at least
+  as many new transactions ran as the restore rolled back; after any
+  restore, the operator should have devices resync fully.
 - Why `upto` exists: it is not what prevents loss (the lower bound is); it
   keeps all pages of one pull on the same set of changes, so a change made
   while paging is not returned twice in one pull or half-applied across
@@ -570,7 +572,7 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
 - No fallback to protocol 1: a `400` on push, or a response without
   `results`, stops the sync, keeps the whole queue and shows "Sync needs a
   server update".
-- Pull by cursor (`GET /sync/pull?cursor=&limit=500`): no stored cursor
+- Pull by cursor (`GET /sync/pull?protocol=2&cursor=&limit=500`): no stored cursor
   (first sync, or an app that synced with `since` before) means a full
   download. Pages are applied as they arrive while `hasMore`; the returned
   cursor is stored only after the last page, so an interrupted pull restarts

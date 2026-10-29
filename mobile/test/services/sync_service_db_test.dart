@@ -530,21 +530,31 @@ void main() {
       await db.close();
     });
 
-    test('(e) upgrade to version 6 is idempotent and keeps held rows', () async {
+    test('(e) upgrades to versions 6 and 7 are idempotent and keep held rows and the check rotation', () async {
       var db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
-      expect(await db.getVersion(), 6);
-      // A version-5 database: no held-rows table yet.
+      expect(await db.getVersion(), DatabaseHelper.schemaVersion);
+      // A version-5 database: no held-rows or conflict-check table yet.
       await db.execute('DROP TABLE sync_held_rows');
+      await db.execute('DROP TABLE sync_conflict_checks');
       await db.setVersion(5);
       await db.close();
       db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
       await db.insert('sync_held_rows',
           {'object_type': 'client', 'object_id': 'x', 'revision': 2, 'row_json': '{}', 'held_at': 'now'});
-      // Upgrading again over an existing table changes nothing.
+      await db.insert('sync_conflict_checks', {'conflict_id': 'k', 'check_seq': 3});
+      // Upgrading again over existing tables changes nothing.
       await db.setVersion(5);
       await db.close();
       db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
-      expect(await db.getVersion(), 6);
+      expect(await db.getVersion(), DatabaseHelper.schemaVersion);
+      expect((await db.query('sync_held_rows')).single['object_id'], 'x');
+      expect((await db.query('sync_conflict_checks')).single['check_seq'], 3);
+      // A version-6 database gains only the check table.
+      await db.execute('DROP TABLE sync_conflict_checks');
+      await db.setVersion(6);
+      await db.close();
+      db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
+      expect(await db.query('sync_conflict_checks'), isEmpty);
       expect((await db.query('sync_held_rows')).single['object_id'], 'x');
       await db.close();
     });
@@ -625,6 +635,48 @@ void main() {
       expect(api.detailCalls.length, 50);
       expect(api.detailCalls.first, 'k0', reason: 'oldest first');
       expect(await db.query('pending_changes', where: 'status = ?', whereArgs: ['conflict']), hasLength(60));
+      await db.close();
+    });
+
+    test('more than 50 conflicts: checks rotate across syncs and an app restart, so none is starved', () async {
+      var (service, db) = await open();
+      const n = 120;
+      for (var i = 0; i < n; i++) {
+        await db.insert('pending_changes', {
+          'id': 'row-$i', 'user_id': 'u', 'device_id': 'd', 'object_type': 'client', 'object_id': 'x$i',
+          'change_type': 'update', 'change_json': '{}', 'synced': 0,
+          'created_at': '2026-10-01T00:${(i ~/ 60).toString().padLeft(2, '0')}:${(i % 60).toString().padLeft(2, '0')}Z',
+          'status': 'conflict', 'conflict_id': 'k$i',
+        });
+      }
+      // All open on the server except the newest, resolved on the web; the
+      // clock never moves, so the rotation cannot depend on time.
+      api.openConflictIds = [for (var i = 0; i < n - 1; i++) 'k$i'];
+      api.closedConflicts = {'k${n - 1}': 'dismiss'};
+      final localConflicts = () async => (await db.query('pending_changes', where: 'status = ?', whereArgs: ['conflict'])).length;
+
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 0; i < 50; i++) 'k$i'], reason: 'first sync: oldest first');
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 50; i < 100; i++) 'k$i'], reason: 'second sync: the next 50, not the same ones');
+      expect(await localConflicts(), n);
+      await db.close();
+
+      // Restart: the rotation is stored in the database
+      (service, db) = await open();
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 100; i < n; i++) 'k$i', for (var i = 0; i < 30; i++) 'k$i'],
+          reason: 'after restart: the never-checked ones, then the least recently checked');
+      expect(await localConflicts(), n - 1, reason: 'the newest conflict, resolved elsewhere, is forgotten');
+      expect(await db.query('pending_changes', where: 'conflict_id = ?', whereArgs: ['k${n - 1}']), isEmpty);
+
+      // Every still-open conflict keeps being revisited
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, [for (var i = 30; i < 80; i++) 'k$i']);
       await db.close();
     });
 

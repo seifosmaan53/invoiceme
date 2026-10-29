@@ -530,7 +530,9 @@ class SyncService implements FailedChangesStore {
     }
   }
 
-  /// Conflicts checked per pull (oldest first).
+  /// Conflicts checked per pull: the least recently checked first (never
+  /// checked first, then oldest), so with more than this many every conflict
+  /// is still checked within a few syncs, across app restarts.
   static const int maxConflictChecksPerSync = 50;
 
   /// Local conflict rows whose conflict is no longer open on the server
@@ -539,18 +541,26 @@ class SyncService implements FailedChangesStore {
   /// is checked on its own (`GET /sync/conflicts/:id`; the list is capped by
   /// the server): 404 or not open => forget it; any other error => keep it.
   Future<void> _forgetResolvedConflicts(Database db) async {
-    final local = await db.query('pending_changes',
-        columns: ['conflict_id'],
-        where: 'synced = ? AND status = ? AND conflict_id IS NOT NULL',
-        whereArgs: [0, conflictStatus],
-        orderBy: 'created_at ASC');
-    final ids = <String>[];
-    for (final row in local) {
-      final id = row['conflict_id'] as String;
-      if (!ids.contains(id)) ids.add(id);
-      if (ids.length >= maxConflictChecksPerSync) break;
-    }
+    final local = await db.rawQuery('''
+        SELECT p.conflict_id AS conflict_id
+          FROM pending_changes p
+          LEFT JOIN sync_conflict_checks c ON c.conflict_id = p.conflict_id
+         WHERE p.synced = 0 AND p.status = ? AND p.conflict_id IS NOT NULL
+         GROUP BY p.conflict_id
+         ORDER BY MAX(c.check_seq IS NOT NULL), MAX(c.check_seq), MIN(p.created_at), p.conflict_id
+         LIMIT ?''', [conflictStatus, maxConflictChecksPerSync]);
+    // Conflicts no longer held locally need no rotation entry
+    await db.rawDelete('''
+        DELETE FROM sync_conflict_checks WHERE conflict_id NOT IN (
+          SELECT conflict_id FROM pending_changes WHERE synced = 0 AND status = ? AND conflict_id IS NOT NULL)''',
+        [conflictStatus]);
+    final ids = [for (final row in local) row['conflict_id'] as String];
     for (final id in ids) {
+      // Recorded before the request (a sequence, not a clock), so a failing
+      // check also moves to the back of the rotation
+      await db.rawInsert('''
+          INSERT OR REPLACE INTO sync_conflict_checks (conflict_id, check_seq)
+          VALUES (?, (SELECT COALESCE(MAX(check_seq), 0) + 1 FROM sync_conflict_checks))''', [id]);
       try {
         final res = await _apiClient.get('/sync/conflicts/${Uri.encodeComponent(id)}', useCache: false);
         final data = res.data;
@@ -583,6 +593,7 @@ class SyncService implements FailedChangesStore {
         where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, conflictId]);
     await db.delete('pending_changes',
         where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, conflictId]);
+    await db.delete('sync_conflict_checks', where: 'conflict_id = ?', whereArgs: [conflictId]);
     if (dropHeld) {
       await _dropHeld(db, [for (final r in rows) (r['object_type'] as String, r['object_id'] as String)]);
     }

@@ -527,12 +527,13 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
 
 ### Protocol-2 client (in the mobile source; no app build released yet)
 
-- Local database version 6: `revision` on cached clients, invoices and
+- Local database version 7: `revision` on cached clients, invoices and
   items; `pending_changes` gains `base_revision`, `status`
   (`pending` | `conflict` | `failed`), `conflict_id`, `last_reason`,
   `attempts`, `parent_id`, `parent_base_revision`, `last_result`,
-  `next_attempt_at`; version 6 adds the `sync_held_rows` table. The upgrade from versions 1 to 5 checks existing
-  columns, so it is idempotent (tested from a version-2 database on the host
+  `next_attempt_at`; version 6 adds the `sync_held_rows` table, version 7
+  `sync_conflict_checks`. The upgrade from versions 1 to 6 checks existing
+  columns and tables, so it is idempotent (tested from a version-2 database on the host
   and in the Android emulator workflow).
 - Push body `{protocol: 2, deviceId, changes}`; `change_id` = local row id;
   `base_revision` for update and delete (taken from the local record when the
@@ -602,10 +603,14 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   a newer revision. It is dropped instead when the device's own delete of
   the record was applied (with an invoice's items and attachments), when
   the conflict was resolved with the device's version (`apply_client`,
-  `restore`: the next pull delivers the new server version), and by
-  tombstones. Local conflicts are checked one by one
-  (`GET /sync/conflicts/:id`, at most 50 per pull, oldest first): 404 or
-  not open forgets them, any other error keeps them.
+  `restore`), and by tombstones. Every resolution, whatever it writes
+  (possibly nothing), re-marks the record on the server, so the next pull
+  delivers its current version. Local conflicts are checked one by one
+  (`GET /sync/conflicts/:id`), at most 50 per pull, in a rotation stored in
+  `sync_conflict_checks` (never checked first, then least recently checked,
+  across syncs and restarts), so every conflict is checked within
+  ceil(n / 50) pulls: 404 or not open forgets it, any other error keeps it
+  and moves it to the back.
 - Conflicts screen (Settings > Data & Sync): list and detail from the
   conflicts API, field table (your version | current version, conflicting
   fields highlighted, omitted fields listed), and only the server's

@@ -17,7 +17,8 @@ class DatabaseHelper {
   /// id on queued changes).
   /// 5: next_attempt_at on queued changes (retry with backoff).
   /// 6: sync_held_rows (server rows a pull could not apply yet).
-  static const int schemaVersion = 6;
+  /// 7: sync_conflict_checks (when each local conflict was last checked).
+  static const int schemaVersion = 7;
 
   static Future<Database> getDatabase() async {
     if (_database != null) return _database!;
@@ -149,7 +150,18 @@ class DatabaseHelper {
     ''');
 
     await _createHeldRows(db);
+    await _createConflictChecks(db);
   }
+
+  /// When each local conflict was last checked against the server, so the
+  /// per-sync checks rotate through all of them (least recently checked
+  /// first) instead of always taking the same ones.
+  static Future<void> _createConflictChecks(Database db) => db.execute('''
+      CREATE TABLE IF NOT EXISTS sync_conflict_checks (
+        conflict_id TEXT PRIMARY KEY,
+        check_seq INTEGER NOT NULL
+      );
+    ''');
 
   /// Server rows a pull delivered while the record had a queued change (the
   /// pull does not overwrite it). Applied once the record has no pending or
@@ -185,6 +197,9 @@ class DatabaseHelper {
     if (oldVersion < 6) {
       await _createHeldRows(db);
     }
+    if (oldVersion < 7) {
+      await _createConflictChecks(db);
+    }
   }
 
   /// Columns version 3 adds to pending_changes.
@@ -193,7 +208,7 @@ class DatabaseHelper {
     'status': "TEXT NOT NULL DEFAULT 'pending'",
     'conflict_id': 'TEXT',
     'last_reason': 'TEXT',
-    // Failed attempts with a server reason (given up at 3, see sync_protocol.dart).
+    // Failed attempts (temporary failures back off and are never given up; see sync_protocol.dart).
     'attempts': 'INTEGER NOT NULL DEFAULT 0',
     // Invoice items: the item's invoice and its revision when queued (sent as parent_revision).
     'parent_id': 'TEXT',

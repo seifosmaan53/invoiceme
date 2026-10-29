@@ -9,15 +9,27 @@ import { ownedClient } from '../core/utils/cross-owner.util';
 import { addCalendarDays, businessToday, toCalendarDate } from '../common/calendar-date';
 
 /**
- * OVERDUE_NOTIFY_MAX_AGE_DAYS: unset = 7; a whole number of days (1 or more);
- * or `all` to notify every invoice the run marks. Anything else is an error.
+ * OVERDUE_NOTIFY_HISTORICAL: unset or `false` = the first overdue run of this
+ * version marks the historical backlog without notifications; `true` = it
+ * notifies the backlog too (explicit operator opt-in). Anything else is an
+ * error, so a typo cannot send or suppress notifications by accident.
  */
-export function overdueNotifyMaxAgeDays(raw: string | undefined): number | 'all' {
-  if (raw === undefined || raw.trim() === '') return 7;
-  const value = raw.trim().toLowerCase();
-  if (value === 'all') return 'all';
-  if (/^\d+$/.test(value) && Number(value) >= 1) return Number(value);
-  throw new Error(`OVERDUE_NOTIFY_MAX_AGE_DAYS must be a whole number of days (1 or more) or "all", not "${raw}"`);
+export function overdueNotifyHistorical(raw: string | undefined): boolean {
+  const value = (raw ?? '').trim().toLowerCase();
+  if (value === '' || value === 'false') return false;
+  if (value === 'true') return true;
+  throw new Error(`OVERDUE_NOTIFY_HISTORICAL must be "true" or "false", not "${raw}"`);
+}
+
+/** system_state key (migration 022): business date of the first overdue run. */
+export const OVERDUE_FIRST_RUN_KEY = 'overdue.first_run';
+
+export interface OverdueRunResult {
+  marked: number;
+  notified: number;
+  /** Historical invoices marked without a notification (first run only). */
+  silent: number;
+  firstRun: boolean;
 }
 
 /**
@@ -38,49 +50,65 @@ export class InvoiceStatusService {
 
   /**
    * Mark sent invoices as overdue once their due date is before today, and
-   * notify the owner of those that became overdue recently.
+   * notify the owner of each invoice that became overdue.
    *
-   * Only invoices due within the last OVERDUE_NOTIFY_MAX_AGE_DAYS (default 7)
-   * days are notified; older ones (the backlog on a first run after an
-   * upgrade, or after a long outage) are marked silently and counted in the
-   * log, so an upgrade does not send one email per historical invoice. To send
-   * the backlog deliberately, set OVERDUE_NOTIFY_MAX_AGE_DAYS=all for one run
-   * (docs/operations/upgrade-2026-10-28.md).
+   * Historical backlog: the first run of this version (no `overdue.first_run`
+   * in system_state) marks every sent invoice already past due, but notifies
+   * only those due yesterday, which become overdue today in any case. The
+   * others are marked silently and counted in the log, unless the operator
+   * opted in with OVERDUE_NOTIFY_HISTORICAL=true for that run. Every later run
+   * notifies everything it marks: an invoice it marks was not past due, or not
+   * sent, at the previous run (also after downtime).
    *
-   * The UPDATE returns exactly the rows it changed, so each invoice is
-   * notified at most once, by the run that marked it.
-   * Runs daily at midnight (00:00:00)
+   * The UPDATE returns exactly the rows it changed, and the first-run marker
+   * is written in the same transaction, so each invoice is notified at most
+   * once, by the run that marked it; concurrent runs are serialised.
+   * Runs daily at midnight in the server process's timezone; "today" is the
+   * business date (BUSINESS_TIMEZONE).
    */
   @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
-  async markOverdueInvoices(): Promise<{ marked: number; notified: number; silent: number }> {
+  async markOverdueInvoices(): Promise<OverdueRunResult> {
     this.logger.log('Starting overdue invoice check...');
 
     try {
-      // Calendar comparison: overdue once the due date is before today in
-      // the business timezone (common/calendar-date.ts).
       const today = businessToday();
-      const maxAge = overdueNotifyMaxAgeDays(process.env.OVERDUE_NOTIFY_MAX_AGE_DAYS);
-      const notifyFrom = maxAge === 'all' ? null : addCalendarDays(today, -maxAge);
+      const notifyHistorical = overdueNotifyHistorical(process.env.OVERDUE_NOTIFY_HISTORICAL);
 
-      const result = await this.invoiceRepository
-        .createQueryBuilder()
-        .update(Invoice)
-        .set({ status: InvoiceStatus.OVERDUE })
-        .where('due_date < :today', { today })
-        .andWhere('status = :sent', { sent: InvoiceStatus.SENT })
-        .andWhere('deleted_at IS NULL')
-        .returning(['id'])
-        .execute();
-      const markedIds: string[] = (result.raw ?? []).map((row: { id: string }) => row.id);
+      const { markedIds, firstRun } = await this.invoiceRepository.manager.transaction(async (manager) => {
+        await manager.query("SELECT pg_advisory_xact_lock(hashtext('invoice-overdue-job'))");
+        const marker = await manager.query('SELECT value FROM system_state WHERE key = $1', [OVERDUE_FIRST_RUN_KEY]);
+        const result = await manager
+          .createQueryBuilder()
+          .update(Invoice)
+          .set({ status: InvoiceStatus.OVERDUE })
+          .where('due_date < :today', { today })
+          .andWhere('status = :sent', { sent: InvoiceStatus.SENT })
+          .andWhere('deleted_at IS NULL')
+          .returning(['id'])
+          .execute();
+        if (marker.length === 0) {
+          await manager.query(
+            'INSERT INTO system_state (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING',
+            [OVERDUE_FIRST_RUN_KEY, today],
+          );
+        }
+        return {
+          markedIds: (result.raw ?? []).map((row: { id: string }) => row.id) as string[],
+          firstRun: marker.length === 0,
+        };
+      });
 
       const overdueInvoices = markedIds.length
         ? await this.invoiceRepository.find({ where: { id: In(markedIds) }, relations: ['client', 'user'] })
         : [];
-      const recent = overdueInvoices.filter(
-        (invoice) => notifyFrom === null || (invoice.dueDate && toCalendarDate(invoice.dueDate) >= notifyFrom),
-      );
+      // On the first run without opt-in, only invoices that become overdue today
+      const newlyOverdueFrom = addCalendarDays(today, -1);
+      const toNotify =
+        !firstRun || notifyHistorical
+          ? overdueInvoices
+          : overdueInvoices.filter((invoice) => invoice.dueDate && toCalendarDate(invoice.dueDate) >= newlyOverdueFrom);
 
-      for (const invoice of recent) {
+      for (const invoice of toNotify) {
         try {
           const user = await this.userRepository.findOne({ where: { id: invoice.userId } });
           if (user) {
@@ -100,12 +128,15 @@ export class InvoiceStatusService {
         }
       }
 
-      const silent = markedIds.length - recent.length;
+      const silent = markedIds.length - toNotify.length;
       this.logger.log(
-        `Marked ${markedIds.length} invoices as overdue; notified ${recent.length}` +
-          (silent ? `; ${silent} due before ${notifyFrom} marked without notification (OVERDUE_NOTIFY_MAX_AGE_DAYS)` : ''),
+        `Marked ${markedIds.length} invoices as overdue; notified ${toNotify.length}` +
+          (silent
+            ? `; first run of this version: ${silent} historical invoices (due before ${newlyOverdueFrom}) marked without ` +
+              'notification (set OVERDUE_NOTIFY_HISTORICAL=true before the first run to notify them)'
+            : ''),
       );
-      return { marked: markedIds.length, notified: recent.length, silent };
+      return { marked: markedIds.length, notified: toNotify.length, silent, firstRun };
     } catch (error) {
       this.logger.error('Error marking overdue invoices:', error);
       throw error;

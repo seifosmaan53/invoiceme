@@ -120,6 +120,10 @@ describe('Sync push: temporary failures are retryable (E2E)', () => {
       expect(isTransientFailure({ driverError: { code } })).toBe(true);
     }
     expect(isTransientFailure({ code: 'ECONNRESET' })).toBe(true);
+    // node-postgres errors without a code
+    expect(isTransientFailure(new Error('Connection terminated unexpectedly'))).toBe(true);
+    expect(isTransientFailure(new Error('timeout exceeded when trying to connect'))).toBe(true);
+    expect(isTransientFailure({ message: 'x', driverError: new Error('Connection terminated due to connection timeout') })).toBe(true);
     for (const code of ['23505', '23503', '22P02', '42501', undefined]) {
       expect(isTransientFailure({ driverError: { code } })).toBe(false);
     }

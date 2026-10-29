@@ -75,7 +75,10 @@ A temporary failure rolls back the whole change transaction (the
 `device_changes` row too), so a resend is processed as new, not answered
 from a stored outcome. Classification is by PostgreSQL SQLSTATE (classes
 `08`, `53`, and `40001`, `40P01`, `55P03`, `57014`, `57P01`-`57P03`) and
-Node connection errors; every other error stays `rejected`.
+Node connection errors (including node-postgres' "Connection terminated" and
+pool-timeout errors, which carry no code); every other error stays
+`rejected`. A protocol-2 pull on a database without migration 021 answers
+503, like pushes.
 
 **Items of sent, overdue or paid invoices.** An item's own revision does not
 move when its invoice is sent or paid, so every protocol-2 item change (create,
@@ -171,6 +174,10 @@ however long its transaction ran.** Precisely:
   pulls idempotently by id and `revision`.
 - A record deleted and recreated between pulls arrives as its current state;
   a hard delete arrives as a tombstone (tombstones page like records).
+- Restoring a client or invoice re-delivers its items and attachments
+  (devices dropped them with the tombstone, and pulls skip children of a
+  deleted parent, including edits made meanwhile): the restoring
+  transaction sets their `change_txid` without changing their revision.
 - Records of other users are never returned (same ownership filters as
   before).
 - Limits: a cursor older than `SYNC_RETENTION_DAYS` gets

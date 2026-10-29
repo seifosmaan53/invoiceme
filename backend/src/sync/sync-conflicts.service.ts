@@ -239,8 +239,14 @@ export class SyncConflictsService {
     if (conflict.objectType === ChangeObjectType.INVOICE_ITEM) {
       data.lineTotal = calculateLineTotal({ ...record, ...data });
     }
+    // writeRecord assigns data onto record: keep the line's invoice before a move
+    const previousInvoiceId = record.invoiceId;
     await bound.writeRecord(conflict.objectType, conflict.objectId, record, data, userId);
     await this.recomputeTotalsAfter(manager, conflict.objectType, conflict.objectType === ChangeObjectType.INVOICE ? conflict.objectId : record.invoiceId, userId);
+    if (conflict.objectType === ChangeObjectType.INVOICE_ITEM && previousInvoiceId && previousInvoiceId !== record.invoiceId) {
+      // The invoice the line left: recompute, to zero if it was its last line
+      await this.recomputeTotalsAfter(manager, conflict.objectType, previousInvoiceId, userId, { allowEmpty: true });
+    }
   }
 
   private async restore(bound: SyncService, manager: any, conflict: SyncConflict, userId: string, expected: number) {
@@ -303,7 +309,18 @@ export class SyncConflictsService {
    * (the same rules as the REST service), on the locked invoice row, when it
    * has lines. Runs in the resolution's transaction.
    */
-  private async recomputeTotalsAfter(manager: any, objectType: string, invoiceId: string | null | undefined, userId: string) {
+  /**
+   * Totals from the invoice's lines. An invoice without lines is left as it
+   * is (its lines may not have synced yet) unless allowEmpty: a line was just
+   * moved out of it.
+   */
+  private async recomputeTotalsAfter(
+    manager: any,
+    objectType: string,
+    invoiceId: string | null | undefined,
+    userId: string,
+    { allowEmpty = false }: { allowEmpty?: boolean } = {},
+  ) {
     if (!invoiceId || (objectType !== ChangeObjectType.INVOICE_ITEM && objectType !== ChangeObjectType.INVOICE)) return;
     const owned = await manager.query(
       'SELECT id FROM invoices WHERE id::text = $1 AND user_id::text = $2 AND deleted_at IS NULL FOR UPDATE',
@@ -311,7 +328,7 @@ export class SyncConflictsService {
     );
     if (owned.length === 0) return;
     const lines = await manager.getRepository(InvoiceItem).find({ where: { invoiceId } });
-    if (lines.length === 0) return;
+    if (lines.length === 0 && !allowEmpty) return;
     const totals = calculateTotals(lines);
     await manager.getRepository(Invoice).update(invoiceId, totals);
   }

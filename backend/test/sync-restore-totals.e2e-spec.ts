@@ -195,6 +195,47 @@ describe('Conflict resolution keeps invoice totals consistent (E2E)', () => {
     expect(after.stored.total).toBe(400);
   });
 
+  it('applying a device version that moves a line updates both invoices, the one it left down to zero', async () => {
+    const client = await clients.save(clients.create({ userId, name: 'C' }));
+    const make = async (description: string, unitPrice: number) =>
+      (
+        await http()
+          .post('/api/v1/invoices')
+          .set(auth())
+          .send({ clientId: client.id, issueDate: '2026-10-01', status: InvoiceStatus.DRAFT, items: [{ description, quantity: 1, unitPrice }] })
+          .expect(201)
+      ).body.id as string;
+    const a = await make('A', 100);
+    const b = await make('B', 50);
+    const line = (await items.find({ where: { invoiceId: a } }))[0];
+    await items.update({ id: line.id }, { description: 'A (server)' });
+    const push = await http()
+      .post('/api/v1/sync/push')
+      .set(auth())
+      .send({
+        protocol: 2,
+        deviceId: 'phone',
+        changes: [
+          {
+            change_id: uuidv4(), base_revision: 1, parent_revision: (await invoices.findOneByOrFail({ id: b })).revision,
+            object_type: 'invoice_item', object_id: line.id, change_type: 'update',
+            data: { description: 'A (phone)', invoiceId: b }, device_id: 'phone',
+          },
+        ],
+      })
+      .expect(200);
+    const conflictId = push.body.results[0].conflict_id;
+    expect(conflictId).toBeDefined();
+    const d = await detail(conflictId);
+    await resolve(conflictId, { action: 'apply_client', expected_revision: d.body.current.revision }).expect(200);
+    expect((await items.findOneByOrFail({ id: line.id })).invoiceId).toBe(b);
+    const left = await totalsOf(a);
+    const joined = await totalsOf(b);
+    expect(left.stored).toEqual({ subtotal: 0, taxTotal: 0, discountTotal: 0, total: 0 });
+    expect(joined.stored).toEqual(joined.expected);
+    expect(joined.stored.total).toBe(150);
+  });
+
   it('concurrent resolutions of one restore: exactly one succeeds and the totals count the line once', async () => {
     const { invoiceId, conflictId } = await editAfterDeleteOfLine();
     const d = await detail(conflictId);

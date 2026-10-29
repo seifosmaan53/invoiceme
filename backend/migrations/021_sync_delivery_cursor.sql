@@ -27,8 +27,9 @@ BEGIN
    WHERE n.key NOT IN ('revision', 'updated_at', 'change_txid')
      AND (to_jsonb(OLD) -> n.key) IS DISTINCT FROM n.value;
   IF cardinality(changed) = 0 THEN
+    -- No data change: same revision. change_txid stays as written, so a
+    -- touch (SET change_txid = pg_current_xact_id()) re-delivers the row.
     NEW.revision := OLD.revision;
-    NEW.change_txid := OLD.change_txid;
     RETURN NEW;
   END IF;
   NEW.revision := OLD.revision + 1;
@@ -55,6 +56,13 @@ BEGIN
       DO UPDATE SET revision = EXCLUDED.revision, deleted_at = EXCLUDED.deleted_at, change_txid = pg_current_xact_id();
     ELSIF OLD.deleted_at IS NOT NULL AND NEW.deleted_at IS NULL THEN
       DELETE FROM sync_tombstones WHERE object_type = TG_ARGV[0] AND object_id = NEW.id::text;
+      -- Devices dropped the children with the tombstone, and pulls skipped
+      -- their changes while the parent was deleted: deliver them again.
+      IF TG_ARGV[0] = 'invoice' THEN
+        UPDATE invoice_items SET change_txid = pg_current_xact_id() WHERE invoice_id::text = NEW.id::text;
+      END IF;
+      UPDATE attachments SET change_txid = pg_current_xact_id()
+       WHERE owner_type::text = TG_ARGV[0] AND owner_id::text = NEW.id::text;
     END IF;
     RETURN NEW;
   END IF;

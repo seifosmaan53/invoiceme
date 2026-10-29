@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from 'util';
-import { Inject, Injectable } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In, MoreThan, EntityManager, IsNull } from 'typeorm';
 import { ApiProperty } from '@nestjs/swagger';
@@ -289,7 +289,11 @@ const TRANSIENT_SQLSTATES = new Set([
 export function isTransientFailure(error: any): boolean {
   const code = error?.driverError?.code ?? error?.code;
   if (typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || code.startsWith('08'))) return true;
-  return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE'].includes(code);
+  if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE'].includes(code)) return true;
+  // node-postgres raises these without a code: a dropped connection, or no
+  // pool connection free within the timeout
+  const message = String(error?.driverError?.message ?? error?.message ?? '');
+  return /Connection terminated|timeout exceeded when trying to connect|Client has encountered a connection error|Connection is not established/i.test(message);
 }
 
 const failureReason = (error: unknown) => (isTransientFailure(error) ? RETRY_LATER : REJECTED);
@@ -625,6 +629,7 @@ export class SyncService {
    * "Delivery guarantee"): paged, every committed change delivered.
    */
   async pullByCursor(userId: string, token: string | undefined, limitRaw?: number): Promise<SyncPullPage> {
+    await this.schema.assertReady(); // change_txid and its triggers (migration 021)
     const limit = Math.min(Math.max(Number.isInteger(limitRaw) ? (limitRaw as number) : 500, 1), 1000);
     const now = new Date();
     let from: string | null = null;
@@ -635,6 +640,7 @@ export class SyncService {
     const openConflicts = await this.conflictRepository.count({ where: { userId, status: SyncConflictStatus.OPEN } });
 
     const cursor = token ? decodeCursor(token) : null;
+    if (cursor) await this.assertValidSnapshots([cursor.snap, cursor.from, cursor.upto]);
     const known = cursor?.upto ?? cursor?.snap;
     if (known) {
       // A cursor from ahead of this database's transaction counter means the
@@ -687,6 +693,18 @@ export class SyncService {
   }
 
   /** Rows of one record type changed by transactions visible in `upto` but not in `from`, in key order. */
+  /** Snapshots PostgreSQL accepts (the regex lets through e.g. xmin > xmax): else 400 invalid_cursor. */
+  private async assertValidSnapshots(values: Array<string | null | undefined>): Promise<void> {
+    for (const value of values) {
+      if (!value) continue;
+      try {
+        await this.deviceChangeRepository.manager.query('SELECT $1::pg_snapshot', [value]);
+      } catch {
+        throw new BadRequestException({ message: 'Invalid sync cursor; pull again without it', reason: 'invalid_cursor' });
+      }
+    }
+  }
+
   private async pullRows(t: number, userId: string, from: string | null, upto: string, after: string | null, limit: number): Promise<any[]> {
     const kind = PULL_TYPES[t];
     const qb = (this.repositoryFor(kind === 'tombstone' ? 'tombstone' : kind) as Repository<any>).createQueryBuilder('r');

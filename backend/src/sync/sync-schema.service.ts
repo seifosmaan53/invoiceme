@@ -31,7 +31,7 @@ export class SyncSchemaService implements OnApplicationBootstrap {
     await this.check();
     if (!this.ready) {
       this.logger.error(
-        'Sync triggers from migration 019 are missing: sync writes and conflict resolution are disabled until it is applied',
+        'Sync triggers from migrations 019/021 are missing: sync writes, protocol-2 pulls and conflict resolution are disabled until they are applied',
       );
     }
   }
@@ -50,7 +50,7 @@ export class SyncSchemaService implements OnApplicationBootstrap {
   async assertReady(): Promise<void> {
     if (!this.ready) await this.check();
     if (!this.ready) {
-      throw new ServiceUnavailableException('Sync is unavailable: the server database is missing migration 019');
+      throw new ServiceUnavailableException('Sync is unavailable: the server database is missing migration 019 or 021');
     }
   }
 }

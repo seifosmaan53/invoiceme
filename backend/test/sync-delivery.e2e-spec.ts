@@ -16,6 +16,7 @@ import { Repository } from 'typeorm';
 import { Client } from '../src/entities/client.entity';
 import { Invoice } from '../src/entities/invoice.entity';
 import { InvoiceItem } from '../src/entities/invoice-item.entity';
+import { Attachment, AttachmentOwnerType } from '../src/entities/attachment.entity';
 import { encodeCursor } from '../src/sync/sync-pull-cursor';
 import { createE2eApp, E2eApp } from './e2e-app';
 
@@ -24,6 +25,7 @@ describe('Sync pull delivery guarantee (E2E)', () => {
   let clients: Repository<Client>;
   let invoices: Repository<Invoice>;
   let items: Repository<InvoiceItem>;
+  let attachments: Repository<Attachment>;
   let token: string;
   let otherToken: string;
   let userId: string;
@@ -34,6 +36,7 @@ describe('Sync pull delivery guarantee (E2E)', () => {
     clients = e2e.moduleFixture.get(getRepositoryToken(Client));
     invoices = e2e.moduleFixture.get(getRepositoryToken(Invoice));
     items = e2e.moduleFixture.get(getRepositoryToken(InvoiceItem));
+    attachments = e2e.moduleFixture.get(getRepositoryToken(Attachment));
   });
   afterAll(async () => {
     await e2e.app.close();
@@ -196,12 +199,46 @@ describe('Sync pull delivery guarantee (E2E)', () => {
     expect(theirs.clients.map((c) => c.id)).toEqual([otherClient.id]);
   });
 
+  it('restoring an invoice or client re-delivers its lines and attachments, including edits made while it was deleted', async () => {
+    const { client, invoice, item } = await seed();
+    const attach = (ownerType: AttachmentOwnerType, ownerId: string) =>
+      attachments.save(attachments.create({ ownerType, ownerId, url: 'https://cdn.example.test/receipts/r1.png', filename: 'r1.png' }));
+    const invoiceFile = await attach(AttachmentOwnerType.INVOICE, invoice.id);
+    const clientFile = await attach(AttachmentOwnerType.CLIENT, client.id);
+    const first = await pullAll();
+    expect(first.invoiceItems.map((i) => i.id)).toEqual([item.id]);
+
+    // Deleted (devices drop the children with the tombstone), a line edited meanwhile, then restored
+    await invoices.update({ id: invoice.id }, { deletedAt: new Date() });
+    await clients.update({ id: client.id }, { deletedAt: new Date() });
+    const deleted = await pullAll(first.cursor);
+    expect(deleted.tombstones.map((t) => t.object_type).sort()).toEqual(['client', 'invoice']);
+    await items.update({ id: item.id }, { description: 'edited while deleted' });
+    const quiet = await pullAll(deleted.cursor);
+    expect(quiet.invoiceItems).toEqual([]); // parent still deleted
+
+    const revisionBefore = (await items.findOneByOrFail({ id: item.id })).revision;
+    await clients.update({ id: client.id }, { deletedAt: null });
+    await invoices.update({ id: invoice.id }, { deletedAt: null });
+    const restored = await pullAll(quiet.cursor);
+    expect(restored.invoices.map((i) => i.id)).toEqual([invoice.id]);
+    expect(restored.invoiceItems.map((i) => [i.id, i.description])).toEqual([[item.id, 'edited while deleted']]);
+    expect(restored.attachments.map((a) => a.id).sort()).toEqual([invoiceFile.id, clientFile.id].sort());
+    // Re-delivery does not count as an edit: no revision bump, so no false conflicts
+    expect((await items.findOneByOrFail({ id: item.id })).revision).toBe(revisionBefore);
+  });
+
   it('rejects a damaged cursor, and asks for a full resync when the cursor is older than retention', async () => {
     await seed();
     const bad = await pull('not-a-cursor').expect(400);
     expect(bad.body.reason).toBe('invalid_cursor');
     const injected = encodeCursor({ v: 1, snap: "1:2:'; DROP TABLE clients; --", issued: new Date().toISOString() } as any);
     expect((await pull(injected).expect(400)).body.reason).toBe('invalid_cursor');
+    // Matches the format but PostgreSQL refuses it (xmin > xmax, unsorted in-progress list)
+    for (const snap of ['5:3:', '3:9:7,4']) {
+      const c = encodeCursor({ v: 1, snap, issued: new Date().toISOString() });
+      expect((await pull(c).expect(400)).body.reason).toBe('invalid_cursor');
+    }
 
     const ancient = encodeCursor({ v: 1, snap: '1:1:', issued: '2000-01-01T00:00:00.000Z' });
     const res = await pull(ancient).expect(200);

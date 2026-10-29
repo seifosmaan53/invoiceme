@@ -105,6 +105,7 @@ export const SCHEMA_MARKERS: { migration: string; table: string; column?: string
   // Marks the tables only; the server itself checks the triggers (sync-schema.service.ts).
   { migration: '019', table: 'sync_conflicts' },
   { migration: '020', table: 'payment_events' },
+  { migration: '021', table: 'sync_tombstones', column: 'change_txid' },
 ];
 
 export function missingRequirements(requires: SchemaRequirements, live: LiveSchema): string[] {

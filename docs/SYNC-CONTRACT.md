@@ -56,7 +56,26 @@ in between the check and the write.
 | `base_revision` above the current revision | `failed`, `reason: invalid_base_revision` | unchanged |
 | `update` of a record that does not exist (no tombstone) | `failed`, `reason: not_found` | none |
 | Missing `change_id` / `base_revision` | `failed`, `reason: change_id_required` / `base_revision_required` | none |
-| Another user's record or reference, invalid data, a database error | `failed`, `reason: rejected` (one reason for all, so ownership failures stay indistinguishable; clients count it and stop resending after repeated failures) | unchanged |
+| Another user's record or reference, invalid data, an unexpected server error | `failed`, `reason: rejected` (one reason for all, so ownership failures stay indistinguishable) | unchanged |
+| A temporary database failure: deadlock, serialization failure, lock or statement timeout, lost connection, too many connections, out of memory or disk | `failed`, `reason: retry_later` | unchanged; nothing recorded, so the same `change_id` can be sent again |
+
+**Three kinds of outcome.** A client must keep them apart:
+
+- **Temporary** (`retry_later`, and transport errors or 5xx without a
+  result): the change was not applied and is still valid. Resend the same
+  change, with the same `change_id`, after a delay. Never give it up because
+  of these alone.
+- **Permanent** (`rejected` and the other `failed` reasons): the server will
+  refuse the same change again. The user decides: retry it later (for
+  example after fixing the data elsewhere) or discard it.
+- **Conflict** (`conflict` with `conflict_id`): the change is kept on the
+  server, in the conflicts API, for the owner to resolve; it is never resent.
+
+A temporary failure rolls back the whole change transaction (the
+`device_changes` row too), so a resend is processed as new, not answered
+from a stored outcome. Classification is by PostgreSQL SQLSTATE (classes
+`08`, `53`, and `40001`, `40P01`, `55P03`, `57014`, `57P01`-`57P03`) and
+Node connection errors; every other error stays `rejected`.
 
 **Items of sent, overdue or paid invoices.** An item's own revision does not
 move when its invoice is sent or paid, so every protocol-2 item change (create,
@@ -116,7 +135,63 @@ compared after normalising numbers (`"100.00"` = `100`), dates and JSON.
   characters and large JSON dropped; never metadata, credentials or payment
   data. Fields left out are listed in `omitted_fields`.
 
-### Pull additions
+### Pull (`GET /api/v1/sync/pull?protocol=2[&cursor=...][&limit=...]`)
+
+Protocol-2 clients pull with an opaque `cursor` instead of `since`. The first
+pull sends none; every response carries `cursor` and `hasMore`. While
+`hasMore` is true, pull again at once with the returned cursor (same pull,
+next page); when it is false, store the cursor and send it on the next sync.
+`limit` is records per page (default 500, 1-1000). Response fields are those
+below, plus `cursor` and `hasMore`.
+
+#### Delivery guarantee
+
+**Every change committed to a record of the user (create, update, soft or
+hard delete, restore) is delivered by some later pull of a client that keeps
+pulling with the cursors it is given, whatever the change's timestamps and
+however long its transaction ran.** Precisely:
+
+- Each tracked row (clients, invoices, invoice items, attachments,
+  tombstones) carries `change_txid`, the id of the transaction that last
+  changed it, set by the database triggers (migration 021), never by the
+  application or a device clock.
+- A complete pull reads up to a database snapshot `upto` taken when it
+  starts, and the cursor it ends with holds that snapshot. The next pull
+  returns the rows whose `change_txid` was **not** visible in the previous
+  snapshot and **is** visible in its own. A transaction still running at a
+  pull's snapshot is invisible to that pull and visible to a later one; one
+  that committed before is in the previous pull. So no committed change falls
+  between two pulls.
+- Pages of one pull share the same two snapshots and are keyset-ordered by
+  id (tombstones by type and id), so a pull's pages return each matching row
+  exactly once even while other writes go on. A row changed during paging
+  is returned by the next pull (its new transaction is not in `upto`).
+- Duplicates are possible, losses are not: a row can be delivered again
+  (for example after a client retries a page, or a row changed twice); apply
+  pulls idempotently by id and `revision`.
+- A record deleted and recreated between pulls arrives as its current state;
+  a hard delete arrives as a tombstone (tombstones page like records).
+- Records of other users are never returned (same ownership filters as
+  before).
+- Limits: a cursor older than `SYNC_RETENTION_DAYS` gets
+  `fullResyncRequired` (tombstones may be pruned). A damaged or forged
+  cursor is refused with 400 `reason: invalid_cursor` (the client pulls
+  again without one). Transaction ids are 64-bit (`xid8`) and do not wrap.
+  The guarantee is for this server's database: restoring a backup or
+  replacing the database invalidates cursors in the same way as retention
+  (the client must resync fully; such a restore is an operator action that
+  should be followed by telling devices to resync).
+- Why `upto` exists: it is not what prevents loss (the lower bound is); it
+  keeps all pages of one pull on the same set of changes, so a change made
+  while paging is not returned twice in one pull or half-applied across
+  pages. Tests: `backend/test/sync-delivery.e2e-spec.ts` (writes held open
+  in a separate session across a pull; pagination with concurrent edits;
+  tombstone paging; ownership).
+
+Older apps (protocol 1, `since=<timestamp>`) keep the timestamp pull and its
+gap (known gap 8).
+
+#### Other pull fields
 
 - `tombstones`: `{object_type, object_id, deleted_at}` of the user's records
   deleted after `since` (clients, invoices, items, attachments). A protocol-2
@@ -527,6 +602,12 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   triggers stay, they keep revisions and tombstones current. A protocol-2 app
   needs a protocol-2 server.
 - Migration 018 remains required (`device_changes.change_id`).
+- Migration 021 (`backend/migrations/021_sync_delivery_cursor.sql`) adds
+  `change_txid` to the five tracked tables and updates the trigger functions
+  to set it. Additive and idempotent; existing rows get the id of the
+  migrating transaction, so the first cursor pull after it is complete. Run
+  it after 019 and 020, before the new server. Without it the server's
+  startup check refuses sync writes (503).
 
 ## Known gaps
 
@@ -547,11 +628,17 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
    about them only on a full resync.
 7. **REST invoice edits replace all items** (delete and recreate), so a
    device's offline edit of one of those items becomes an
-   `edit_after_delete` conflict; restoring it can duplicate a line, and
-   invoice totals are not recalculated by sync or by a restore.
-8. **Pull uses server timestamps** (`updatedAt > since`). A write that commits
-   just after a pull, with a timestamp before `lastSyncTimestamp`, is missed
-   until a later change touches the record or a full resync.
+   `edit_after_delete` conflict; restoring it can duplicate a line (the
+   restored line is added beside the new ones). Totals are kept consistent:
+   restoring or applying a device's item version recalculates the line total
+   and the invoice totals in the same transaction, and a restore into a sent,
+   overdue or paid invoice, or into an invoice that no longer exists, is
+   refused (422) and the conflict stays open.
+8. **Protocol-1 pulls use server timestamps** (`updatedAt > since`). For
+   older apps, a write that commits just after a pull, with a timestamp
+   before `lastSyncTimestamp`, is missed until a later change touches the
+   record or a full resync. Protocol-2 pulls use the snapshot cursor and do
+   not have this gap (see "Delivery guarantee").
 9. **The startup check** confirms the trigger names exist, not the bodies of
    the trigger functions; a hand-edited function would not be detected.
 10. **Items removed by hard-deleting an invoice row** get no tombstone of

@@ -275,6 +275,10 @@ class SyncService implements FailedChangesStore {
             await db.update(table, {'revision': action.revision}, where: 'id = ?', whereArgs: [action.objectId]);
           }
           settled.add((action, batch[i]));
+          if (batch[i]['change_type'] == 'delete') {
+            // The device deleted the record: nothing held may bring it back.
+            await _dropHeld(db, [(action.objectType, action.objectId)], withChildren: true);
+          }
           break;
         case PushActionKind.conflict:
           await db.update(
@@ -467,15 +471,26 @@ class SyncService implements FailedChangesStore {
   }
 
   Future<void> _dropHeldForTombstones(Database db, List tombstones) async {
+    await _dropHeld(
+      db,
+      [
+        for (final t in tombstones)
+          if (t is Map && t['object_type'] is String && t['object_id'] is String)
+            (t['object_type'] as String, t['object_id'] as String),
+      ],
+      withChildren: true,
+    );
+  }
+
+  /// Forgets held server rows of [records] (object type, id); [withChildren]:
+  /// also of the items and attachments of an invoice among them.
+  Future<void> _dropHeld(Database db, List<(String, String)> records, {bool withChildren = false}) async {
     final invoiceIds = <String>{};
-    for (final t in tombstones) {
-      if (t is! Map || t['object_type'] is! String || t['object_id'] is! String) continue;
-      await db.delete('sync_held_rows',
-          where: 'object_type = ? AND object_id = ?', whereArgs: [t['object_type'], t['object_id']]);
-      if (t['object_type'] == 'invoice') invoiceIds.add(t['object_id'] as String);
+    for (final (type, id) in records) {
+      await db.delete('sync_held_rows', where: 'object_type = ? AND object_id = ?', whereArgs: [type, id]);
+      if (type == 'invoice') invoiceIds.add(id);
     }
-    if (invoiceIds.isEmpty) return;
-    // Items and attachments of a deleted invoice.
+    if (!withChildren || invoiceIds.isEmpty) return;
     for (final held in await db.query('sync_held_rows',
         where: 'object_type IN (?, ?)', whereArgs: ['invoice_item', 'attachment'])) {
       final row = jsonDecode(held['row_json'] as String) as Map<String, dynamic>;
@@ -515,39 +530,62 @@ class SyncService implements FailedChangesStore {
     }
   }
 
+  /// Conflicts checked per pull (oldest first).
+  static const int maxConflictChecksPerSync = 50;
+
   /// Local conflict rows whose conflict is no longer open on the server
   /// (resolved or dismissed here, on another device or on the web) are
-  /// removed, so held server rows of the record can be applied. Best effort:
-  /// without an answer nothing changes.
+  /// removed, so held server rows of the record can be applied. Each conflict
+  /// is checked on its own (`GET /sync/conflicts/:id`; the list is capped by
+  /// the server): 404 or not open => forget it; any other error => keep it.
   Future<void> _forgetResolvedConflicts(Database db) async {
     final local = await db.query('pending_changes',
-        columns: ['conflict_id'], where: 'synced = ? AND status = ?', whereArgs: [0, conflictStatus]);
-    if (local.isEmpty) return;
-    Set<String> open;
-    try {
-      final res = await _apiClient.get('/sync/conflicts', queryParameters: {'status': 'open'}, useCache: false);
-      final data = res.data;
-      if (data is! List) return;
-      open = {for (final c in data) if (c is Map && c['id'] is String) c['id'] as String};
-    } catch (e) {
-      debugPrint('Sync: could not check conflicts: $e');
-      return;
-    }
+        columns: ['conflict_id'],
+        where: 'synced = ? AND status = ? AND conflict_id IS NOT NULL',
+        whereArgs: [0, conflictStatus],
+        orderBy: 'created_at ASC');
+    final ids = <String>[];
     for (final row in local) {
-      final id = row['conflict_id'];
-      if (id is String && !open.contains(id)) {
-        await db.delete('pending_changes',
-            where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, id]);
+      final id = row['conflict_id'] as String;
+      if (!ids.contains(id)) ids.add(id);
+      if (ids.length >= maxConflictChecksPerSync) break;
+    }
+    for (final id in ids) {
+      try {
+        final res = await _apiClient.get('/sync/conflicts/${Uri.encodeComponent(id)}', useCache: false);
+        final data = res.data;
+        if (data is! Map || data['status'] == 'open') continue;
+        await _forgetConflict(db, id, dropHeld: data['resolution'] != 'dismiss');
+      } on DioException catch (e) {
+        if (e.response?.statusCode == 404) {
+          // Gone (pruned after retention): the server row stands.
+          await _forgetConflict(db, id, dropHeld: false);
+        } else {
+          debugPrint('Sync: could not check conflict $id: ${e.message}');
+        }
+      } catch (e) {
+        debugPrint('Sync: could not check conflict $id: $e');
       }
     }
   }
 
   @override
-  Future<void> conflictResolved(String conflictId) async {
+  Future<void> conflictResolved(String conflictId, String action) async {
     final db = await _db();
+    await _forgetConflict(db, conflictId, dropHeld: action != 'dismiss');
+    await _applyHeldRows(db);
+  }
+
+  /// Removes the local rows of [conflictId]; with [dropHeld], also the server
+  /// rows held for those records (a resolution wrote a newer server version).
+  Future<void> _forgetConflict(Database db, String conflictId, {required bool dropHeld}) async {
+    final rows = await db.query('pending_changes',
+        where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, conflictId]);
     await db.delete('pending_changes',
         where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, conflictId]);
-    await _applyHeldRows(db);
+    if (dropHeld) {
+      await _dropHeld(db, [for (final r in rows) (r['object_type'] as String, r['object_id'] as String)]);
+    }
   }
 
   Future<void> _upsert(Database db, String table, Map<String, dynamic> row) =>

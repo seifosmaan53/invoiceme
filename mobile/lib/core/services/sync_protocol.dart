@@ -802,9 +802,11 @@ abstract class FailedChangesStore {
   /// Removes the queued change from this device; nothing is sent.
   Future<void> discard(String id);
 
-  /// A conflict was resolved or dismissed: forget its local change rows and
-  /// apply server rows held for the record.
-  Future<void> conflictResolved(String conflictId);
+  /// A conflict was resolved with [action] (`dismiss`, `apply_client`,
+  /// `restore`): forget its local change rows. After `dismiss` the server row
+  /// held for the record is applied; after a resolution that wrote a new
+  /// version on the server it is dropped (the next pull delivers the new one).
+  Future<void> conflictResolved(String conflictId, String action);
 
   /// Queues a rejected change again (status pending, attempts 0, no wait).
   Future<void> retry(String id);

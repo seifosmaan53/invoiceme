@@ -804,9 +804,12 @@ abstract class FailedChangesStore {
 
   /// A conflict was resolved with [action] (`dismiss`, `apply_client`,
   /// `restore`): forget its local change rows. After `dismiss` the server row
-  /// held for the record is applied; after a resolution that wrote a new
-  /// version on the server it is dropped (the next pull delivers the new one).
-  Future<void> conflictResolved(String conflictId, String action);
+  /// held for the record is applied. After a resolution with the device's
+  /// version, held rows older than [currentRevision] (the record's revision
+  /// after the resolution) are dropped; rows at or above it are the server's
+  /// state after the resolution and are applied. With [currentRevision]
+  /// unknown nothing is dropped (the server re-delivers the record anyway).
+  Future<void> conflictResolved(String conflictId, String action, {int? currentRevision});
 
   /// Queues a rejected change again (status pending, attempts 0, no wait).
   Future<void> retry(String id);

@@ -603,14 +603,21 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   a newer revision. It is dropped instead when the device's own delete of
   the record was applied (with an invoice's items and attachments), when
   the conflict was resolved with the device's version (`apply_client`,
-  `restore`), and by tombstones. Every resolution, whatever it writes
+  `restore`): then only held rows older than the record's revision after the
+  resolution (`current.revision` of the resolve response or conflict detail)
+  are dropped; a held row at or above it is the server's state after the
+  resolution and is applied, and with that revision unknown nothing is
+  dropped. Also dropped by tombstones. Every resolution, whatever it writes
   (possibly nothing), re-marks the record on the server, so the next pull
-  delivers its current version. Local conflicts are checked one by one
-  (`GET /sync/conflicts/:id`), at most 50 per pull, in a rotation stored in
-  `sync_conflict_checks` (never checked first, then least recently checked,
-  across syncs and restarts), so every conflict is checked within
-  ceil(n / 50) pulls: 404 or not open forgets it, any other error keeps it
-  and moves it to the back.
+  delivers its current version. A pull holds a delivery only while the
+  record has a pending change; during an open conflict alone it applies it.
+  Local conflicts are checked one by one (`GET /sync/conflicts/:id`), at
+  most 50 per pull, round-robin: a queue stored in `sync_conflict_checks`
+  (a sequence, not a clock) that new conflicts join at the back, oldest
+  first, and checked conflicts return to, across syncs and restarts. A
+  conflict is checked within ceil(q / 50) pulls, q being the queue length
+  when it joined or was last checked, however many new conflicts arrive: 404
+  or not open forgets it, any other error keeps it.
 - Conflicts screen (Settings > Data & Sync): list and detail from the
   conflicts API, field table (your version | current version, conflicting
   fields highlighted, omitted fields listed), and only the server's

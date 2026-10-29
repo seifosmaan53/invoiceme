@@ -101,7 +101,8 @@ class FakeFailedStore implements FailedChangesStore {
   final resolved = <String>[];
 
   @override
-  Future<void> conflictResolved(String conflictId, String action) async => resolved.add('$conflictId:$action');
+  Future<void> conflictResolved(String conflictId, String action, {int? currentRevision}) async =>
+      resolved.add('$conflictId:$action');
   final List<FailedChange> waiting = [];
 
   @override

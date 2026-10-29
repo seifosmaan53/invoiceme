@@ -328,7 +328,7 @@ class _SyncConflictDetailScreenState extends State<SyncConflictDetailScreen> {
         expectedRevision: detail.current.revision,
       );
       try {
-        await widget.localQueue?.conflictResolved(widget.conflictId, action);
+        await widget.localQueue?.conflictResolved(widget.conflictId, action, currentRevision: result.current.revision);
       } catch (_) {
         // The next sync notices the resolution too.
       }

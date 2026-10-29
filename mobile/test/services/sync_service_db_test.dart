@@ -37,6 +37,16 @@ class FakeApi extends ApiClient {
   Object? Function(String? cursor)? pullError;
   List<String> openConflictIds = [];
 
+  /// The list endpoint answers at most this many (the server takes 200).
+  int listCap = 200;
+
+  /// Closed conflicts: id -> resolution (dismiss, apply_client, restore).
+  Map<String, String> closedConflicts = {};
+
+  /// GET /sync/conflicts/:id answers this HTTP status instead.
+  Map<String, int> detailErrors = {};
+  final detailCalls = <String>[];
+
   static Map<String, dynamic> emptyPage(String cursor, {bool hasMore = false, List<Map<String, dynamic>> clients = const []}) => {
         'protocol': 2,
         'clients': clients,
@@ -64,7 +74,29 @@ class FakeApi extends ApiClient {
     if (path == '/sync/conflicts') {
       return Response(
         requestOptions: RequestOptions(path: path),
-        data: [for (final id in openConflictIds) {'id': id}],
+        data: [for (final id in openConflictIds.take(listCap)) {'id': id}],
+        statusCode: 200,
+      );
+    }
+    if (path.startsWith('/sync/conflicts/')) {
+      final id = path.substring('/sync/conflicts/'.length);
+      detailCalls.add(id);
+      final error = detailErrors[id] ??
+          (openConflictIds.contains(id) || closedConflicts.containsKey(id) ? null : 404);
+      if (error != null) {
+        throw DioException(
+          requestOptions: RequestOptions(path: path),
+          response: Response(requestOptions: RequestOptions(path: path), statusCode: error, data: {}),
+        );
+      }
+      final open = openConflictIds.contains(id);
+      return Response(
+        requestOptions: RequestOptions(path: path),
+        data: {
+          'id': id,
+          'status': open ? 'open' : (closedConflicts[id] == 'dismiss' ? 'dismissed' : 'resolved'),
+          'resolution': open ? null : closedConflicts[id],
+        },
         statusCode: 200,
       );
     }
@@ -425,6 +457,7 @@ void main() {
 
       // Dismissed (server row unchanged, so it is never delivered again).
       api.openConflictIds = [];
+      api.closedConflicts = {'k1': 'dismiss'};
       await service.sync();
       final row = await local(db, 'c1');
       expect((row['name'], row['revision']), ('Web', 2));
@@ -490,7 +523,7 @@ void main() {
       (service, db) = await open(); // new SyncService over the same file
       expect(await heldCount(db), 1);
       expect((await local(db, 'c4'))['name'], 'Device');
-      await service.conflictResolved('k4'); // "Keep current version" in the conflict screen
+      await service.conflictResolved('k4', 'dismiss'); // "Keep current version" in the conflict screen
       final row = await local(db, 'c4');
       expect((row['name'], row['revision']), ('Web', 2));
       expect(await heldCount(db), 0);
@@ -513,6 +546,110 @@ void main() {
       db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
       expect(await db.getVersion(), 6);
       expect((await db.query('sync_held_rows')).single['object_id'], 'x');
+      await db.close();
+    });
+
+    Future<void> conflictOn(SyncService service, String id, String conflictId) async {
+      api.pushReplies.add((b) => {
+            'results': [
+              {'index': 0, 'change_id': (b['changes'] as List)[0]['change_id'], 'status': 'conflict', 'conflict_id': conflictId},
+            ],
+          });
+      api.openConflictIds = [...api.openConflictIds, conflictId];
+      await service.sync();
+    }
+
+    test('A: a held row never brings back a record this device deleted', () async {
+      final (service, db) = await open();
+      await db.insert('clients_local', {
+        'id': 'd1', 'user_id': 'u', 'name': 'Doomed', 'created_at': 'x', 'updated_at': 'x', 'revision': 3,
+      });
+      await service.queueChange(
+          objectType: ChangeObjectType.client, objectId: 'd1', changeType: ChangeType.delete, data: {});
+      await db.delete('clients_local', where: 'id = ?', whereArgs: ['d1']); // the device removed it
+      api.pushReplies.add((b) => resultFor(b, 'failed', reason: 'retry_later'));
+      api.pages = {null: FakeApi.emptyPage('p1', clients: [serverClient('d1', 'Edited elsewhere', 4)])};
+      await service.sync();
+      expect(await heldCount(db), 1);
+      now = now.add(const Duration(hours: 2));
+      api.pushReplies.add((b) => resultFor(b, 'applied'));
+      await service.sync();
+      expect(await db.query('clients_local', where: 'id = ?', whereArgs: ['d1']), isEmpty);
+      expect(await heldCount(db), 0);
+      await db.close();
+    });
+
+    test('A: deleting an invoice also drops held rows of its items', () async {
+      final (service, db) = await open();
+      await service.queueChange(
+          objectType: ChangeObjectType.invoice, objectId: 'inv1', changeType: ChangeType.delete, data: {}, baseRevision: 2);
+      await db.insert('sync_held_rows', {
+        'object_type': 'invoice_item', 'object_id': 'it1', 'revision': 2,
+        'row_json': '{"id":"it1","invoice_id":"inv1","description":"x","quantity":1,"unit_price":1,"tax_rate":0,"discount_rate":0,"line_total":1,"created_at":"x"}',
+        'held_at': 'x',
+      });
+      api.pushReplies.add((b) => resultFor(b, 'applied'));
+      await service.sync();
+      expect(await db.query('invoice_items_local'), isEmpty);
+      expect(await heldCount(db), 0);
+      await db.close();
+    });
+
+    test('B: conflicts are checked one by one, not against the capped list', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'b1');
+      await pullDuringBackoff(service, db, 'b1');
+      await conflictOn(service, 'b1', 'k-b1');
+      api.listCap = 0; // more open conflicts than the list returns
+      api.detailCalls.clear();
+      await service.sync();
+      expect(api.detailCalls, ['k-b1']);
+      expect((await local(db, 'b1'))['name'], 'Device', reason: 'still open: held row waits');
+      expect(await db.query('pending_changes', where: 'status = ?', whereArgs: ['conflict']), hasLength(1));
+      await db.close();
+    });
+
+    test('B: an error other than 404 keeps the conflict; checks are bounded per sync', () async {
+      final (service, db) = await open();
+      for (var i = 0; i < 60; i++) {
+        await db.insert('pending_changes', {
+          'id': 'row-$i', 'user_id': 'u', 'device_id': 'd', 'object_type': 'client', 'object_id': 'x$i',
+          'change_type': 'update', 'change_json': '{}', 'synced': 0,
+          'created_at': '2026-10-01T00:00:${i.toString().padLeft(2, '0')}Z',
+          'status': 'conflict', 'conflict_id': 'k$i',
+        });
+      }
+      api.openConflictIds = [for (var i = 0; i < 60; i++) 'k$i'];
+      api.detailErrors = {'k0': 500};
+      await service.sync();
+      expect(api.detailCalls.length, 50);
+      expect(api.detailCalls.first, 'k0', reason: 'oldest first');
+      expect(await db.query('pending_changes', where: 'status = ?', whereArgs: ['conflict']), hasLength(60));
+      await db.close();
+    });
+
+    test('C: after "Use my version" the held (older) server row is dropped, not applied', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'u1');
+      await pullDuringBackoff(service, db, 'u1');
+      await conflictOn(service, 'u1', 'k-u1');
+      await service.conflictResolved('k-u1', 'apply_client');
+      expect((await local(db, 'u1'))['name'], 'Device');
+      expect(await heldCount(db), 0);
+      expect(await db.query('pending_changes', where: 'status = ?', whereArgs: ['conflict']), isEmpty);
+      await db.close();
+    });
+
+    test('C: resolved elsewhere with the device version: held row dropped at the next pull', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'u2');
+      await pullDuringBackoff(service, db, 'u2');
+      await conflictOn(service, 'u2', 'k-u2');
+      api.openConflictIds = [];
+      api.closedConflicts = {'k-u2': 'apply_client'};
+      await service.sync();
+      expect((await local(db, 'u2'))['name'], 'Device');
+      expect(await heldCount(db), 0);
       await db.close();
     });
   });

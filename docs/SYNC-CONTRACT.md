@@ -599,7 +599,13 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   record has no pending or conflict change left (after a push outcome,
   Retry/Discard, a conflict resolved here, or a conflict found no longer
   open at the start of a pull), unless the local copy is already at that or
-  a newer revision. Tombstones drop held rows of deleted records.
+  a newer revision. It is dropped instead when the device's own delete of
+  the record was applied (with an invoice's items and attachments), when
+  the conflict was resolved with the device's version (`apply_client`,
+  `restore`: the next pull delivers the new server version), and by
+  tombstones. Local conflicts are checked one by one
+  (`GET /sync/conflicts/:id`, at most 50 per pull, oldest first): 404 or
+  not open forgets them, any other error keeps them.
 - Conflicts screen (Settings > Data & Sync): list and detail from the
   conflicts API, field table (your version | current version, conflicting
   fields highlighted, omitted fields listed), and only the server's

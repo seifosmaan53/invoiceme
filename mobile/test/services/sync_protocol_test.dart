@@ -438,6 +438,35 @@ void main() {
     });
   });
 
+  group('held server rows', () {
+    test('a delivered row replaces a held one unless it is older', () {
+      expect(deliveredReplacesHeld(3, 2), isTrue);
+      expect(deliveredReplacesHeld(2, 2), isTrue);
+      expect(deliveredReplacesHeld(1, 2), isFalse);
+      expect(deliveredReplacesHeld(null, 2), isTrue);
+    });
+
+    test('a held row applies unless the local copy is as new', () {
+      expect(heldRowApplies(3, 2), isTrue);
+      expect(heldRowApplies(2, 2), isFalse);
+      expect(heldRowApplies(2, 3), isFalse);
+      expect(heldRowApplies(2, null), isTrue);
+      expect(heldRowApplies(null, 5), isTrue);
+    });
+
+    test('pending and conflict changes hold rows back; rejected and synced do not', () {
+      expect(
+        heldBackObjectKeys([
+          row('1', objectId: 'A'),
+          row('2', objectId: 'B', status: 'conflict'),
+          row('3', objectId: 'C', status: 'failed'),
+          row('4', objectId: 'D', synced: 1),
+        ]),
+        {'client:A', 'client:B'},
+      );
+    });
+  });
+
   group('cursor pull', () {
     Map<String, dynamic> page(String cursor, {bool hasMore = false, bool full = false, int open = 0, List<String> clients = const []}) => {
           'protocol': 2,

@@ -714,6 +714,26 @@ Future<PullRunResult> runCursorPull({
 /// `openConflicts` of a pull response (0 when absent).
 int openConflictsOf(Map<String, dynamic> response) => parseRevision(response['openConflicts']) ?? 0;
 
+/// A newly delivered server row replaces a held one unless it is older.
+/// Rows without a revision (attachments) always replace.
+bool deliveredReplacesHeld(int? deliveredRevision, int? heldRevision) =>
+    deliveredRevision == null || heldRevision == null || deliveredRevision >= heldRevision;
+
+/// A held server row is written locally unless the local copy is already at
+/// the same or a newer revision (for example after the device's change was
+/// applied and its new revision stored). Without revisions it is written.
+bool heldRowApplies(int? heldRevision, int? localRevision) =>
+    heldRevision == null || localRevision == null || heldRevision > localRevision;
+
+/// Keys `object_type:object_id` of records with a pending or conflict
+/// change: held server rows of these wait.
+Set<String> heldBackObjectKeys(List<Map<String, Object?>> rows) => {
+      for (final row in rows)
+        if ((row['synced'] ?? 0) == 0 &&
+            ((row['status'] ?? pendingStatus) == pendingStatus || row['status'] == conflictStatus))
+          '${row['object_type']}:${row['object_id']}',
+    };
+
 /// Keys `object_type:object_id` of rows that are still waiting to be sent.
 /// Pulled copies of these records do not overwrite the local one.
 Set<String> pendingObjectKeys(List<Map<String, Object?>> rows) => {
@@ -781,6 +801,10 @@ abstract class FailedChangesStore {
 
   /// Removes the queued change from this device; nothing is sent.
   Future<void> discard(String id);
+
+  /// A conflict was resolved or dismissed: forget its local change rows and
+  /// apply server rows held for the record.
+  Future<void> conflictResolved(String conflictId);
 
   /// Queues a rejected change again (status pending, attempts 0, no wait).
   Future<void> retry(String id);

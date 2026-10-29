@@ -16,7 +16,8 @@ class DatabaseHelper {
   /// 3: sync protocol 2 (record revisions; base revision, status and conflict
   /// id on queued changes).
   /// 5: next_attempt_at on queued changes (retry with backoff).
-  static const int schemaVersion = 5;
+  /// 6: sync_held_rows (server rows a pull could not apply yet).
+  static const int schemaVersion = 6;
 
   static Future<Database> getDatabase() async {
     if (_database != null) return _database!;
@@ -146,7 +147,23 @@ class DatabaseHelper {
         next_attempt_at TEXT
       );
     ''');
+
+    await _createHeldRows(db);
   }
+
+  /// Server rows a pull delivered while the record had a queued change (the
+  /// pull does not overwrite it). Applied once the record has no pending or
+  /// conflict change left, unless the local copy is already newer.
+  static Future<void> _createHeldRows(Database db) => db.execute('''
+      CREATE TABLE IF NOT EXISTS sync_held_rows (
+        object_type TEXT NOT NULL,
+        object_id TEXT NOT NULL,
+        revision INTEGER,
+        row_json TEXT NOT NULL,
+        held_at TEXT NOT NULL,
+        PRIMARY KEY (object_type, object_id)
+      );
+    ''');
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     // Every step checks the existing columns, so running it twice (or on a
@@ -164,6 +181,9 @@ class DatabaseHelper {
       for (final column in v3PendingChangeColumns.entries) {
         await _addColumnIfMissing(db, 'pending_changes', column.key, column.value);
       }
+    }
+    if (oldVersion < 6) {
+      await _createHeldRows(db);
     }
   }
 

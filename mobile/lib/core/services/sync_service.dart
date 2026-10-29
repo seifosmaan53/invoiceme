@@ -35,7 +35,8 @@ const String syncCursorKey = 'sync_cursor';
 const String syncStateKey = 'sync_state';
 const String syncOpenConflictsKey = 'sync_open_conflicts';
 
-/// Set when a change was rejected or discarded: the next pull fetches
+/// Set by earlier builds when a change was rejected or discarded (read and
+/// cleared once; skipped server rows are now held, see sync_held_rows): the next pull fetches
 /// everything, because earlier pulls skipped that record while it was queued.
 const String syncFullPullNeededKey = 'sync_full_pull_needed';
 
@@ -316,10 +317,10 @@ class SyncService implements FailedChangesStore {
             where: 'id = ?',
             whereArgs: [action.changeId],
           );
-          await _markFullPullNeeded();
           break;
       }
     }
+    await _applyHeldRows(db);
 
     final renamed = <String, String>{};
     if (settled.isEmpty) return renamed;
@@ -345,6 +346,8 @@ class SyncService implements FailedChangesStore {
     final fullPullNeeded = prefs.getBool(syncFullPullNeededKey) ?? false;
     // An app that synced with `since` before has no cursor: full pull.
     final start = startCursor(prefs.getString(syncCursorKey), fullPullNeeded: fullPullNeeded);
+    await _forgetResolvedConflicts(db);
+    await _applyHeldRows(db);
 
     final result = await runCursorPull(
       storedCursor: start,
@@ -365,6 +368,7 @@ class SyncService implements FailedChangesStore {
     if (fullPullNeeded) await prefs.remove(syncFullPullNeededKey);
     await prefs.setInt(syncOpenConflictsKey, result.openConflicts);
     await prefs.setString(lastSyncTimestampKey, result.lastSyncTimestamp ?? _clock().toUtc().toIso8601String());
+    await _applyHeldRows(db);
     debugPrint('Sync pull: ${result.pages} page(s)');
     return result.openConflicts;
   }
@@ -385,6 +389,8 @@ class SyncService implements FailedChangesStore {
   /// waiting to be sent are kept: the pull does not overwrite them, so they
   /// would otherwise disappear until the next full resync.
   Future<void> _clearLocalCache(Database db) async {
+    // The full pull delivers (and holds again) everything.
+    await db.delete('sync_held_rows');
     final keep = pendingObjectKeys(await _pendingRows(db));
     for (final entry in localTableFor.entries) {
       final ids = keep
@@ -402,60 +408,150 @@ class SyncService implements FailedChangesStore {
 
   Future<void> _applyPull(Database db, Map<String, dynamic> data) async {
     final pending = pendingObjectKeys(await _pendingRows(db));
-    bool hasPending(String type, String id) => pending.contains('$type:$id');
 
-    if (data['clients'] != null) {
-      final clients = (data['clients'] as List).map((json) => Client.fromJson(json)).toList();
-      for (final client in clients) {
-        if (hasPending('client', client.id)) continue;
-        await _upsert(db, 'clients_local', client.toDatabaseMap());
+    Future<void> deliver(String type, String id, int? revision, Map<String, dynamic> row) async {
+      if (pending.contains('$type:$id')) {
+        // The record has a queued change: keep the server row until it is settled.
+        await _hold(db, type, id, revision, row);
+      } else {
+        await _upsert(db, localTableFor[type]!, row);
+        await db.delete('sync_held_rows',
+            where: 'object_type = ? AND object_id = ? AND (revision IS NULL OR ? IS NULL OR revision <= ?)',
+            whereArgs: [type, id, revision, revision]);
       }
-      debugPrint('Pulled ${clients.length} clients');
     }
 
-    if (data['invoices'] != null) {
-      final invoices = (data['invoices'] as List).map((json) => Invoice.fromJson(json)).toList();
-      for (final invoice in invoices) {
-        if (hasPending('invoice', invoice.id)) continue;
-        await _upsert(db, 'invoices_local', invoice.toDatabaseMap());
-      }
-      debugPrint('Pulled ${invoices.length} invoices');
+    for (final json in (data['clients'] as List?) ?? const []) {
+      final c = Client.fromJson(json);
+      await deliver('client', c.id, c.revision, c.toDatabaseMap());
     }
-
-    if (data['invoiceItems'] != null) {
-      final items = (data['invoiceItems'] as List).map((json) => InvoiceItem.fromJson(json)).toList();
-      for (final item in items) {
-        if (hasPending('invoice_item', item.id)) continue;
-        await _upsert(db, 'invoice_items_local', item.toDatabaseMap());
-      }
-      debugPrint('Pulled ${items.length} invoice items');
+    for (final json in (data['invoices'] as List?) ?? const []) {
+      final inv = Invoice.fromJson(json);
+      await deliver('invoice', inv.id, inv.revision, inv.toDatabaseMap());
     }
-
-    if (data['attachments'] != null) {
-      final attachments = (data['attachments'] as List).map((json) => Attachment.fromJson(json)).toList();
-      for (final attachment in attachments) {
-        if (hasPending('attachment', attachment.id)) continue;
-        await _upsert(db, 'attachments_local', attachment.toDatabaseMap());
-      }
-      debugPrint('Pulled ${attachments.length} attachments');
+    for (final json in (data['invoiceItems'] as List?) ?? const []) {
+      final item = InvoiceItem.fromJson(json);
+      await deliver('invoice_item', item.id, item.revision, item.toDatabaseMap());
+    }
+    for (final json in (data['attachments'] as List?) ?? const []) {
+      final a = Attachment.fromJson(json);
+      await deliver('attachment', a.id, null, a.toDatabaseMap());
     }
 
     // Deletions last: a record deleted on the server is removed even if it
-    // was also returned above.
-    final deletes = tombstoneDeletes(data['tombstones']);
+    // was also returned above, and nothing held for it is applied later.
+    final tombstones = (data['tombstones'] as List?) ?? const [];
+    final deletes = tombstoneDeletes(tombstones);
     for (final d in deletes) {
       await db.delete(d.table, where: d.where, whereArgs: d.whereArgs);
     }
+    await _dropHeldForTombstones(db, tombstones);
     if (deletes.isNotEmpty) debugPrint('Applied ${deletes.length} local deletes from tombstones');
+  }
+
+  Future<void> _hold(Database db, String type, String id, int? revision, Map<String, dynamic> row) async {
+    final held = await db.query('sync_held_rows',
+        columns: ['revision'], where: 'object_type = ? AND object_id = ?', whereArgs: [type, id]);
+    if (held.isNotEmpty && !deliveredReplacesHeld(revision, parseRevision(held.first['revision']))) return;
+    await db.insert(
+      'sync_held_rows',
+      {
+        'object_type': type,
+        'object_id': id,
+        'revision': revision,
+        'row_json': jsonEncode(row),
+        'held_at': _clock().toUtc().toIso8601String(),
+      },
+      conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  Future<void> _dropHeldForTombstones(Database db, List tombstones) async {
+    final invoiceIds = <String>{};
+    for (final t in tombstones) {
+      if (t is! Map || t['object_type'] is! String || t['object_id'] is! String) continue;
+      await db.delete('sync_held_rows',
+          where: 'object_type = ? AND object_id = ?', whereArgs: [t['object_type'], t['object_id']]);
+      if (t['object_type'] == 'invoice') invoiceIds.add(t['object_id'] as String);
+    }
+    if (invoiceIds.isEmpty) return;
+    // Items and attachments of a deleted invoice.
+    for (final held in await db.query('sync_held_rows',
+        where: 'object_type IN (?, ?)', whereArgs: ['invoice_item', 'attachment'])) {
+      final row = jsonDecode(held['row_json'] as String) as Map<String, dynamic>;
+      final parent = held['object_type'] == 'invoice_item'
+          ? row['invoice_id']
+          : (row['owner_type'] == 'invoice' ? row['owner_id'] : null);
+      if (invoiceIds.contains(parent)) {
+        await db.delete('sync_held_rows',
+            where: 'object_type = ? AND object_id = ?', whereArgs: [held['object_type'], held['object_id']]);
+      }
+    }
+  }
+
+  /// Writes held server rows of records that no longer have a pending or
+  /// conflict change, unless the local copy is already as new; then forgets them.
+  Future<void> _applyHeldRows(Database db) async {
+    final held = await db.query('sync_held_rows');
+    if (held.isEmpty) return;
+    final open = heldBackObjectKeys(await db.query('pending_changes', where: 'synced = ?', whereArgs: [0]));
+    for (final h in held) {
+      final type = h['object_type'] as String;
+      final id = h['object_id'] as String;
+      if (open.contains('$type:$id')) continue;
+      final table = localTableFor[type];
+      if (table != null) {
+        final heldRevision = parseRevision(h['revision']);
+        int? localRevision;
+        if (versionedObjectTypes.contains(type)) {
+          final local = await db.query(table, columns: ['revision'], where: 'id = ?', whereArgs: [id], limit: 1);
+          localRevision = local.isEmpty ? null : parseRevision(local.first['revision']);
+        }
+        if (heldRowApplies(heldRevision, localRevision)) {
+          await _upsert(db, table, jsonDecode(h['row_json'] as String) as Map<String, dynamic>);
+        }
+      }
+      await db.delete('sync_held_rows', where: 'object_type = ? AND object_id = ?', whereArgs: [type, id]);
+    }
+  }
+
+  /// Local conflict rows whose conflict is no longer open on the server
+  /// (resolved or dismissed here, on another device or on the web) are
+  /// removed, so held server rows of the record can be applied. Best effort:
+  /// without an answer nothing changes.
+  Future<void> _forgetResolvedConflicts(Database db) async {
+    final local = await db.query('pending_changes',
+        columns: ['conflict_id'], where: 'synced = ? AND status = ?', whereArgs: [0, conflictStatus]);
+    if (local.isEmpty) return;
+    Set<String> open;
+    try {
+      final res = await _apiClient.get('/sync/conflicts', queryParameters: {'status': 'open'}, useCache: false);
+      final data = res.data;
+      if (data is! List) return;
+      open = {for (final c in data) if (c is Map && c['id'] is String) c['id'] as String};
+    } catch (e) {
+      debugPrint('Sync: could not check conflicts: $e');
+      return;
+    }
+    for (final row in local) {
+      final id = row['conflict_id'];
+      if (id is String && !open.contains(id)) {
+        await db.delete('pending_changes',
+            where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, id]);
+      }
+    }
+  }
+
+  @override
+  Future<void> conflictResolved(String conflictId) async {
+    final db = await _db();
+    await db.delete('pending_changes',
+        where: 'synced = ? AND status = ? AND conflict_id = ?', whereArgs: [0, conflictStatus, conflictId]);
+    await _applyHeldRows(db);
   }
 
   Future<void> _upsert(Database db, String table, Map<String, dynamic> row) =>
       db.insert(table, row, conflictAlgorithm: ConflictAlgorithm.replace);
-
-  Future<void> _markFullPullNeeded() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool(syncFullPullNeededKey, true);
-  }
 
   @override
   Future<List<FailedChange>> listFailed() async {
@@ -496,7 +592,7 @@ class SyncService implements FailedChangesStore {
   Future<void> discard(String id) async {
     final db = await _db();
     await db.delete('pending_changes', where: 'id = ? AND status = ?', whereArgs: [id, failedStatus]);
-    await _markFullPullNeeded();
+    await _applyHeldRows(db);
   }
 
   /// Queue a change for sync.

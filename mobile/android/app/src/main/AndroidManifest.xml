@@ -3,7 +3,7 @@
          no network access (only the debug and profile manifests had it). -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="invoiceme"
+        android:label="${appLabel}"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

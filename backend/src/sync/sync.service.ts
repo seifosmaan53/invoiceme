@@ -267,6 +267,32 @@ export const UPGRADE_REQUIRED = 'client_upgrade_required';
  * can still count repeated failures and stop resending.
  */
 export const REJECTED = 'rejected';
+/** A temporary server or database failure: nothing was applied; send the same change again later. */
+export const RETRY_LATER = 'retry_later';
+
+/** PostgreSQL error classes after which the same change can succeed unchanged. */
+const TRANSIENT_SQLSTATES = new Set([
+  '40001', // serialization_failure
+  '40P01', // deadlock_detected
+  '55P03', // lock_not_available
+  '57014', // query_canceled (e.g. statement_timeout)
+  '57P01', // admin_shutdown
+  '57P02', // crash_shutdown
+  '57P03', // cannot_connect_now
+  '53000', // insufficient_resources
+  '53100', // disk_full
+  '53200', // out_of_memory
+  '53300', // too_many_connections
+]);
+
+/** Whether a failure is temporary (retry_later) rather than a rejection of the change itself. */
+export function isTransientFailure(error: any): boolean {
+  const code = error?.driverError?.code ?? error?.code;
+  if (typeof code === 'string' && (TRANSIENT_SQLSTATES.has(code) || code.startsWith('08'))) return true;
+  return ['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'EPIPE'].includes(code);
+}
+
+const failureReason = (error: unknown) => (isTransientFailure(error) ? RETRY_LATER : REJECTED);
 
 @Injectable()
 export class SyncService {
@@ -322,7 +348,7 @@ export class SyncService {
           outcome = await this.pushChange(userId, syncPushDto.deviceId, changeObj, protocol);
         } catch (error) {
           console.error(`Error processing change ${changeObj.object_id}:`, error);
-          outcome = failed(REJECTED);
+          outcome = failed(failureReason(error));
         }
       }
       results.push({
@@ -385,6 +411,7 @@ export class SyncService {
         outcome = await this.bindTo(manager).processChange(change, userId, protocol);
       } catch (error) {
         await manager.query('ROLLBACK TO SAVEPOINT sync_apply');
+        if (isTransientFailure(error)) throw error; // the transaction is unusable: roll it back whole (retry_later)
         console.error(`Error processing change ${changeObj.object_id}:`, error);
         return failed(REJECTED);
       }

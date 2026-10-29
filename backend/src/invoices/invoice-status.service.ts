@@ -70,6 +70,11 @@ export class InvoiceStatusService implements OnApplicationBootstrap {
    * Runs daily at midnight in the server process's timezone; "today" is the
    * business date (BUSINESS_TIMEZONE).
    */
+  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
+  async markOverdueInvoices(): Promise<OverdueRunResult> {
+    return this.runOverdueJob();
+  }
+
   /** Migration 022 must be applied, or no invoice is ever marked overdue: say so at startup. */
   async onApplicationBootstrap(): Promise<void> {
     try {
@@ -80,8 +85,7 @@ export class InvoiceStatusService implements OnApplicationBootstrap {
     }
   }
 
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
-  async markOverdueInvoices(): Promise<OverdueRunResult> {
+  private async runOverdueJob(): Promise<OverdueRunResult> {
     this.logger.log('Starting overdue invoice check...');
 
     try {
@@ -152,7 +156,8 @@ export class InvoiceStatusService implements OnApplicationBootstrap {
       );
       return { marked: markedIds.length, notified: toNotify.length, silent, firstRun };
     } catch (error) {
-      if ((error as any)?.driverError?.code === '42P01' || (error as any)?.code === '42P01') {
+      const code = (error as any)?.driverError?.code ?? (error as any)?.code;
+      if (code === '42P01' && /system_state/.test(String((error as any)?.message ?? ''))) {
         this.logger.error(MISSING_022);
         throw new Error(MISSING_022);
       }

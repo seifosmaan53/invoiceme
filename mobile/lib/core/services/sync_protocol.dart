@@ -619,7 +619,11 @@ const int pullPageLimit = 500;
 const int maxPullPages = 1000;
 
 /// Query of one pull page. No cursor = from the start.
+/// `protocol=2` on every pull: without it (and without a cursor, as on the
+/// first pull) the server answers with the protocol-1 timestamp pull, which
+/// returns no cursor.
 Map<String, dynamic> pullQuery(String? cursor, {int limit = pullPageLimit}) => {
+      'protocol': '2',
       if (cursor != null) 'cursor': cursor,
       'limit': limit,
     };

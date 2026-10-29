@@ -454,8 +454,8 @@ void main() {
         };
 
     test('query: no cursor = from the start; limit is sent', () {
-      expect(pullQuery(null), {'limit': 500});
-      expect(pullQuery('abc'), {'cursor': 'abc', 'limit': 500});
+      expect(pullQuery(null), {'protocol': '2', 'limit': 500});
+      expect(pullQuery('abc'), {'protocol': '2', 'cursor': 'abc', 'limit': 500});
       expect(startCursor(null, fullPullNeeded: false), isNull, reason: 'no stored cursor (migrating from since): full pull');
       expect(startCursor('abc', fullPullNeeded: true), isNull);
       expect(startCursor('abc', fullPullNeeded: false), 'abc');

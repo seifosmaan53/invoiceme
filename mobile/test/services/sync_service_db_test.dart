@@ -35,6 +35,7 @@ class FakeApi extends ApiClient {
   final pushReplies = <Object Function(Map<String, dynamic> body)>[];
   Map<String?, Map<String, dynamic>> pages = {null: emptyPage('c-1')};
   Object? Function(String? cursor)? pullError;
+  List<String> openConflictIds = [];
 
   static Map<String, dynamic> emptyPage(String cursor, {bool hasMore = false, List<Map<String, dynamic>> clients = const []}) => {
         'protocol': 2,
@@ -60,6 +61,13 @@ class FakeApi extends ApiClient {
 
   @override
   Future<Response> get(String path, {Map<String, dynamic>? queryParameters, bool useCache = true}) async {
+    if (path == '/sync/conflicts') {
+      return Response(
+        requestOptions: RequestOptions(path: path),
+        data: [for (final id in openConflictIds) {'id': id}],
+        statusCode: 200,
+      );
+    }
     final cursor = queryParameters?['cursor'] as String?;
     pulls.add(cursor);
     final error = pullError?.call(cursor);
@@ -233,8 +241,9 @@ void main() {
     await db.close();
   });
 
-  test('conflict is stored and never resent', () async {
+  test('conflict is stored, never resent, and forgotten once it is no longer open', () async {
     final (service, db) = await open();
+    api.openConflictIds = ['k1'];
     final id = (await service.queueChange(
         objectType: ChangeObjectType.client, objectId: 'cc', changeType: ChangeType.create, data: {'name': 'C'}))!;
     api.pushReplies.add((b) => {
@@ -248,6 +257,11 @@ void main() {
     final pushes = api.pushes.length;
     await service.sync();
     expect(api.pushes.length, pushes);
+    expect((await rowOf(db, id))['status'], 'conflict');
+
+    api.openConflictIds = []; // resolved on the web or another device
+    await service.sync();
+    expect(await db.query('pending_changes', where: 'id = ?', whereArgs: [id]), isEmpty);
     await db.close();
   });
 
@@ -353,5 +367,153 @@ void main() {
     final row = (await db.query('pending_changes')).single;
     expect((row['id'], row['status'], row['attempts']), ('old-1', 'pending', 0));
     await db.close();
+  });
+
+  group('server rows held while a change is queued', () {
+    Map<String, dynamic> serverClient(String id, String name, int revision) => {
+          'id': id,
+          'userId': 'u',
+          'name': name,
+          'createdAt': '2026-10-01T00:00:00Z',
+          'updatedAt': '2026-10-28T00:00:00Z',
+          'revision': revision,
+        };
+
+    Future<String> localEdit(SyncService service, Database db, String id) async {
+      await db.insert('clients_local', {
+        'id': id, 'user_id': 'u', 'name': 'Device', 'created_at': 'x', 'updated_at': 'x', 'revision': 1,
+      });
+      return (await service.queueChange(
+        objectType: ChangeObjectType.client,
+        objectId: id,
+        changeType: ChangeType.update,
+        data: {'name': 'Device'},
+        previous: {'name': 'Original'},
+      ))!;
+    }
+
+    Future<Map<String, Object?>> local(Database db, String id) async =>
+        (await db.query('clients_local', where: 'id = ?', whereArgs: [id])).single;
+
+    Future<int> heldCount(Database db) async => (await db.query('sync_held_rows')).length;
+
+    /// Push fails temporarily; the pull delivers the server's newer copy,
+    /// which is held (the local copy with the queued change stays).
+    Future<void> pullDuringBackoff(SyncService service, Database db, String id) async {
+      api.pushReplies.add((b) => resultFor(b, 'failed', reason: 'retry_later'));
+      api.pages = {null: FakeApi.emptyPage('p1', clients: [serverClient(id, 'Web', 2)])};
+      await service.sync();
+      expect((await local(db, id))['name'], 'Device');
+      expect(await heldCount(db), 1);
+      now = now.add(const Duration(hours: 2));
+    }
+
+    test('(a) conflict, then dismissed elsewhere: the held server version is applied', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'c1');
+      await pullDuringBackoff(service, db, 'c1');
+
+      api.pushReplies.add((b) => {
+            'results': [
+              {'index': 0, 'change_id': (b['changes'] as List)[0]['change_id'], 'status': 'conflict', 'conflict_id': 'k1'},
+            ],
+          });
+      api.openConflictIds = ['k1'];
+      await service.sync();
+      expect((await local(db, 'c1'))['name'], 'Device', reason: 'still open: the held row waits');
+      expect(await heldCount(db), 1);
+
+      // Dismissed (server row unchanged, so it is never delivered again).
+      api.openConflictIds = [];
+      await service.sync();
+      final row = await local(db, 'c1');
+      expect((row['name'], row['revision']), ('Web', 2));
+      expect(await heldCount(db), 0);
+      expect(await db.query('pending_changes', where: 'status = ?', whereArgs: ['conflict']), isEmpty);
+      await db.close();
+    });
+
+    test('(b) duplicate (no revision): the held server version is applied', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'c2');
+      await pullDuringBackoff(service, db, 'c2');
+      api.pushReplies.add((b) => resultFor(b, 'duplicate'));
+      await service.sync();
+      final row = await local(db, 'c2');
+      expect((row['name'], row['revision']), ('Web', 2));
+      expect(await heldCount(db), 0);
+      await db.close();
+    });
+
+    test('(c) applied with a higher revision: the older held row is discarded', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'c3');
+      await pullDuringBackoff(service, db, 'c3');
+      api.pushReplies.add((b) => resultFor(b, 'merged', revision: 3));
+      await service.sync();
+      final row = await local(db, 'c3');
+      expect((row['name'], row['revision']), ('Device', 3));
+      expect(await heldCount(db), 0);
+      await db.close();
+    });
+
+    test('a newer delivered row replaces the held one; a rejected change releases it', () async {
+      final (service, db) = await open();
+      await localEdit(service, db, 'c5');
+      await pullDuringBackoff(service, db, 'c5');
+      api.pushReplies.add((b) => resultFor(b, 'failed', reason: 'retry_later'));
+      api.pages = {'p1': FakeApi.emptyPage('p2', clients: [serverClient('c5', 'Web again', 4)])};
+      await service.sync();
+      final held = (await db.query('sync_held_rows')).single;
+      expect(held['revision'], 4);
+      now = now.add(const Duration(hours: 2));
+      api.pushReplies.add((b) => resultFor(b, 'failed', reason: 'rejected'));
+      await service.sync();
+      expect((await local(db, 'c5'))['name'], 'Web again');
+      expect(await heldCount(db), 0);
+      await db.close();
+    });
+
+    test('(d) a held row survives a restart; resolving the conflict on this device applies it', () async {
+      var (service, db) = await open();
+      await localEdit(service, db, 'c4');
+      await pullDuringBackoff(service, db, 'c4');
+      api.pushReplies.add((b) => {
+            'results': [
+              {'index': 0, 'change_id': (b['changes'] as List)[0]['change_id'], 'status': 'conflict', 'conflict_id': 'k4'},
+            ],
+          });
+      api.openConflictIds = ['k4'];
+      await service.sync();
+      await db.close();
+
+      (service, db) = await open(); // new SyncService over the same file
+      expect(await heldCount(db), 1);
+      expect((await local(db, 'c4'))['name'], 'Device');
+      await service.conflictResolved('k4'); // "Keep current version" in the conflict screen
+      final row = await local(db, 'c4');
+      expect((row['name'], row['revision']), ('Web', 2));
+      expect(await heldCount(db), 0);
+      await db.close();
+    });
+
+    test('(e) upgrade to version 6 is idempotent and keeps held rows', () async {
+      var db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
+      expect(await db.getVersion(), 6);
+      // A version-5 database: no held-rows table yet.
+      await db.execute('DROP TABLE sync_held_rows');
+      await db.setVersion(5);
+      await db.close();
+      db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
+      await db.insert('sync_held_rows',
+          {'object_type': 'client', 'object_id': 'x', 'revision': 2, 'row_json': '{}', 'held_at': 'now'});
+      // Upgrading again over an existing table changes nothing.
+      await db.setVersion(5);
+      await db.close();
+      db = await DatabaseHelper.openAt(databaseFactoryFfi, path);
+      expect(await db.getVersion(), 6);
+      expect((await db.query('sync_held_rows')).single['object_id'], 'x');
+      await db.close();
+    });
   });
 }

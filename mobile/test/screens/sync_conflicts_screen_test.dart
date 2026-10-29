@@ -98,6 +98,10 @@ class FakeFailedStore implements FailedChangesStore {
 
   final retried = <String>[];
   final retriedNow = <String>[];
+  final resolved = <String>[];
+
+  @override
+  Future<void> conflictResolved(String conflictId) async => resolved.add(conflictId);
   final List<FailedChange> waiting = [];
 
   @override

@@ -87,7 +87,11 @@ class _SyncConflictsScreenState extends State<SyncConflictsScreen> {
 
   Future<void> _open(SyncConflict conflict) async {
     await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => SyncConflictDetailScreen(api: widget.api, conflictId: conflict.id),
+      builder: (_) => SyncConflictDetailScreen(
+        api: widget.api,
+        conflictId: conflict.id,
+        localQueue: widget.failedChanges,
+      ),
     ));
     if (mounted) await _load();
   }
@@ -258,7 +262,11 @@ class SyncConflictDetailScreen extends StatefulWidget {
   final SyncConflictsApi api;
   final String conflictId;
 
-  const SyncConflictDetailScreen({super.key, required this.api, required this.conflictId});
+  /// Told when the conflict is resolved, so the device drops its local
+  /// change row and applies the server version it held back.
+  final FailedChangesStore? localQueue;
+
+  const SyncConflictDetailScreen({super.key, required this.api, required this.conflictId, this.localQueue});
 
   @override
   State<SyncConflictDetailScreen> createState() => _SyncConflictDetailScreenState();
@@ -319,6 +327,11 @@ class _SyncConflictDetailScreenState extends State<SyncConflictDetailScreen> {
         action,
         expectedRevision: detail.current.revision,
       );
+      try {
+        await widget.localQueue?.conflictResolved(widget.conflictId);
+      } catch (_) {
+        // The next sync notices the resolution too.
+      }
       if (!mounted) return;
       setState(() {
         _detail = result;

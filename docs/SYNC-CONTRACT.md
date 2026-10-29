@@ -527,11 +527,11 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
 
 ### Protocol-2 client (in the mobile source; no app build released yet)
 
-- Local database version 5: `revision` on cached clients, invoices and
+- Local database version 6: `revision` on cached clients, invoices and
   items; `pending_changes` gains `base_revision`, `status`
   (`pending` | `conflict` | `failed`), `conflict_id`, `last_reason`,
   `attempts`, `parent_id`, `parent_base_revision`, `last_result`,
-  `next_attempt_at`. The upgrade from versions 1 to 4 checks existing
+  `next_attempt_at`; version 6 adds the `sync_held_rows` table. The upgrade from versions 1 to 5 checks existing
   columns, so it is idempotent (tested from a version-2 database on the host
   and in the Android emulator workflow).
 - Push body `{protocol: 2, deviceId, changes}`; `change_id` = local row id;
@@ -593,6 +593,13 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   `reason: invalid_cursor` drops the cursor and pulls from the start. Each
   restart happens at most once per pull; at most 1,000 pages per pull.
   `openConflicts` of the last page feeds the Settings badge.
+- A pulled server row of a record with a pending change is not lost when
+  the cursor moves past it: it is held in `sync_held_rows` (database
+  version 6; a newer delivery replaces it) and written locally once the
+  record has no pending or conflict change left (after a push outcome,
+  Retry/Discard, a conflict resolved here, or a conflict found no longer
+  open at the start of a pull), unless the local copy is already at that or
+  a newer revision. Tombstones drop held rows of deleted records.
 - Conflicts screen (Settings > Data & Sync): list and detail from the
   conflicts API, field table (your version | current version, conflicting
   fields highlighted, omitted fields listed), and only the server's

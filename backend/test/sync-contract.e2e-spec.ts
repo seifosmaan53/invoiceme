@@ -13,6 +13,7 @@ import { Client } from '../src/entities/client.entity';
 import { Invoice, InvoiceType, InvoiceStatus } from '../src/entities/invoice.entity';
 import { InvoiceItem } from '../src/entities/invoice-item.entity';
 import { DeviceChange, ChangeType, ChangeObjectType } from '../src/entities/device-change.entity';
+import { listenForTests } from './listen';
 
 /**
  * The /api/v1/sync/push delivery contract (docs/SYNC-CONTRACT.md): replays,
@@ -75,7 +76,7 @@ describe('Sync push contract (E2E)', () => {
     app = moduleFixture.createNestApplication();
     app.useGlobalPipes(new ValidationPipe(PRODUCTION_PIPE));
     app.setGlobalPrefix('api');
-    await app.init();
+    await listenForTests(app);
 
     userRepository = moduleFixture.get(getRepositoryToken(User));
     clientRepository = moduleFixture.get(getRepositoryToken(Client));

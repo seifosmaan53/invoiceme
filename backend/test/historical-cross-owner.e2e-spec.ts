@@ -21,6 +21,7 @@ import { EmailService } from '../src/core/services/email.service';
 import { NotificationService } from '../src/core/services/notification.service';
 import { InvoiceStatusService } from '../src/invoices/invoice-status.service';
 import { PaymentsService } from '../src/payments/payments.service';
+import { listenForTests } from './listen';
 
 /**
  * Historical cross-owner rows (written before ownership was enforced on sync
@@ -93,7 +94,7 @@ async function createApp(pipeOptions: ValidationPipeOptions): Promise<{ app: INe
   const app = moduleFixture.createNestApplication();
   app.useGlobalPipes(new ValidationPipe(pipeOptions));
   app.setGlobalPrefix('api');
-  await app.init();
+  await listenForTests(app);
   return { app, moduleFixture };
 }
 

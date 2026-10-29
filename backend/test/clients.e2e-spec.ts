@@ -10,6 +10,7 @@ import { User } from '../src/entities/user.entity';
 import { Client } from '../src/entities/client.entity';
 import * as bcrypt from 'bcrypt';
 import { JwtService } from '@nestjs/jwt';
+import { listenForTests } from './listen';
 
 describe('Clients E2E Tests - Filtering', () => {
   let app: INestApplication;
@@ -57,7 +58,7 @@ describe('Clients E2E Tests - Filtering', () => {
 
     );
     app.setGlobalPrefix('api');
-    await app.init();
+    await listenForTests(app);
 
     userRepository = moduleFixture.get<Repository<User>>(getRepositoryToken(User));
     clientRepository = moduleFixture.get<Repository<Client>>(getRepositoryToken(Client));

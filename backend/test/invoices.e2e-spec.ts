@@ -19,6 +19,7 @@ import { PdfService } from '../src/core/services/pdf.service';
 import { S3Service } from '../src/core/services/s3.service';
 import { StripeService } from '../src/core/services/stripe.service';
 import { InvoiceType, InvoiceStatus } from '../src/entities/invoice.entity';
+import { listenForTests } from './listen';
 
 describe('Invoices E2E Tests', () => {
   let app: INestApplication;
@@ -93,7 +94,7 @@ describe('Invoices E2E Tests', () => {
 
     );
     app.setGlobalPrefix('api');
-    await app.init();
+    await listenForTests(app);
 
     userRepository = moduleFixture.get<Repository<User>>(getRepositoryToken(User));
     clientRepository = moduleFixture.get<Repository<Client>>(getRepositoryToken(Client));

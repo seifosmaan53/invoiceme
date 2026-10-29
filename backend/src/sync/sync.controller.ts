@@ -82,6 +82,9 @@ export class SyncController {
     summary: 'Pull changes from server', 
     description: 'Retrieves all changes from the server since a specific timestamp for offline-first mobile support. Use this to sync server changes to your mobile app.' 
   })
+  @ApiQuery({ name: 'protocol', required: false, description: '2 = paged pull by cursor (recommended)', example: '2' })
+  @ApiQuery({ name: 'cursor', required: false, description: 'Cursor from the previous response (protocol 2); omit for a full download' })
+  @ApiQuery({ name: 'limit', required: false, description: 'Records per page, 1-1000 (protocol 2; default 500)' })
   @ApiQuery({ 
     name: 'since', 
     required: false, 
@@ -107,7 +110,19 @@ export class SyncController {
     } 
   })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async pull(@Query('since') since: string, @CurrentUser() user: any) {
+  async pull(
+    @Query('since') since: string,
+    @Query('protocol') protocol: string,
+    @Query('cursor') cursor: string,
+    @Query('limit') limit: string,
+    @CurrentUser() user: any,
+  ) {
+    // Protocol 2: paged pull by snapshot cursor, every committed change
+    // delivered (docs/SYNC-CONTRACT.md "Delivery guarantee"). Older apps keep
+    // the unpaged pull by timestamp they understand.
+    if (protocol === '2' || cursor) {
+      return this.syncService.pullByCursor(user.userId, cursor || undefined, limit ? Number(limit) : undefined);
+    }
     return this.syncService.pullChanges(user.userId, since);
   }
 

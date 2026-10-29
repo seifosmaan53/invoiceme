@@ -6,8 +6,8 @@ import { SyncSchemaService } from '../src/sync/sync-schema.service';
 import { readSyncConfig } from '../src/sync/sync-config';
 
 describe('sync schema (migration 019)', () => {
-  it('the migration file carries exactly the DDL the server installs and checks', () => {
-    const sql = fs.readFileSync(path.join(__dirname, '..', 'migrations', '019_sync_revisions_conflicts.sql'), 'utf8');
+  it('the latest sync migration (021) carries exactly the DDL the server installs and checks', () => {
+    const sql = fs.readFileSync(path.join(__dirname, '..', 'migrations', '021_sync_delivery_cursor.sql'), 'utf8');
     const block = sql.split('-- BEGIN SYNC SCHEMA (identical to backend/src/sync/sync-schema.ts)')[1]?.split('-- END SYNC SCHEMA')[0];
     expect(block).toBe(SYNC_SCHEMA_SQL);
     for (const { table, name } of SYNC_REQUIRED_TRIGGERS) {

@@ -253,6 +253,11 @@ export class SyncConflictsService {
     const { objectType, objectId } = conflict;
     const tombstones = manager.getRepository(SyncTombstone);
     const tombstone: SyncTombstone | null = await tombstones.findOne({ where: { objectType, objectId, userId } });
+    if (objectType === ChangeObjectType.INVOICE) {
+      // Restoring an invoice also touches its items (sync trigger). Lock them
+      // first, as an item push does (item, then invoice), so the two cannot deadlock.
+      await manager.query('SELECT id FROM invoice_items WHERE invoice_id::text = $1 ORDER BY id FOR UPDATE', [String(objectId)]);
+    }
     const record = await bound.findOwnedRecord(objectType, objectId, userId);
     if (record && !record.deletedAt) throw new ConflictException('The record is not deleted');
 

@@ -1,5 +1,6 @@
 // Dart imports
 import 'dart:convert';
+import 'dart:math' show Random;
 
 // Package imports
 import 'package:dio/dio.dart' show DioException;
@@ -26,11 +27,15 @@ enum ChangeType { create, update, delete }
 enum ChangeObjectType { client, invoice, invoice_item, attachment }
 
 /// SharedPreferences keys.
+/// Time of the last completed pull, for display only (protocol 2 pulls by cursor).
 const String lastSyncTimestampKey = 'last_sync_timestamp';
+
+/// Opaque pull cursor, stored only after every page of a pull was applied.
+const String syncCursorKey = 'sync_cursor';
 const String syncStateKey = 'sync_state';
 const String syncOpenConflictsKey = 'sync_open_conflicts';
 
-/// Set when a change was given up or discarded: the next pull fetches
+/// Set when a change was rejected or discarded: the next pull fetches
 /// everything, because earlier pulls skipped that record while it was queued.
 const String syncFullPullNeededKey = 'sync_full_pull_needed';
 
@@ -124,14 +129,29 @@ class _PushOutcome {
 class SyncService implements FailedChangesStore {
   final ApiClient _apiClient;
   // ignore: unused_field
-  final DatabaseHelper _dbHelper;
+  final DatabaseHelper? _dbHelper;
   final String _deviceId;
+  final DateTime Function() _clock;
+  final Random _random;
+  final Future<Database> Function() _db;
 
   /// Push rounds per sync. A record with several queued changes sends one per
   /// round, so each is based on the revision the previous one produced.
   static const int maxPushRounds = 10;
 
-  SyncService(this._apiClient, this._dbHelper) : _deviceId = const Uuid().v4();
+  /// [clock], [random] and [database] are for tests (defaults: system clock,
+  /// a random jitter, the app database).
+  SyncService(
+    this._apiClient,
+    this._dbHelper, {
+    String? deviceId,
+    DateTime Function()? clock,
+    Random? random,
+    Future<Database> Function()? database,
+  })  : _deviceId = deviceId ?? const Uuid().v4(),
+        _clock = clock ?? DateTime.now,
+        _random = random ?? Random(),
+        _db = database ?? DatabaseHelper.getDatabase;
 
   /// Push pending changes, then pull server updates.
   ///
@@ -168,18 +188,17 @@ class SyncService implements FailedChangesStore {
         orderBy: 'created_at ASC',
       );
 
-  /// Push the queue, at most one change per record per round.
+  /// Push the queue, at most one change per record per round. Rows waiting
+  /// for their next attempt are left for a later sync.
   Future<_PushOutcome> _pushChanges() async {
-    final db = await DatabaseHelper.getDatabase();
+    final db = await _db();
     var state = SyncState.ok;
     var synced = 0, conflicts = 0, failed = 0;
     String? message;
-    // Rows whose failure was counted in this sync (at most once per sync).
-    final counted = <String>{};
 
     for (var round = 0; round < maxPushRounds; round++) {
       final pending = await _pendingRows(db);
-      final batch = selectPushBatch(pending);
+      final batch = selectPushBatch(pending, now: _clock());
       if (batch.isEmpty) break;
 
       // Until a result arrives, the server may or may not have applied them.
@@ -187,21 +206,28 @@ class SyncService implements FailedChangesStore {
         await db.update('pending_changes', {'last_result': sentUnknown}, where: 'id = ?', whereArgs: [row['id']]);
       }
 
-      Map<String, dynamic> response;
+      PushPlan plan;
       try {
         final res = await _apiClient.post('/sync/push', data: buildPushBody(_deviceId, batch));
-        response = res.data as Map<String, dynamic>;
+        plan = planPushResults(batch, res.data as Map<String, dynamic>);
       } on DioException catch (e) {
+        final code = e.response?.statusCode;
         // A server without protocol 2 rejects the `protocol` field (400) and
         // applies nothing. Do not fall back to protocol 1: keep the queue.
-        if (e.response?.statusCode == 400) {
+        if (code == 400) {
           debugPrint('Sync push: server rejected protocol 2 (400): ${e.response?.data}');
           return const _PushOutcome(SyncState.serverUpdateRequired, 0, 0, 0, null);
         }
-        rethrow;
+        if (code == 401 || code == 403) rethrow;
+        // Network error, timeout or 5xx: temporary for every sent change.
+        final reason = code != null && code >= 500 ? serverErrorReason : networkErrorReason;
+        debugPrint('Sync push: temporary failure ($reason, HTTP $code)');
+        final failurePlan = transportFailure(batch, reason);
+        await _applyPushPlan(db, batch, failurePlan);
+        failed += batch.length;
+        break;
       }
 
-      final plan = planPushResults(batch, response, countedThisSync: counted);
       if (plan.resultsMissing) {
         debugPrint('Sync push: response without per-change results; nothing marked');
         return _PushOutcome(SyncState.serverUpdateRequired, synced, conflicts, failed, plan.message);
@@ -209,20 +235,15 @@ class SyncService implements FailedChangesStore {
       if (plan.state == SyncState.appUpdateRequired) state = SyncState.appUpdateRequired;
       message ??= plan.message;
 
-      for (final a in plan.actions) {
-        if (a.status == 'failed' && a.reason != null) counted.add(a.changeId);
-      }
-      final renamed = await _applyPushPlan(db, batch, plan);
-      for (final entry in renamed.entries) {
-        if (counted.remove(entry.key)) counted.add(entry.value);
-      }
+      await _applyPushPlan(db, batch, plan);
       synced += plan.count(PushActionKind.synced);
       conflicts += plan.count(PushActionKind.conflict);
       failed += plan.count(PushActionKind.keepPending) + plan.count(PushActionKind.giveUp);
       debugPrint('Sync push round $round: ${plan.count(PushActionKind.synced)} synced, '
-          '${plan.count(PushActionKind.conflict)} conflicts, ${plan.count(PushActionKind.keepPending)} pending');
+          '${plan.count(PushActionKind.conflict)} conflicts, ${plan.count(PushActionKind.keepPending)} retry later, '
+          '${plan.count(PushActionKind.giveUp)} rejected');
 
-      // Stop when this round settled nothing: the rest is failing.
+      // Stop when this round settled nothing (the rest is waiting or failing).
       if (plan.count(PushActionKind.synced) + plan.count(PushActionKind.conflict) + plan.count(PushActionKind.giveUp) == 0) {
         break;
       }
@@ -242,8 +263,12 @@ class SyncService implements FailedChangesStore {
       final action = plan.actions[i];
       switch (action.kind) {
         case PushActionKind.synced:
-          await db.update('pending_changes', {'synced': 1, 'last_reason': null, 'last_result': null},
-              where: 'id = ?', whereArgs: [action.changeId]);
+          await db.update(
+            'pending_changes',
+            {'synced': 1, 'last_reason': null, 'last_result': null, 'attempts': 0, 'next_attempt_at': null},
+            where: 'id = ?',
+            whereArgs: [action.changeId],
+          );
           final table = localTableFor[action.objectType];
           if (action.revision != null && table != null && versionedObjectTypes.contains(action.objectType)) {
             await db.update(table, {'revision': action.revision}, where: 'id = ?', whereArgs: [action.objectId]);
@@ -253,7 +278,13 @@ class SyncService implements FailedChangesStore {
         case PushActionKind.conflict:
           await db.update(
             'pending_changes',
-            {'status': conflictStatus, 'conflict_id': action.conflictId, 'last_reason': action.reason, 'last_result': null},
+            {
+              'status': conflictStatus,
+              'conflict_id': action.conflictId,
+              'last_reason': action.reason,
+              'last_result': null,
+              'next_attempt_at': null,
+            },
             where: 'id = ?',
             whereArgs: [action.changeId],
           );
@@ -264,6 +295,7 @@ class SyncService implements FailedChangesStore {
             {
               'last_reason': action.reason,
               'attempts': action.attempts,
+              'next_attempt_at': nextAttemptAt(_clock(), action.attempts, _random.nextDouble()).toIso8601String(),
               // A failed result means not applied; no result leaves it unknown.
               'last_result': action.status == 'failed' ? sentFailed : sentUnknown,
             },
@@ -274,7 +306,13 @@ class SyncService implements FailedChangesStore {
         case PushActionKind.giveUp:
           await db.update(
             'pending_changes',
-            {'status': failedStatus, 'last_reason': action.reason, 'attempts': action.attempts, 'last_result': sentFailed},
+            {
+              'status': failedStatus,
+              'last_reason': action.reason,
+              'attempts': action.attempts,
+              'last_result': sentFailed,
+              'next_attempt_at': null,
+            },
             where: 'id = ?',
             whereArgs: [action.changeId],
           );
@@ -298,38 +336,49 @@ class SyncService implements FailedChangesStore {
     return renamed;
   }
 
-  /// Pull server changes into the local cache; returns the open conflict count.
+  /// Pull server changes page by page from the stored cursor; returns the
+  /// open conflict count. The cursor is stored only after every page was
+  /// applied.
   Future<int> _pullChanges() async {
     final prefs = await SharedPreferences.getInstance();
-    final db = await DatabaseHelper.getDatabase();
+    final db = await _db();
     final fullPullNeeded = prefs.getBool(syncFullPullNeededKey) ?? false;
-    final lastSync = pullSince(prefs.getString(lastSyncTimestampKey), fullPullNeeded: fullPullNeeded);
+    // An app that synced with `since` before has no cursor: full pull.
+    final start = startCursor(prefs.getString(syncCursorKey), fullPullNeeded: fullPullNeeded);
 
-    var data = await _pull(lastSync);
-    if (pullStep(data, sentSince: lastSync != null) == PullStep.fullResync) {
-      debugPrint('Sync pull: full resync required');
-      await _clearLocalCache(db);
-      await prefs.remove(lastSyncTimestampKey);
-      data = await _pull(null);
+    final result = await runCursorPull(
+      storedCursor: start,
+      fetch: _pullPage,
+      applyPage: (page) => _applyPull(db, page),
+      clearCache: () async {
+        debugPrint('Sync pull: full resync required');
+        await _clearLocalCache(db);
+      },
+      dropCursor: () => prefs.remove(syncCursorKey),
+    );
+
+    if (result.cursor != null) {
+      await prefs.setString(syncCursorKey, result.cursor!);
+    } else {
+      await prefs.remove(syncCursorKey);
     }
-
-    await _applyPull(db, data);
-
-    final openConflicts = openConflictsOf(data);
     if (fullPullNeeded) await prefs.remove(syncFullPullNeededKey);
-    await prefs.setInt(syncOpenConflictsKey, openConflicts);
-    await prefs.setString(lastSyncTimestampKey, data['lastSyncTimestamp'] as String);
-    debugPrint('Sync completed at ${data['lastSyncTimestamp']}');
-    return openConflicts;
+    await prefs.setInt(syncOpenConflictsKey, result.openConflicts);
+    await prefs.setString(lastSyncTimestampKey, result.lastSyncTimestamp ?? _clock().toUtc().toIso8601String());
+    debugPrint('Sync pull: ${result.pages} page(s)');
+    return result.openConflicts;
   }
 
-  Future<Map<String, dynamic>> _pull(String? since) async {
-    final response = await _apiClient.get(
-      '/sync/pull',
-      queryParameters: since != null ? {'since': since} : null,
-      useCache: false,
-    );
-    return response.data as Map<String, dynamic>;
+  Future<Map<String, dynamic>> _pullPage(String? cursor) async {
+    try {
+      final response = await _apiClient.get('/sync/pull', queryParameters: pullQuery(cursor), useCache: false);
+      return response.data as Map<String, dynamic>;
+    } on DioException catch (e) {
+      if (isInvalidCursorResponse(e.response?.statusCode, e.response?.data)) {
+        throw const InvalidCursorException();
+      }
+      rethrow;
+    }
   }
 
   /// Drop the local cache (not the queue). Records with a change still
@@ -410,7 +459,7 @@ class SyncService implements FailedChangesStore {
 
   @override
   Future<List<FailedChange>> listFailed() async {
-    final db = await DatabaseHelper.getDatabase();
+    final db = await _db();
     final rows = await db.query('pending_changes',
         where: 'synced = ? AND status = ?', whereArgs: [0, failedStatus], orderBy: 'created_at ASC');
     return rows.map(FailedChange.fromRow).toList();
@@ -418,14 +467,34 @@ class SyncService implements FailedChangesStore {
 
   @override
   Future<void> retry(String id) async {
-    final db = await DatabaseHelper.getDatabase();
-    await db.update('pending_changes', {'status': pendingStatus, 'attempts': 0, 'last_reason': null},
-        where: 'id = ? AND status = ?', whereArgs: [id, failedStatus]);
+    final db = await _db();
+    await db.update(
+      'pending_changes',
+      {'status': pendingStatus, 'attempts': 0, 'last_reason': null, 'next_attempt_at': null},
+      where: 'id = ? AND status = ?',
+      whereArgs: [id, failedStatus],
+    );
+  }
+
+  @override
+  Future<List<FailedChange>> listWaiting() async {
+    final db = await _db();
+    final rows = await db.query('pending_changes',
+        where: 'synced = ? AND status = ? AND attempts > 0', whereArgs: [0, pendingStatus], orderBy: 'created_at ASC');
+    return rows.map(FailedChange.fromRow).toList();
+  }
+
+  @override
+  Future<void> retryNow(String id) async {
+    final db = await _db();
+    await db.update('pending_changes', {'next_attempt_at': null},
+        where: 'id = ? AND status = ?', whereArgs: [id, pendingStatus]);
+    await sync();
   }
 
   @override
   Future<void> discard(String id) async {
-    final db = await DatabaseHelper.getDatabase();
+    final db = await _db();
     await db.delete('pending_changes', where: 'id = ? AND status = ?', whereArgs: [id, failedStatus]);
     await _markFullPullNeeded();
   }
@@ -451,7 +520,7 @@ class SyncService implements FailedChangesStore {
     String? parentId,
     int? parentRevision,
   }) async {
-    final db = await DatabaseHelper.getDatabase();
+    final db = await _db();
     final prefs = await SharedPreferences.getInstance();
     final userId = prefs.getString('user_id') ?? '';
 

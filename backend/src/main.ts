@@ -12,6 +12,7 @@ import helmet from 'helmet';
 import { applyHttpSecurity } from './core/https-enforcement';
 import { createRateLimiters } from './core/rate-limit';
 import { assertBusinessTimezone } from './common/calendar-date';
+import { overdueNotifyMaxAgeDays } from './invoices/invoice-status.service';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, {
@@ -26,6 +27,9 @@ async function bootstrap() {
   // A misspelt zone stops startup here. See common/calendar-date.ts.
   const businessTimezone = assertBusinessTimezone(configService.get<string>('BUSINESS_TIMEZONE'));
   console.log(`📅 Business timezone: ${businessTimezone ?? `process local (${Intl.DateTimeFormat().resolvedOptions().timeZone})`}`);
+  // Overdue notifications: only invoices due in the last N days (default 7),
+  // or `all`; an invalid value stops startup (invoices/invoice-status.service.ts).
+  console.log(`⏰ Overdue notifications: due within ${overdueNotifyMaxAgeDays(process.env.OVERDUE_NOTIFY_MAX_AGE_DAYS)} days`);
 
   // Security: one trusted-proxy policy (TRUST_PROXY) for req.ip, req.protocol,
   // req.secure, HTTPS enforcement, rate-limit keys and logs; then, in

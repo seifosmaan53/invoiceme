@@ -20,6 +20,14 @@ import { InvoiceItem } from '../entities/invoice-item.entity';
 import { calculateLineTotal, calculateTotals } from '../invoices/invoice-totals';
 import { PROTECTED_INVOICE_STATUSES } from './sync.service';
 
+/** Tables of the record types a conflict can be about (fixed names, never from input). */
+const TOUCH_TABLES: Record<string, string> = {
+  [ChangeObjectType.CLIENT]: 'clients',
+  [ChangeObjectType.INVOICE]: 'invoices',
+  [ChangeObjectType.INVOICE_ITEM]: 'invoice_items',
+  [ChangeObjectType.ATTACHMENT]: 'attachments',
+};
+
 /** Derived amounts a resolution never takes from the device. */
 const DERIVED_FIELDS: Record<string, string[]> = {
   [ChangeObjectType.INVOICE]: ['subtotal', 'taxTotal', 'discountTotal', 'total'],
@@ -201,6 +209,12 @@ export class SyncConflictsService {
         }
       }
 
+      // Deliver the record again on the next pull, whatever the resolution
+      // wrote (possibly nothing: a dismiss, or a device version the server
+      // already had). Devices hold back server rows of records with a pending
+      // change and rely on this to converge (docs/SYNC-CONTRACT.md).
+      await this.touchForDelivery(manager, conflict.objectType, conflict.objectId);
+
       conflict.status = dto.action === 'dismiss' ? SyncConflictStatus.DISMISSED : SyncConflictStatus.RESOLVED;
       conflict.resolution = dto.action;
       conflict.resolvedAt = new Date();
@@ -208,6 +222,13 @@ export class SyncConflictsService {
       await repository.save(conflict);
     });
     return this.get(userId, id);
+  }
+
+  /** Sets change_txid only (the revision trigger keeps the revision); a deleted row has nothing to touch. */
+  private async touchForDelivery(manager: any, objectType: string, objectId: string): Promise<void> {
+    const table = TOUCH_TABLES[objectType];
+    if (!table) return;
+    await manager.query(`UPDATE ${table} SET change_txid = pg_current_xact_id() WHERE id::text = $1`, [String(objectId)]);
   }
 
   private stale(current: number | null | undefined): never {

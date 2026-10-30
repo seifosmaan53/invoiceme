@@ -23,9 +23,10 @@ is unknown to these records (section 1, owner check).
 | Distribution | Direct APK to one or two pilot phones first, then the rest (section 2.3) | **Decided by the owner (2026-10-30)** |
 | Format | `apk` | follows from the distribution |
 | Version | `1.1.0`, versionCode `10100` (scheme `MAJOR*10000+MINOR*100+PATCH`, section 2.2); above every production line in the ledger (there are none) | **Decided by the owner (2026-10-30)** |
-| Signing key | A new production key created by you on your own machine (section 3.2); never the test key | **Not created.** Needs your explicit go-ahead; never sent to chat |
-| Server address | `https://<host>/api/v1` with a certificate the phones trust (section 4) | **Owner decision**, from the installation |
-| Build repository | A private repository of yours with the `android-release` environment (sections 3.1, 3.3) | **Owner action** |
+| Signing key | A new production key created by you on your own machine (section 3.2); never the test key | **DEFERRED BY OWNER** (2026-10-30). Not created |
+| Server address | `https://<host>/api/v1` with a certificate the phones trust (section 4) | **DEFERRED BY OWNER**; not provided or configured |
+| Build repository | A private repository of yours with the `android-release` environment (sections 3.1, 3.3) | **DEFERRED BY OWNER**. Not created; no production secret or variable exists |
+| Production build and distribution | Sections 3.4 and 2.3 | **DEFERRED BY OWNER** |
 | Source | A full commit SHA in `main` that was reviewed and tested | chosen at build time |
 
 **Values for the first production build** (no secret among them):

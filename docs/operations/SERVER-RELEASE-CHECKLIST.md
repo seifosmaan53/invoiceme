@@ -20,6 +20,32 @@ Scope and rules:
   integrity report's markers are clues; the migration plan comes from the
   reviewed schema difference (step 4).
 
+## Release order
+
+Server first, then a pilot, then phones. Each stage starts only when the
+previous one passed:
+
+1. **Server** (steps 1-10 below) at the installation, by the owner:
+   installation-specific compatibility review, verified backup and
+   restore, migrations through 022 from the reviewed schema difference,
+   configuration (timezone, HTTPS/proxy, API-key scopes, legacy cutoff
+   **unset**, historical overdue e-mails **off** unless explicitly opted
+   in), Stripe webhook, verification.
+2. **Mobile acceptance** on a spare phone against the isolated phone-test
+   backend with synthetic data (docs/release/DEVICE-ACCEPTANCE.md), with a
+   test build of the same commit as the release candidate.
+3. **Production build** (docs/release/ANDROID-RELEASE.md) and **pilot**
+   (step 11): one or two phones, synthetic or agreed test records on the
+   updated server, before any real customer use.
+4. **Rollout** to the remaining phones. Only then may a date for
+   `SYNC_LEGACY_WRITE_CUTOFF` be set (step 5); until the mobile release
+   date is confirmed it stays disabled.
+
+If the server must be recovered at any point, step 10 applies: restore the
+window backup and run the **new** version against it; never return to a
+version without the security fixes. A protocol-2 app needs a protocol-2
+server: hold the mobile rollout while the server is being recovered.
+
 ## 1. Identify the installation (read-only)
 - [ ] Operating system, how the app is started, installation folder, what
       runs it (Docker, PM2, service, script), installed version, Node.js and
@@ -148,6 +174,21 @@ Scope and rules:
       this procedure (it lacks the security fixes). *CU 8.*
 - [ ] A protocol-2 app needs a protocol-2 server: hold the app release if
       the server is rolled back. *UP "Rollback".*
+
+## 11. Mobile pilot (after step 7 passed)
+- [ ] The production APK verified as in ANDROID-RELEASE.md 3.4 (checksum,
+      id, version, certificate, no cleartext) and its line in the build
+      ledger.
+- [ ] Installed on one or two pilot phones that do not hold an earlier
+      InvoiceMe build with unsynced work (DEVICE-ACCEPTANCE.md, "An earlier
+      test build is on the phone").
+- [ ] Pilot users sign in against the updated server's `https://` address;
+      first with a test account and synthetic records, then the agreed
+      pilot records. Check sign-in, sync (Settings > Data & Sync), an
+      invoice PDF, and logout/sign-in of a second account on one phone.
+- [ ] Watch the server log and the integrity report during the pilot.
+- [ ] Wider rollout only after the pilot; `SYNC_LEGACY_WRITE_CUTOFF` stays
+      unset until every phone runs the new app (step 5).
 
 ## Known limitations to tell the people using it
 - Overdue emails: each invoice is emailed at most once, by the run that

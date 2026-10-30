@@ -333,13 +333,13 @@ class AuthService {
   /// With unsynced changes this needs [confirmUnsyncedLoss] (the person was
   /// warned); otherwise [UnsyncedChangesException] is thrown and nothing is
   /// removed (the account stays signed out, its data kept).
-  Future<void> logoutAndRemoveLocalData({required bool confirmUnsyncedLoss}) async {
-    final userId = _accounts?.activeUserId ?? _currentUser?.id;
-    await logout();
-    if (userId != null) {
-      await _accounts?.removeAccountData(userId, confirmUnsyncedLoss: confirmUnsyncedLoss);
-    }
-  }
+  Future<void> logoutAndRemoveLocalData({required bool confirmUnsyncedLoss}) => _serialized(() async {
+        final userId = _accounts?.activeUserId ?? _currentUser?.id;
+        await _endSession();
+        if (userId != null) {
+          await _accounts?.removeAccountData(userId, confirmUnsyncedLoss: confirmUnsyncedLoss);
+        }
+      });
 
   /// Check if user is logged in by validating the token with the backend
   /// This is more reliable than just checking if a token exists

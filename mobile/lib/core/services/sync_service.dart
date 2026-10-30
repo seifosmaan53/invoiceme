@@ -268,6 +268,9 @@ class SyncService implements FailedChangesStore {
 
       PushPlan plan;
       try {
+        // Immediately before the request: the account may have changed
+        // while the rows above were marked.
+        _check(generation);
         final res = await _apiClient.post('/sync/push', data: buildPushBody(_deviceId, batch));
         // A response that arrives after the account changed is not applied.
         _check(generation);
@@ -636,6 +639,7 @@ class SyncService implements FailedChangesStore {
       _check(generation);
       await _moveToBackOfChecks(db, id);
       try {
+        _check(generation);
         final res = await _apiClient.get('/sync/conflicts/${Uri.encodeComponent(id)}', useCache: false);
         _check(generation);
         final data = res.data;

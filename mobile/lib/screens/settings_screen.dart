@@ -2818,7 +2818,7 @@ class _QuarantinedDataTileState extends State<_QuarantinedDataTile> {
           'more than one account (or of an unknown account). It is kept apart and never synced.\n\n'
           '"Recover my changes" moves only the $mine unsynced change(s) recorded for the account you are '
           'signed in with into your queue; changes of other accounts stay here for them.\n\n'
-          '"Remove" deletes it permanently${removable.isEmpty ? '' : ', including $removableUnsynced unsynced change(s) without an account'}'
+          '"Remove" deletes it permanently${removable.isEmpty ? '' : ', including $removableUnsynced unsynced change(s) in it'}'
           '${unreadable ? ' and data that could not be read' : ''}.'
           '${othersKept > 0 ? ' Data with changes of other accounts is kept until they sign in and recover them.' : ''}',
         ),

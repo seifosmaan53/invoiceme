@@ -56,7 +56,13 @@ class ApiClient {
   }
 
   /// Starts a session for [userId]; tokens refreshed later must belong to it.
+  /// Requests made before (while no account was bound) belong to no session:
+  /// they are cancelled, and a 401 of theirs can never refresh or clear this
+  /// session's tokens.
   void bindSession(String userId) {
+    _sessionEpoch++;
+    _sessionCancel.cancel('account session started');
+    _sessionCancel = CancelToken();
     _sessionUserId = userId;
     _cache.clear();
   }

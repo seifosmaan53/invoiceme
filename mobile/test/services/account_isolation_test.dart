@@ -537,7 +537,38 @@ void main() {
       expect(seen, [null]);
     });
 
-    test('no refresh is accepted without a bound account', () async {
+    test('a request made between sign-out and the next sign-in is cancelled and cannot use the new tokens', () async {
+      final api = ApiClient();
+      final adapter = _Adapter();
+      api.dio.httpClientAdapter = adapter;
+      final gate = Completer<void>();
+      final arrived = Completer<void>();
+      adapter.handler = (options) async {
+        if (options.path.endsWith('/sync/push')) {
+          arrived.complete();
+          await gate.future;
+          return _json(401, {});
+        }
+        return _json(200, {'accessToken': fakeJwt('user-b'), 'refreshToken': 'r'});
+      };
+      api.bindSession('user-a');
+      await api.setToken(fakeJwt('user-a'));
+      await api.endSession();
+      // A stray push of A's ended sync, sent with no account bound.
+      final stray = api.post('/sync/push', data: {'changes': ['of A']});
+      await arrived.future;
+      api.bindSession('user-b');
+      await api.setToken(fakeJwt('user-b'));
+      await const FlutterSecureStorage().write(key: 'refresh_token', value: 'refresh-user-b');
+      gate.complete();
+      await expectLater(stray, throwsA(isA<DioException>().having((e) => e.type, 'type', DioExceptionType.cancel)));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(adapter.paths.where((p) => p.endsWith('/sync/push')), hasLength(1), reason: 'never retried');
+      expect(adapter.paths, isNot(contains(endsWith('/auth/refresh'))));
+      expect(await const FlutterSecureStorage().read(key: 'access_token'), fakeJwt('user-b'));
+    });
+
+        test('no refresh is accepted without a bound account', () async {
       final api = ApiClient();
       final adapter = _Adapter()
         ..handler = (options) async {

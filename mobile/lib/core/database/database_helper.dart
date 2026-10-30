@@ -2,36 +2,25 @@
 import 'dart:async';
 
 // Flutter imports
-import 'package:flutter/foundation.dart' show kIsWeb;
-
 import 'package:sqflite/sqflite.dart';
 
-import 'package:path/path.dart';
+import 'local_accounts.dart';
 
-import 'package:path_provider/path_provider.dart';
-
+/// Schema of an account's local database. Each signed-in account has its own
+/// database file (see [LocalAccounts]); nothing here is shared between accounts.
 class DatabaseHelper {
-  static Database? _database;
-
   /// 3: sync protocol 2 (record revisions; base revision, status and conflict
   /// id on queued changes).
   /// 5: next_attempt_at on queued changes (retry with backoff).
   /// 6: sync_held_rows (server rows a pull could not apply yet).
   /// 7: sync_conflict_checks (when each local conflict was last checked).
-  static const int schemaVersion = 7;
+  /// 8: sync_meta (pull cursor, sync status and the owning account, stored
+  /// with the account's data instead of device-wide preferences).
+  static const int schemaVersion = 8;
 
-  static Future<Database> getDatabase() async {
-    if (_database != null) return _database!;
-
-    final path = await _getDatabasePath();
-    _database = await openDatabase(
-      path,
-      version: schemaVersion,
-      onCreate: _onCreate,
-      onUpgrade: _onUpgrade,
-    );
-    return _database!;
-  }
+  /// The signed-in account's database; throws [NoActiveAccountException]
+  /// when no account is signed in.
+  static Future<Database> getDatabase() => LocalAccounts.instance.database();
 
   /// Opens (creating or upgrading) the app database at [path] with
   /// [factory]; used by tests and the on-device migration test.
@@ -39,15 +28,6 @@ class DatabaseHelper {
         path,
         options: OpenDatabaseOptions(version: schemaVersion, onCreate: _onCreate, onUpgrade: _onUpgrade),
       );
-
-  static Future<String> _getDatabasePath() async {
-    if (kIsWeb) {
-      return 'invoiceme.db'; // Web: in-memory fallback
-    } else {
-      final dir = await getApplicationDocumentsDirectory();
-      return join(dir.path, 'invoiceme.db');
-    }
-  }
 
   static Future<void> _onCreate(Database db, int version) async {
     // Clients table for offline cache (matches toDatabaseMap/fromDatabaseMap)
@@ -151,6 +131,28 @@ class DatabaseHelper {
 
     await _createHeldRows(db);
     await _createConflictChecks(db);
+    await _createSyncMeta(db);
+  }
+
+  /// Key/value sync state of this account's database (keys: [SyncMeta]).
+  static Future<void> _createSyncMeta(Database db) => db.execute('''
+      CREATE TABLE IF NOT EXISTS sync_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    ''');
+
+  static Future<String?> readMeta(DatabaseExecutor db, String key) async {
+    final rows = await db.query('sync_meta', columns: ['value'], where: 'key = ?', whereArgs: [key], limit: 1);
+    return rows.isEmpty ? null : rows.first['value'] as String?;
+  }
+
+  static Future<void> writeMeta(DatabaseExecutor db, String key, String? value) async {
+    if (value == null) {
+      await db.delete('sync_meta', where: 'key = ?', whereArgs: [key]);
+    } else {
+      await db.insert('sync_meta', {'key': key, 'value': value}, conflictAlgorithm: ConflictAlgorithm.replace);
+    }
   }
 
   /// When each local conflict was last checked against the server, so the
@@ -199,6 +201,9 @@ class DatabaseHelper {
     }
     if (oldVersion < 7) {
       await _createConflictChecks(db);
+    }
+    if (oldVersion < 8) {
+      await _createSyncMeta(db);
     }
   }
 

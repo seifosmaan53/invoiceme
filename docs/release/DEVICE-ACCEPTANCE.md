@@ -31,32 +31,27 @@ Evidence legend:
 | 7 | **Deletion delivery.** Delete a client/invoice on the web; sync the phone. Then restore it on the web and sync again | Gone from the phone after the first sync; back, with its lines and attachments, after the second | Server (tombstones, restore re-delivers children); Host (tombstones applied) | not run |
 | 8 | **Payment state.** On the test backend, an invoice paid with a provider **test-mode** payment, then partially refunded (test mode / mocked) | Invoice detail shows the payment card: paid, refunded, net; Reopen only after confirmation | Emulator (payment card from a real invoice response with a synthetic partial refund; Reopen) | not run |
 | 9 | **Attachment links.** Open an attachment with a normal storage URL; on the test backend, one seeded with an unsafe URL (e.g. `javascript:`) | The normal one opens; the unsafe one is not offered/opened | Host (URL check unit tests); Server (unsafe URLs left out of listings and sync) | not run |
-| 10 | **Logout and account switching.** Account A queues an offline change; log out; sign in as synthetic account B on the same phone; sync | B never sees, sends or receives A's data; A's pending change stays queued for A | **Expected to FAIL today (known defect, see below).** None | not run |
+| 10 | **Logout and account switching.** Account A queues an offline change; log out; sign in as synthetic account B on the same phone; sync; log out; sign in as A; sync. Also: start a sync and log out while it runs; and force-close the app during sign-in | B never sees, sends or receives A's data (Settings > Data & Sync shows nothing of A; no "could not be synced" or conflict entries of A); A's pending change stays queued and is sent when A signs in again; logout offers to keep or (after a warning about unsynced changes) remove the phone's data | Emulator (A queues offline, B signs in and syncs a clean store, A resumes and sends the change; native SQLite, real backend); Host (switch during an in-flight pull or push, restart during a transition, conflicts/retries/held rows/attachments, earlier-version database moved or quarantined, removal with confirmation, token/account binding) | not run. **Required on a physical phone before any production release** |
 | 11 | **PDF.** Open an invoice PDF (view/share/print) | PDF renders; correct invoice | Server (PDF rendering in the container smoke test); None on device | not run |
 
 Record for each run: phone model, Android version, build file and SHA-256,
 test backend commit, account names used (synthetic), result, and screenshots
 of failures. Do not call a check passed unless it ran on the phone.
 
-## Known defect: account switching on one phone (item 10)
+## Account switching on one phone (item 10): fixed in the app source
 
-Found while preparing this checklist (2026-10-29) and reproduced with the
-app's host test harness:
+Found 2026-10-29: the app kept one local database and one sync cursor for
+every account, and sign-out removed only the credentials. After A signed
+out and B signed in, B's sync sent A's queued changes with B's session,
+continued from A's cursor (so B's records were not downloaded) and B's
+screens could list A's failed changes. Kept as a regression test
+(`mobile/test/services/account_switch_regression_test.dart`; it fails on
+the earlier code).
 
-- Logout removes the tokens and the stored user, but not the local sync data.
-- The queue of unsynced changes is not separated by user: after A logs out and
-  B logs in, **B's next sync sends A's queued changes with B's session**. A's
-  offline-created records would be created in B's account; A's edits of A's
-  records are refused by the server and shown in B's "could not be synced"
-  list.
-- The sync cursor is one per device: B's first download continues from A's
-  position, so B's older records are not downloaded to the phone.
-
-Until it is fixed: **use one account per phone** (no logout/login of a
-different account on a device that may have unsynced changes). The fix is a
-product change for the owner to schedule, not part of this release
-preparation: scope the queue, failed/waiting lists, conflict checks, held
-rows and the cursor to the signed-in user, keep other users' unsynced
-changes untouched until that user signs in again, and add a regression test
-for this item. This blocks a release to phones that are shared between
-accounts.
+Fixed by per-account local storage (docs/SYNC-CONTRACT.md "Local data per
+account"): every account has its own database, only the signed-in one is
+open, sign-out stops and invalidates running sync work first, and the
+shared database of earlier versions is assigned to its one owner or
+quarantined. Automated evidence is in item 10. **It has not been tested on a
+physical phone**: item 10 must pass on a real phone before a production
+release, including with an earlier test build installed that has data.

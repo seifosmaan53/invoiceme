@@ -7,8 +7,14 @@ worth locking down: CSV export, form validation, and a top-level smoke test.
 
 ```
 test/
+├── screens/                      # Conflict screen, payment card
 ├── services/
+│   ├── account_switch_regression_test.dart # A/B on one device (fails on the old shared store)
+│   ├── account_isolation_test.dart         # Per-account storage: in-flight switch, restart,
+│   │                                       # legacy/quarantine, removal, token binding
+│   ├── sync_*_test.dart          # Sync protocol 2 (real SQLite via sqflite_common_ffi)
 │   └── csv_service_test.dart     # CSV export formatting/escaping
+├── support/two_accounts.dart     # Simulated server for synthetic accounts A and B
 ├── utils/
 │   └── form_validators_test.dart # Email/amount/required-field validation
 └── widget_test.dart              # App boots without throwing

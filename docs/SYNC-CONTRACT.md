@@ -624,6 +624,42 @@ environment that wrote it. CI runs the test (`flutter test test/services/`).
   `allowed_actions`, sent with `expected_revision` = `current.revision`.
   Nothing from the API is cached except the open count.
 
+### Local data per account (mobile)
+
+Each account that signs in on a device has its own local SQLite database
+(`accounts/u-<user id>.db` in the app's documents directory): cached records
+and attachments, queued changes and retries, conflicts, held server rows,
+conflict checks, and the sync state (pull cursor, last sync, open conflict
+count) in its `sync_meta` table. Only the signed-in account's database is
+open (`LocalAccounts`, `mobile/lib/core/database/local_accounts.dart`).
+
+- **Sign-in** opens the database of the account the server returned; the
+  access token's `sub` must be that account, and on app start a stored
+  token whose `sub` differs from the stored account signs the app out.
+- **Sign-out** (also when a session expires) cancels the session's requests
+  in flight, stops a running sync (it stops before its next request or
+  write; a response that arrives later is not applied), closes the
+  database and removes the credentials. The database stays on the device:
+  unsynced changes are sent when that account signs in again. Removing it
+  is a separate, confirmed action that warns about unsynced changes.
+- **A 401 or a token refresh** of a request sent in an ended session never
+  changes the next session's tokens; a refreshed token for another account
+  is refused.
+- **Earlier versions** kept one database (`invoiceme.db`) and one cursor for
+  every account. On the first start of this version that database becomes
+  the database of its one account when every record and queued change in it
+  carries the same user id (and its items, attachments and held rows belong
+  to that account's records); otherwise (more than one account, or a change
+  without one) it is quarantined: not used or synced by any account. In
+  Settings > Data & Sync the signed-in account can recover the unsynced
+  changes recorded with its own user id, or remove the data after a
+  warning; data holding changes recorded for another account is not
+  removable until that account has recovered them. The old device-wide cursor is dropped: every account's next sync
+  is a full pull (queued changes are kept and held as usual).
+
+The server's ownership checks are unchanged; the per-account storage is an
+additional boundary on the device.
+
 ## Compatibility and rollout
 
 | server \ app | released app (protocol 1) | protocol-2 app |

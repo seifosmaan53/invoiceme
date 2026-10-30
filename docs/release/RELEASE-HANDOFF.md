@@ -42,12 +42,12 @@ All builds are listed in [android-versions.tsv](android-versions.tsv).
 
 ## 3. Known limitations (as of `849552b`)
 
-1. **Account switching on one phone leaks queued changes across accounts**
-   (found 2026-10-29, reproduced in host tests): after logout and login as
-   another user, the new session sends the previous user's queued changes
-   and continues the previous user's sync position. Use one account per
-   phone until fixed; blocks release to shared phones.
-   [DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md).
+1. **Account switching on one phone leaked queued changes across accounts**
+   in `849552b` and the test APK built from it (found 2026-10-29). Fixed in
+   the app source after this baseline (per-account local storage; host and
+   emulator tests), see [DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md) item 10;
+   not yet tested on a physical phone. Do not switch accounts on a phone
+   running the `849552b` test APK.
 2. Overdue emails are sent at most once and **not retried** if the server
    stops between marking and sending, or a send fails.
 3. Older apps (protocol 1) keep last-write-wins on drafts, clients and
@@ -75,8 +75,8 @@ Android (details and secure setup: [ANDROID-RELEASE.md](ANDROID-RELEASE.md)):
    environment secrets with `gh secret set` (prompts, nothing in chat).
 5. Optional: a **dedicated test key** in this repository's secrets, so test
    builds keep one identity.
-6. Decide on the **account-switching defect** (fix before release, or
-   release only to single-account phones).
+6. Test **account switching** on a physical phone (DEVICE-ACCEPTANCE.md
+   item 10) with a test build that contains the fix.
 7. Run [DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md) on a physical phone
    against a test backend; then build with the release workflow, verify the
    record, and distribute yourself.
@@ -96,14 +96,14 @@ It does not block an Android-only test release.
 **Now:** install the `.synctest` test APK on a test phone (it sits beside any
 other InvoiceMe app), point it at a **test** backend (build one with
 Actions > Android test candidate > Run workflow, `api_base_url` = the test
-backend), sign in with synthetic accounts (one account per phone), and work
+backend), sign in with synthetic accounts, and work
 through [DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md). Payments only in
 Stripe test mode or mocked. The server release can be rehearsed on a
 restored copy of a database, never on the live installation.
 
 **Before a real release:** the owner decisions and setup in section 4, the
-account-switching fix (or a single-account rollout), physical-device
-acceptance, the server update done per the checklist at the installation by
+account-switching check on a physical phone (item 10) and the rest of the
+physical-device acceptance, the server update done per the checklist at the installation by
 the owner, and then a production build from the release workflow in the
 private repository, distributed by the owner. Until then nothing has been
 released.

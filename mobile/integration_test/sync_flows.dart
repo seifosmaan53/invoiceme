@@ -2,19 +2,24 @@
 // backend. Kept apart from the test entry point so they can also be run
 // with another database factory.
 
+// Dart imports
+import 'dart:io';
+
 // Package imports
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
+import 'package:uuid/uuid.dart';
 
 // Local imports
 import 'package:invoiceme/core/database/database_helper.dart';
+import 'package:invoiceme/core/database/local_accounts.dart';
 import 'package:invoiceme/core/providers/providers.dart';
 import 'package:invoiceme/core/services/api_client.dart';
+import 'package:invoiceme/core/services/auth_service.dart';
 import 'package:invoiceme/core/services/sync_conflicts_api.dart';
 import 'package:invoiceme/core/services/sync_service.dart';
 import 'package:invoiceme/models/invoice.dart';
@@ -28,7 +33,12 @@ class E2eConfig {
   static const password = String.fromEnvironment('E2E_PASSWORD');
   static const paidInvoiceId = String.fromEnvironment('E2E_PAID_INVOICE_ID');
 
+  /// Second synthetic account (account switching).
+  static const emailB = String.fromEnvironment('E2E_EMAIL_B');
+  static const passwordB = String.fromEnvironment('E2E_PASSWORD_B');
+
   static bool get configured => email.isNotEmpty && password.isNotEmpty;
+  static bool get secondAccount => emailB.isNotEmpty && passwordB.isNotEmpty;
 }
 
 /// Pumps until [finder] matches, letting real I/O run in between.
@@ -114,12 +124,8 @@ Future<void> conflictFlow(WidgetTester tester, ApiClient api, DatabaseFactory fa
   // Real I/O runs inside runAsync (needed where the test binding fakes time).
   final db = (await tester.runAsync(() async {
     await factory.deleteDatabase(path);
-    final db = await DatabaseHelper.openAt(factory, path);
-    final prefs = await SharedPreferences.getInstance();
-    for (final key in [syncCursorKey, lastSyncTimestampKey, syncFullPullNeededKey, syncOpenConflictsKey, syncStateKey]) {
-      await prefs.remove(key);
-    }
-    return db;
+    // A new database has no cursor (sync state is stored in it).
+    return DatabaseHelper.openAt(factory, path);
   }))!;
   final service = SyncService(api, null, database: () async => db);
 
@@ -204,4 +210,70 @@ Future<void> paymentCardFlow(WidgetTester tester, ApiClient api, String invoiceI
   // Let timers of the screen finish before the test ends.
   await tester.pumpWidget(const SizedBox());
   await tester.pump(const Duration(seconds: 5));
+}
+
+/// Account switching on the device (native SQLite, real backend, synthetic
+/// accounts A and B): A queues a change offline and signs out; B signs in,
+/// syncs and neither sees nor sends A's data; A signs in again and its
+/// queued change is sent by A. Every account has its own database file
+/// under [root].
+Future<void> accountSwitchFlow(WidgetTester tester, DatabaseFactory factory, String root) async {
+  await tester.runAsync(() async {
+    await Directory(root).create(recursive: true);
+    final accounts = LocalAccounts(factory: factory, directory: () async => root);
+    final api = ApiClient()..setBaseUrl(E2eConfig.api);
+    final auth = AuthService(api, const FlutterSecureStorage(), accounts: accounts);
+    final sync = SyncService(api, null, accounts: accounts);
+
+    Future<List<String>> unsynced() async => [
+          for (final r in await (await accounts.database()).query('pending_changes', where: 'synced = 0'))
+            r['object_id'] as String,
+        ];
+    Future<Set<String>> cachedClients() async =>
+        {for (final r in await (await accounts.database()).query('clients_local')) r['id'] as String};
+    Future<Set<String>> serverClientNames() async {
+      final res = await api.get('/clients', queryParameters: {'limit': 100}, useCache: false);
+      final data = res.data is Map ? res.data['data'] : res.data;
+      return {for (final c in data as List) (c as Map)['name'] as String};
+    }
+
+    // A: sync, then a change queued while offline (not sent yet).
+    final userA = await auth.login(E2eConfig.email, E2eConfig.password);
+    expect((await sync.sync()).state, SyncState.ok);
+    final aClients = await cachedClients();
+    expect(aClients, isNotEmpty, reason: 'the seed gives A a client');
+    final offlineId = const Uuid().v4();
+    final offlineName = 'Switch test offline ${offlineId.substring(0, 8)}';
+    await sync.queueChange(
+      objectType: ChangeObjectType.client,
+      objectId: offlineId,
+      changeType: ChangeType.create,
+      data: {'name': offlineName},
+    );
+    await auth.logout();
+
+    // B on the same device.
+    final userB = await auth.login(E2eConfig.emailB, E2eConfig.passwordB);
+    expect(userB.id, isNot(userA.id));
+    expect(await unsynced(), isEmpty, reason: "B's store has no queued change of A");
+    expect(await cachedClients(), isEmpty, reason: "B's store starts empty");
+    expect((await sync.sync()).state, SyncState.ok);
+    final bClients = await cachedClients();
+    expect(bClients, isNotEmpty, reason: "B's first pull is a full pull of B's records");
+    expect(bClients.intersection(aClients), isEmpty);
+    expect(await serverClientNames(), isNot(contains(offlineName)), reason: "B's sync did not send A's change");
+    expect(File(await accounts.pathFor(userA.id)).existsSync(), isTrue);
+    expect(File(await accounts.pathFor(userB.id)).existsSync(), isTrue);
+    await auth.logout();
+
+    // A again: the queued change is still there and is sent by A.
+    await auth.login(E2eConfig.email, E2eConfig.password);
+    expect(await unsynced(), [offlineId]);
+    final report = await sync.sync();
+    expect(report.synced, 1);
+    expect(await unsynced(), isEmpty);
+    expect(await serverClientNames(), contains(offlineName));
+    expect((await cachedClients()).intersection(bClients), isEmpty);
+    await auth.logout();
+  });
 }

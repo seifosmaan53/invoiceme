@@ -11,5 +11,6 @@
 - **[Release handoff](release/RELEASE-HANDOFF.md)** — what is tested, test APKs, what a real release still needs
 - **[Server release checklist](operations/SERVER-RELEASE-CHECKLIST.md)** — authoritative order for updating an existing server
 - **[Android release](release/ANDROID-RELEASE.md)**, **[device acceptance](release/DEVICE-ACCEPTANCE.md)**, **[iOS assessment](release/IOS-ASSESSMENT.md)**
+- **[Phone-test backend](../scripts/phone-test/README.md)** — isolated synthetic backend on this computer for physical-phone testing over USB
 
 See the [main README](../README.md) for the project overview and quickstart.

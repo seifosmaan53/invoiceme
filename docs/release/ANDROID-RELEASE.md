@@ -8,6 +8,31 @@ Status: **no production Android build exists.** Only test APKs (separate
 `.synctest` identity, debug-signed) have been produced; see
 [RELEASE-HANDOFF.md](RELEASE-HANDOFF.md).
 
+## 0. Production configuration proposal (for the owner's review)
+
+Checked 2026-10-30 against the repository, the build ledger
+([android-versions.tsv](android-versions.tsv)) and the project records: **no
+production identity, signing key or production release exists.** The ledger
+holds only test builds (`.synctest`, versionCodes 1 and 1000xx); a test
+build's versionCode is not production history. What phones in the field run
+is unknown to these records (section 1, owner check).
+
+| Item | Proposal | Status |
+|---|---|---|
+| Application id | `com.seifosman.invoiceme` | **Owner decision.** Confirm you control `seifosman.com` (or choose the customer's reversed domain with their agreement), and that no InvoiceMe app is already installed on staff phones (section 1) or published under that id |
+| Distribution | Direct APK to a few phones for an initial controlled pilot (section 2.3) | **Owner decision** |
+| Format | `apk` | follows from the distribution |
+| Version | `1.1.0`, versionCode `10100` (scheme `MAJOR*10000+MINOR*100+PATCH`, section 2.2); above every production line in the ledger (there are none) | **Owner decision** (accept or change) |
+| Signing key | A new production key created by you on your own machine (section 3.2); never the test key | **Not created.** Needs your explicit go-ahead; never sent to chat |
+| Server address | `https://<host>/api/v1` with a certificate the phones trust (section 4) | **Owner decision**, from the installation |
+| Build repository | A private repository of yours with the `android-release` environment (sections 3.1, 3.3) | **Owner action** |
+| Source | A full commit SHA in `main` that was reviewed and tested | chosen at build time |
+
+**Configuration changes:** none in the code. The id, version, key and URL
+are inputs, variables and secrets of the release workflow (sections 3.3,
+3.4); the repository keeps the placeholder `com.example.invoiceme`, which the
+release workflow refuses.
+
 ## 1. Current identity (verified 2026-10-29)
 
 | Item | Value | Source |
@@ -26,8 +51,9 @@ the owner on a phone (not by tooling here):
 
 1. On the phone: Settings > Apps > InvoiceMe > App details (or "App info");
    note the package name if shown. With a computer and USB debugging:
-   `adb shell pm list packages | grep -i invoice` and
-   `adb shell dumpsys package <package> | grep -E "versionName|versionCode"`.
+   `adb -d shell pm list packages | grep -i invoice` and
+   `adb -d shell dumpsys package <package> | grep -E "versionName|versionCode"`
+   (`-d`: the USB-connected phone only).
 2. If a build with the same package exists and you still have the file that
    was installed: `apksigner verify --print-certs <file>.apk` shows its
    certificate. A certificate `CN=Android Debug` means it was signed with a
@@ -82,18 +108,36 @@ issues, commit messages or this repository.
 ### 3.1 A private repository for releases
 
 This repository is public: a run's inputs, logs and artifacts are visible to
-any signed-in GitHub user, so `android-release.yml` refuses to run here.
-Create a **private** repository you own (e.g. `invoiceme-release`) and push
-`main` to it from your machine:
+any signed-in GitHub user, so `android-release.yml` refuses to run here (its
+first step stops unless `github.event.repository.private` is true). That is
+deliberate: a signed production APK, its run logs and the production URL
+should not be public, and environment secrets with approval rules belong in
+a repository only you can see.
+
+Supported arrangement (owner-run, nothing automatic):
+- **This public repository stays the place of review and CI.** Its
+  visibility does not change.
+- **A private repository of yours is only for release builds.** Create it
+  empty on GitHub (e.g. `invoiceme-release`), then push the reviewed `main`
+  from your own clone. The history is the same public history (it contains
+  no secrets); secrets are created only in the private repository (section
+  3.3) and are never copied from anywhere.
 
 ```sh
 git remote add release git@github.com:<you>/invoiceme-release.git
-git push release main          # repeat after each reviewed merge you want to release
+git fetch origin && git push release origin/main:refs/heads/main   # after each reviewed merge you want to release
 ```
+
+- Never set up an automatic mirror, and never push the private
+  repository's workflow artifacts, secrets or logs anywhere else.
 
 ### 3.2 Create the production key on your own machine
 
-Use the JDK's `keytool`; it prompts for passwords without echoing them:
+Only with your explicit decision to create the production key (it is
+permanent: every update of the app must be signed with it). `keytool` comes
+with a Java JDK; if `keytool -help` fails, install one first (e.g.
+`brew install --cask temurin@17`). Work in a folder outside any repository;
+`keytool` prompts for passwords without echoing them:
 
 ```sh
 keytool -genkeypair -v -keystore invoiceme-release.jks -alias invoiceme \
@@ -103,8 +147,11 @@ keytool -list -v -keystore invoiceme-release.jks -alias invoiceme | grep SHA256
 ```
 
 Store the `.jks` file and both passwords in your password manager **and** an
-encrypted offline backup. The `SHA256` line is the certificate fingerprint;
-it is not secret.
+encrypted offline backup (two separate places); check that the backup opens
+(`keytool -list -keystore <backup copy>`). The `SHA256` line is the
+certificate fingerprint; it is not secret: it becomes
+`ANDROID_RELEASE_CERT_SHA256`. Do not keep the `.jks` in a synced or shared
+folder, and never in a repository.
 
 ### 3.3 The `android-release` environment (private repository)
 
@@ -175,8 +222,21 @@ What it does, in order (`.github/workflows/android-release.yml`):
 6. deletes the keystore (also on failure) and uploads the artifact to the
    run. It publishes nothing and installs nothing.
 
-Download the artifact, check `SHA256SUMS`, keep `release-record.txt`, add the
-ledger line, and delete the run's artifact once you have it.
+Before distributing, verify what you downloaded:
+
+```sh
+shasum -a 256 -c SHA256SUMS                          # the file is the one the run built
+grep -E 'application_id|version_|debug_certificate|cleartext|source_commit|signing_certificate_sha256' release-record.txt
+keytool -printcert -jarfile invoiceme-*.apk | grep SHA256   # equals your key's fingerprint (section 3.2)
+# if keytool prints nothing (no v1 signature): apksigner verify --print-certs invoiceme-*.apk   (Android build-tools)
+```
+
+Expected: your application id and version; `debug_certificate=false`;
+`cleartext_http_allowed=false`; `source_commit` = the SHA you entered;
+the certificate fingerprint = `ANDROID_RELEASE_CERT_SHA256`. Install it on a
+test phone first (DEVICE-ACCEPTANCE.md) before any staff phone. Keep
+`release-record.txt`, add the ledger line in a reviewed commit, and delete
+the run's artifact once you have it.
 
 ## 4. Server address and network security
 
@@ -216,8 +276,10 @@ Two identities are possible:
 | Per-build identity (current) | no test key configured | Signed with that CI runner's throwaway debug key: **every run has a different key**, so a test APK cannot be installed over an earlier one; Android refuses the update |
 | Stable test key | the test-key secrets below exist | Same key every run: later test APKs install over earlier ones (versionCode increases per run); still a separate `.synctest` app |
 
-To set up the stable test key (once, on your machine; a **different** key
-from the production key, never reuse it):
+To set up the stable test key (once, on your machine, with a JDK as in 3.2;
+a **different** key from the production key, never reuse it). Keep the
+`.jks` and its passwords in your password manager like any key, but losing
+it costs only test-build continuity:
 
 ```sh
 keytool -genkeypair -v -keystore invoiceme-test.jks -alias invoiceme-test \
@@ -240,10 +302,16 @@ Fingerprints are public values; the production key itself never comes here.
 Repository secrets are not given to pull requests from forks; such PRs fall
 back to the per-build identity. A partly configured test key fails the run.
 
+After the secrets are set, start Actions > Android test candidate > Run
+workflow (with `api_base_url` `http://127.0.0.1:3900/api/v1` for the
+phone-test backend). Check that the run's `release-record.txt` shows
+`signing_certificate_sha256` = your test fingerprint. From that build on,
+each later test build installs over the previous one.
+
 **The test APKs already produced cannot be updated by a stable-key build.**
-They were signed with two different throwaway keys
-(`72ae129`: `8170b77e…32ce`; `849552b`: `dd265408…933b`), and no later build
-can carry those keys. A device that has one of them keeps it: let it sync,
+They were signed with different throwaway keys (`72ae129`: `8170b77e…32ce`;
+`849552b`: `dd265408…933b`; `ed065aa`: `f8ea52e2…c7bb`; the phone build of
+`6c3c230`: `c9fd0dfe…82fc`), and no later build can carry those keys. A device that has one of them keeps it: let it sync,
 and install new test builds on another device or emulator. Remove an old
 test build only once you have confirmed it holds no unsynced changes, and
 only if you choose to; nothing here requires removing it.

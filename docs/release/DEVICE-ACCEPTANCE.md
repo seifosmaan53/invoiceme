@@ -1,57 +1,101 @@
-# Physical-device acceptance checklist (Android)
+# Physical-phone acceptance checklist (Android)
 
-Short checklist for a real phone before any production release. Use a **test
-backend** (never the customer's server), **synthetic accounts** only, and
-payments only in the provider's **test mode** or mocked. Nothing here has been
-run on a physical phone yet: every "Phone" cell below is **not run**.
+Run on a **spare** Android phone, against the isolated **phone-test backend**
+on your computer (`scripts/phone-test/`, see its README), with its synthetic
+accounts A and B. Never a customer server, never real customer data;
+payments only as the seeded synthetic record (no payment provider is
+configured, so nothing can be charged and no email is sent).
 
-Build under test: the `.synctest` test APK (record its file name and SHA-256
-from the run's `SHA256SUMS`), built with `api_base_url` pointing at the test
-backend: Actions > Android test candidate > Run workflow. The test APK
-allows plain HTTP, so a LAN test backend works; a production build will not
-(it needs `https://`).
+**Status: nothing below has been run on a physical phone.** Every "Phone"
+cell is **NOT RUN** until you run it and record the result. The automated
+evidence is listed separately and is not phone evidence:
+- **Emulator**: passed in CI on an Android 11 emulator against a real
+  backend (`android-test.yml` job `emulator-e2e`; on `ed065aa`, run
+  41108435367, 4 of 4).
+- **Host**: passed in the app's host tests on real SQLite with a simulated
+  server (`mobile/test/`), not on a device.
+- **Server**: passed in the backend's database E2E tests.
 
-Evidence legend:
-- **Emulator**: passed in CI on an Android 11 emulator against a real backend
-  (`android-test.yml` job `emulator-e2e`, last on main `849552b`, run
-  40971835817).
-- **Host**: passed in the app's host tests on a real SQLite database with a
-  simulated server (`mobile/test/`), not on a device.
-- **Server**: passed in the backend's database E2E tests (`backend/test/`).
-- **None**: no automated evidence.
+## What the app can and cannot do on a phone (this version)
 
-| # | Check (how) | Expected | Automated evidence | Phone |
+The screens save directly to the server; **no screen queues offline
+changes**, and sync runs only from Settings > Data & Sync > Sync. On a phone
+you therefore cannot create an offline change, a device-side conflict or a
+retry by tapping. Those checks run on the phone with the **on-device tests**
+(`scripts/phone-test/run-device-tests.sh`): the test code of the emulator
+job (CI builds it as the `.synctest` variant, the script as a plain debug
+app), queueing changes through the app's real sync service and resolving a
+conflict in the real conflict screen, on the phone's own SQLite.
+
+## Before you start
+
+1. On your computer: `scripts/phone-test/start.sh` (prints where the
+   synthetic passwords are: `~/.invoiceme-phone-test/accounts.txt`).
+2. On the phone: Settings > About phone > tap "Build number" 7 times;
+   Settings > System > Developer options > **USB debugging** on.
+3. Connect the phone by USB, accept "Allow USB debugging" for this computer,
+   then on the computer: `scripts/phone-test/connect-phone.sh`. It must print
+   `backend reachable`. (Needs Android platform-tools `adb`.)
+4. Check for an earlier test build: `adb -d shell pm list packages | grep invoiceme`
+   (`-d` = the USB device only; never a TV or other network device).
+   If `com.example.invoiceme.synctest` is listed, **stop**: see
+   "An earlier test build is on the phone" below.
+
+## Checklist
+
+| # | Do | Expected | Automated evidence (not phone) | Phone |
 |---|---|---|---|---|
-| 1 | **Fresh install.** Install the APK on a phone without InvoiceMe test builds; open; sign in with synthetic account A | App opens, signs in, lists A's data; label "InvoiceMe (sync test)"; it sits beside any other InvoiceMe app | Emulator (install + sign-in) | not run |
-| 2 | **Upgrade from an earlier compatible test build.** Install build N, create data, go offline, make an edit (pending), then install build N+1 over it | Install succeeds, the pending edit is still queued and syncs once online | Host (database upgrade from version 2 keeps the queue; versions 5-7 idempotent). Not possible yet on a phone: the existing test APKs have different keys; needs two builds signed with the stable test key (ANDROID-RELEASE.md section 5) | not run |
-| 3 | **Local database migration** on a device that has data from an older app version | No pending change lost; app opens at the current database version | Emulator (native SQLite v2 to current, reopen changes nothing); Host (pending rows kept) | not run |
-| 4 | **Offline edits and reconnection.** Airplane mode; create a client, edit an invoice; reconnect; sync | Changes reach the server once; nothing duplicated | Host (queue, cursor paging); Server (idempotent change ids, delivery) | not run |
-| 5 | **Conflict and resolution.** Edit the same invoice field on the web and offline on the phone; sync | A conflict appears in Settings > Data & Sync with both versions; "Use my version" / "Keep current version" behave as labelled; afterwards the phone shows the server's current record | Emulator (stale edit, conflict screen, use my version); Host (held rows, re-delivery after resolution); Server | not run |
-| 6 | **Retry after restart.** Stop the backend (or block it), queue a change, sync (temporary failure), force-close the app, reopen | "Waiting to retry" lists the change with attempts and next attempt; it is never given up; "Retry now" sends it once the backend is back | Host (backoff persisted across a new service instance, retry now) | not run |
-| 7 | **Deletion delivery.** Delete a client/invoice on the web; sync the phone. Then restore it on the web and sync again | Gone from the phone after the first sync; back, with its lines and attachments, after the second | Server (tombstones, restore re-delivers children); Host (tombstones applied) | not run |
-| 8 | **Payment state.** On the test backend, an invoice paid with a provider **test-mode** payment, then partially refunded (test mode / mocked) | Invoice detail shows the payment card: paid, refunded, net; Reopen only after confirmation | Emulator (payment card from a real invoice response with a synthetic partial refund; Reopen) | not run |
-| 9 | **Attachment links.** Open an attachment with a normal storage URL; on the test backend, one seeded with an unsafe URL (e.g. `javascript:`) | The normal one opens; the unsafe one is not offered/opened | Host (URL check unit tests); Server (unsafe URLs left out of listings and sync) | not run |
-| 10 | **Logout and account switching.** Account A queues an offline change; log out; sign in as synthetic account B on the same phone; sync; log out; sign in as A; sync. Also: start a sync and log out while it runs; and force-close the app during sign-in | B never sees, sends or receives A's data (Settings > Data & Sync shows nothing of A; no "could not be synced" or conflict entries of A); A's pending change stays queued and is sent when A signs in again; logout offers to keep or (after a warning about unsynced changes) remove the phone's data | Emulator (A queues offline, B signs in and syncs a clean store, A resumes and sends the change; native SQLite, real backend); Host (switch during an in-flight pull or push, restart during a transition, conflicts/retries/held rows/attachments, earlier-version database moved or quarantined, removal with confirmation, token/account binding) | not run. **Required on a physical phone before any production release** |
-| 11 | **PDF.** Open an invoice PDF (view/share/print) | PDF renders; correct invoice | Server (PDF rendering in the container smoke test); None on device | not run |
+| 1 | **Install.** `adb -d install <phone APK>` (from the handoff folder; never over another build). Open "InvoiceMe (sync test)" | Installs as a new app; opens the sign-in screen | Emulator (install, sign-in) | NOT RUN |
+| 2 | **A signs in and syncs.** Sign in as A (`A_EMAIL`/`A_PASSWORD`). Settings > Data & Sync > Sync | Clients "Northwind Test Co (A)", "Delete-me Test Client (A)"; three invoices (draft $120, sent $250, paid $100); sync completes; "Last synced" shows | Emulator, Host | NOT RUN |
+| 3 | **Switch to B.** Logout (keep data). Sign in as B. Look at clients, invoices, Settings > Data & Sync (incl. "could not be synced" and conflicts); Sync | Only "Contoso Test Ltd (B)" and its sent $75 invoice; Data & Sync shows nothing of A (no pending, failed or conflict entries; its own last-sync time); sync completes | Emulator (B starts with an empty store, never sends A's changes), Host | NOT RUN |
+| 4 | **Back to A.** Logout, sign in as A, Data & Sync, Sync | A's data and sync status as in step 2; nothing of B | Emulator (A's queued change is still there and is sent by A), Host | NOT RUN |
+| 5 | **Switch during an active sync.** As A: tap Sync and immediately Logout; sign in as B; Sync | No crash; B sees only B; A's next sign-in and Sync work | Host (switch during an in-flight download or upload: nothing written to either account) | NOT RUN |
+| 6 | **Deletion delivery.** On the computer: `scripts/phone-test/as-account.sh A DELETE /clients/<A_DELETE_ME_CLIENT_ID>`; on the phone as A: Sync, open Clients | "Delete-me Test Client (A)" is gone | Server (tombstones), Host (tombstones applied) | NOT RUN |
+| 7 | **Payment state.** As A open the paid $100 invoice | Payment card: Partially refunded; Paid (gross) $100.00, Refunded $30.00, Net received $70.00; Reopen only after a confirmation (cancel it if you will run step 10 afterwards) | Emulator (same seeded state) | NOT RUN |
+| 8 | **Attachment link.** As A open the paid $100 invoice > attachments | Only "normal-link.pdf" is listed and opens the browser at example.com; the seeded unsafe `javascript:` link is never shown | Server (unsafe URLs left out), Host (URL check) | NOT RUN |
+| 9 | **PDF.** As A open the draft $120 invoice > PDF (view, share) | The PDF renders, for that invoice | Server (PDF rendering); the test backend renders with this computer's Chrome | NOT RUN |
+| 10 | **On-device sync tests.** `scripts/phone-test/run-device-tests.sh` (needs Flutter on the computer; installs a separate debug test app, package `com.example.invoiceme`, with the synthetic passwords compiled in; it does not touch the phone build; remove it afterwards if you like: `adb -d uninstall com.example.invoiceme`) | `All tests passed!` for: native SQLite migration; a queued offline change and a server edit of the same field produce a conflict, resolved with "Use my version" in the conflict screen; account switching (A's queued change stays with A, B starts clean and never sends it, A sends it after signing in again); payment card | Emulator (identical tests) | NOT RUN |
+| 11 | **Restart keeps state.** As A: force-close the app (Settings > Apps > Force stop), reopen | Still signed in as A (or the sign-in screen if the session expired); same data and Data & Sync status | Host (restart while signed in) | NOT RUN |
+| 12 | **Remove local data.** As A: Logout > "Logout and remove data from this phone" | A second confirmation; with unsynced changes a warning and a tick box. Afterwards A signs in to an empty phone store and Sync downloads A's data again | Host (removal needs confirmation with unsynced changes) | NOT RUN |
 
-Record for each run: phone model, Android version, build file and SHA-256,
-test backend commit, account names used (synthetic), result, and screenshots
-of failures. Do not call a check passed unless it ran on the phone.
+Not checkable on a phone with this version (no screen queues changes):
+**retry after a restart** (a change "waiting to retry" survives restarts and
+is never given up) has Host evidence only.
 
-## Account switching on one phone (item 10): fixed in the app source
+Record for each run: phone model and Android version, the APK file and
+SHA-256, the backend commit (`git rev-parse HEAD`), which synthetic account,
+the result, and screenshots of failures.
 
-Found 2026-10-29: the app kept one local database and one sync cursor for
-every account, and sign-out removed only the credentials. After A signed
-out and B signed in, B's sync sent A's queued changes with B's session,
-continued from A's cursor (so B's records were not downloaded) and B's
-screens could list A's failed changes. Kept as a regression test
-(`mobile/test/services/account_switch_regression_test.dart`; it fails on
-the earlier code).
+## Diagnostics without secrets
 
-Fixed by per-account local storage (docs/SYNC-CONTRACT.md "Local data per
-account"): every account has its own database, only the signed-in one is
-open, sign-out stops and invalidates running sync work first, and the
-shared database of earlier versions is assigned to its one owner or
-quarantined. Automated evidence is in item 10. **It has not been tested on a
-physical phone**: item 10 must pass on a real phone before a production
-release, including with an earlier test build installed that has data.
+`scripts/phone-test/collect-logs.sh` (into `~/.invoiceme-phone-test/`) writes
+the test app's own log lines (logcat of its running process; open the app
+first) and the test backend's log, with tokens,
+JWTs, passwords and e-mail addresses masked. Review the files before sharing,
+and copy them out before `stop.sh --wipe` (which deletes that folder).
+Do not share `accounts.txt`, screenshots of the sign-in fields, or a full
+`adb bugreport` (it contains much more than this app).
+
+## An earlier test build is on the phone
+
+The test APKs are signed with throwaway debug keys that differ for every CI
+run (`72ae129`: `8170b77e…32ce`; `849552b`: `dd265408…933b`; `ed065aa`:
+`f8ea52e2…c7bb`; the phone build of `6c3c230`: `c9fd0dfe…82fc`). They share
+one application id, so Android refuses to install one over another
+(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`), and they cannot be installed side by
+side. No new key can ever update them.
+
+If the phone has an earlier test build:
+- **Keep it**, and use another spare phone for this checklist. Nothing here
+  requires removing it.
+- Its data lives only in that app. If it may hold unsynced changes, open it
+  while connected to the backend it was built for and sync until Data & Sync
+  shows nothing pending, failed or in conflict. Builds before `ed065aa` have
+  the account-switching defect: sync them only with the account that made
+  the changes.
+- Remove it only after that, only if you decide to, and only on a phone
+  holding test data.
+
+Future test builds can update each other once a stable test key is set up
+(ANDROID-RELEASE.md section 5); that key cannot update any of the builds
+above.

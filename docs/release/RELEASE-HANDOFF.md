@@ -39,7 +39,25 @@ The server code is unchanged since `849552b`.
 
 ## 2. Test artifact
 
-**Current: `ed065aa`**
+**For a physical phone: build of `6c3c230`** (app code identical to
+`ed065aa`; only documentation changed in between). The `ed065aa` build
+below is compiled for the emulator's host address (`10.0.2.2`), which a
+phone cannot reach; this one targets `http://127.0.0.1:3900/api/v1`, the
+phone-test backend over USB (`scripts/phone-test/`).
+
+| Item | Value |
+|---|---|
+| File | `invoiceme-synctest-1.0.0-100021-6c3c230.apk`, artifact of run [41118674827](https://github.com/seifosmaan53/invoiceme/actions/runs/41118674827) (emulator 4 of 4 in the same run) |
+| SHA-256 | `cd896fa0018cb46056c3c74ba2b0f868a5acea65f558df9830124ed4d396c1d3` |
+| Application id | `com.example.invoiceme.synctest`, versionName 1.0.0, versionCode 100021 |
+| Signing | throwaway Android debug key, certificate SHA-256 `c9fd0dfebf327cc1712af323276b0d6ca7e2d2dc9f48bbad3cdad71360e282fc`. **Not a release key** |
+| Compatibility | cannot be installed over (or beside) any earlier test build; see DEVICE-ACCEPTANCE.md |
+
+The owner's handoff folder (outside the repository) holds both APKs with
+their `SHA256SUMS`, `release-record.txt`, an install guide and the
+checklist.
+
+**Emulator build: `ed065aa`**
 
 | Item | Value |
 |---|---|
@@ -116,12 +134,13 @@ It does not block an Android-only test release.
 
 ## 5. What can be tested now, and what must happen before a real release
 
-**Now:** install the `.synctest` test APK on a test phone (it sits beside any
-other InvoiceMe app), point it at a **test** backend (build one with
-Actions > Android test candidate > Run workflow, `api_base_url` = the test
-backend), sign in with synthetic accounts, and work
-through [DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md). Payments only in
-Stripe test mode or mocked. The server release can be rehearsed on a
+**Now:** start the isolated phone-test backend (`scripts/phone-test/start.sh`),
+connect a spare phone by USB (`scripts/phone-test/connect-phone.sh`),
+install the phone build of the `.synctest` test APK, sign in with the
+synthetic accounts A and B, and work through
+[DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md). Payments only as the
+seeded synthetic record (the phone-test backend has no payment provider), or
+in Stripe test mode on another test backend. The server release can be rehearsed on a
 restored copy of a database, never on the live installation.
 
 **Before a real release:** the owner decisions and setup in section 4, the

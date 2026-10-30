@@ -34,9 +34,10 @@ case "$ARTIFACT" in
     format=apk
     badging=$("$bt/aapt" dump badging "$ARTIFACT")
     pkg_line=$(echo "$badging" | grep -E "^package:")
-    app_id=$(echo "$pkg_line" | sed -E "s/.*name='([^']+)'.*/\1/")
-    version_code=$(echo "$pkg_line" | sed -E "s/.*versionCode='([^']+)'.*/\1/")
-    version_name=$(echo "$pkg_line" | sed -E "s/.*versionName='([^']+)'.*/\1/")
+    # Anchored: the line also has platformBuildVersionName='..' / platformBuildVersionCode='..'
+    app_id=$(echo "$pkg_line" | sed -nE "s/^package: name='([^']+)'.*/\1/p")
+    version_code=$(echo "$pkg_line" | sed -nE "s/.* versionCode='([^']+)'.*/\1/p")
+    version_name=$(echo "$pkg_line" | sed -nE "s/.* versionName='([^']+)'.*/\1/p")
     label=$(echo "$badging" | sed -nE "s/^application-label:'(.*)'$/\1/p" | head -1)
     certs=$("$bt/apksigner" verify --print-certs "$ARTIFACT") || fail "apksigner: signature does not verify"
     # apksigner prints "Signer #1 certificate ..." or "V2 Signer: certificate ..." depending on version

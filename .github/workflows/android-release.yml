@@ -62,36 +62,33 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Source is a reviewed commit (contained in main)
+      - name: Source is a reviewed commit (contained in main) that has this release tooling
         id: source
         env:
           REF: ${{ inputs.ref }}
         run: |
           sha=$(git rev-parse HEAD)
-          git fetch --no-tags origin main
+          # fetch-depth 0 already fetched origin/main (no further fetch: no credentials are kept)
           if ! git merge-base --is-ancestor "$sha" origin/main; then
             echo "::error::$REF ($sha) is not contained in main: only merged, reviewed commits are released"
+            exit 1
+          fi
+          if [ ! -x mobile/tool/release/verify_android_artifact.sh ] || ! grep -q invoicemeRequireSigning mobile/android/app/build.gradle.kts; then
+            echo "::error::$REF predates the release tooling (PR #26): build a later commit of main"
             exit 1
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Building $REF = $sha"
 
-      - name: Version is valid and above every recorded release of this app id
+      - name: Inputs are well formed
         env:
           VERSION_NAME: ${{ inputs.version_name }}
           VERSION_CODE: ${{ inputs.version_code }}
-          APP_ID: ${{ vars.ANDROID_APPLICATION_ID }}
           RETENTION: ${{ inputs.retention_days }}
         run: |
           [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version_name must look like 1.2.3"; exit 1; }
           [[ "$VERSION_CODE" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::version_code must be a positive integer"; exit 1; }
           [[ "$RETENTION" =~ ^([1-9]|1[0-4])$ ]] || { echo "::error::retention_days must be 1-14"; exit 1; }
-          [ -n "$APP_ID" ] || { echo "::error::Variable ANDROID_APPLICATION_ID is not set (the production application id: an owner decision, docs/release/ANDROID-RELEASE.md)"; exit 1; }
-          max=$(awk -F'\t' -v id="$APP_ID" '!/^#/ && $3 == id && $6 == "production" { if ($1 > m) m = $1 } END { print m + 0 }' docs/release/android-versions.tsv)
-          if [ "$VERSION_CODE" -le "$max" ]; then
-            echo "::error::version_code $VERSION_CODE is not above $max, the highest recorded production code for $APP_ID"
-            exit 1
-          fi
 
       - uses: actions/setup-java@v4
         with:
@@ -121,7 +118,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.checks.outputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
+
+      - name: Version is above every recorded production build of this app id (ledger on main)
+        env:
+          VERSION_CODE: ${{ inputs.version_code }}
+          APP_ID: ${{ vars.ANDROID_APPLICATION_ID }}
+        run: |
+          [ -n "$APP_ID" ] || { echo "::error::Variable ANDROID_APPLICATION_ID is not set (the production application id: an owner decision, docs/release/ANDROID-RELEASE.md)"; exit 1; }
+          # The ledger on main, not in the commit being built (an older commit has an older ledger)
+          max=$(git show origin/main:docs/release/android-versions.tsv \
+            | awk -F'\t' -v id="$APP_ID" '!/^#/ && $3 == id && $6 == "production" { if ($1 > m) m = $1 } END { print m + 0 }')
+          if [ "$VERSION_CODE" -le "$max" ]; then
+            echo "::error::version_code $VERSION_CODE is not above $max, the highest recorded production code for $APP_ID"
+            exit 1
+          fi
 
       - name: Release configuration is complete
         env:

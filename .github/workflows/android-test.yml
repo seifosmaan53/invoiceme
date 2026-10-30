@@ -77,6 +77,7 @@ jobs:
           KEY_ALIAS: ${{ secrets.ANDROID_TEST_KEY_ALIAS }}
           KEY_PASS: ${{ secrets.ANDROID_TEST_KEY_PASSWORD }}
           TEST_CERT: ${{ vars.ANDROID_TEST_CERT_SHA256 }}
+          RELEASE_CERT: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
         run: |
           if [ -z "$KS" ]; then
             echo "No dedicated test key configured: signing with this runner's throwaway debug key (a new identity per run)."
@@ -89,6 +90,14 @@ jobs:
           umask 077
           mkdir -p "$RUNNER_TEMP/test-signing"
           printf '%s' "$KS" | base64 -d > "$RUNNER_TEMP/test-signing/test.jks"
+          # Before building: the key must be the recorded test key, never the production key
+          got=$(keytool -list -v -keystore "$RUNNER_TEMP/test-signing/test.jks" -storepass:env KS_PASS -alias "$KEY_ALIAS" \
+            | sed -nE 's/^[[:space:]]*SHA256: (.*)$/\1/p' | head -1 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+          norm() { echo "$1" | tr -d ': ' | tr '[:upper:]' '[:lower:]'; }
+          [ "$got" = "$(norm "$TEST_CERT")" ] || { echo "::error::the test keystore's certificate is not ANDROID_TEST_CERT_SHA256"; exit 1; }
+          if [ -n "$RELEASE_CERT" ] && [ "$got" = "$(norm "$RELEASE_CERT")" ]; then
+            echo "::error::the configured test key is the production key: refusing"; exit 1
+          fi
           echo "stable=true" >> "$GITHUB_OUTPUT"
 
       - name: Build the sync test APK
@@ -189,7 +198,7 @@ jobs:
           PASS=$(cat "$RUNNER_TEMP/ci-signing/pass")
           export PASS
           keytool -genkeypair -keystore "$RUNNER_TEMP/ci-signing/ci.jks" -storepass:env PASS -keypass:env PASS \
-            -alias ci -keyalg RSA -keysize 2048 -validity 2 -dname "CN=InvoiceMe CI release-config check (throwaway), O=CI" > /dev/null 2>&1
+            -alias ci -keyalg RSA -keysize 2048 -validity 30 -dname "CN=InvoiceMe CI release-config check (throwaway), O=CI" > /dev/null 2>&1
           fp=$(keytool -list -v -keystore "$RUNNER_TEMP/ci-signing/ci.jks" -storepass:env PASS -alias ci | sed -nE 's/^[[:space:]]*SHA256: (.*)$/\1/p' | head -1)
           echo "CI_CERT=$fp" >> "$GITHUB_ENV"
 

@@ -39,10 +39,13 @@ case "$ARTIFACT" in
     version_name=$(echo "$pkg_line" | sed -E "s/.*versionName='([^']+)'.*/\1/")
     label=$(echo "$badging" | sed -nE "s/^application-label:'(.*)'$/\1/p" | head -1)
     certs=$("$bt/apksigner" verify --print-certs "$ARTIFACT") || fail "apksigner: signature does not verify"
-    cert_dn=$(echo "$certs" | sed -nE 's/^Signer #1 certificate DN: (.*)$/\1/p' | head -1)
-    cert_sha256=$(echo "$certs" | sed -nE 's/^Signer #1 certificate SHA-256 digest: (.*)$/\1/p' | head -1 | norm)
-    # 0xffffffff = true in the compiled manifest
-    if "$bt/aapt" dump xmltree "$ARTIFACT" AndroidManifest.xml | grep -A0 "usesCleartextTraffic" | grep -q "0xffffffff"; then
+    # apksigner prints "Signer #1 certificate ..." or "V2 Signer: certificate ..." depending on version
+    cert_dn=$(echo "$certs" | sed -nE 's/^(Signer #1|V[0-9]+ Signer:) certificate DN: (.*)$/\2/p' | head -1)
+    cert_sha256=$(echo "$certs" | sed -nE 's/^(Signer #1|V[0-9]+ Signer:) certificate SHA-256 digest: (.*)$/\2/p' | head -1 | norm)
+    # 0xffffffff = true in the compiled manifest. Output captured first: with
+    # pipefail, grep -q closing the pipe early would make the pipeline fail.
+    xmltree=$("$bt/aapt" dump xmltree "$ARTIFACT" AndroidManifest.xml)
+    if grep -q "usesCleartextTraffic.*0xffffffff" <<<"$xmltree"; then
       cleartext=true
     else
       cleartext=false
@@ -50,7 +53,9 @@ case "$ARTIFACT" in
     ;;
   *.aab)
     format=aab
-    jarsigner -verify -strict "$ARTIFACT" > /dev/null || fail "jarsigner: signature does not verify"
+    # Not -strict: Android signing certificates are self-signed, which -strict treats as an error
+    verified=$(jarsigner -verify "$ARTIFACT" 2>&1 || true)
+    grep -q "^jar verified" <<<"$verified" || fail "jarsigner: signature does not verify"
     printed=$(keytool -printcert -jarfile "$ARTIFACT")
     cert_dn=$(echo "$printed" | sed -nE 's/^Owner: (.*)$/\1/p' | head -1)
     cert_sha256=$(echo "$printed" | sed -nE 's/^[[:space:]]*SHA256: (.*)$/\1/p' | head -1 | norm)
@@ -59,6 +64,11 @@ case "$ARTIFACT" in
       | xargs grep -l "package=\"$EXPECT_APP_ID\"" 2>/dev/null || true)
     [ -n "$manifests" ] || fail "no merged release manifest for $EXPECT_APP_ID found next to the bundle"
     m=$(echo "$manifests" | head -1)
+    # The bundle's own manifest (protobuf) must name the application id
+    unzip -p "$ARTIFACT" base/manifest/AndroidManifest.xml > "$OUT_DIR/.bundle-manifest.pb"
+    LC_ALL=C grep -aqF -- "$EXPECT_APP_ID" "$OUT_DIR/.bundle-manifest.pb" \
+      || fail "the bundle's manifest does not contain the application id $EXPECT_APP_ID"
+    rm -f "$OUT_DIR/.bundle-manifest.pb"
     app_id=$EXPECT_APP_ID
     version_code=$(sed -nE 's/.*android:versionCode="([^"]+)".*/\1/p' "$m" | head -1)
     version_name=$(sed -nE 's/.*android:versionName="([^"]+)".*/\1/p' "$m" | head -1)

@@ -109,8 +109,17 @@ it is not secret.
 ### 3.3 The `android-release` environment (private repository)
 
 Settings > Environments > New environment `android-release`:
-- **Required reviewers:** yourself (each release run waits for your approval).
 - **Deployment branches:** `main` only.
+- **Required reviewers:** yourself, so each release run waits for your
+  approval, where your plan offers it.
+
+GitHub plan limits (check your account's current plan): for a **private**
+repository, environments and environment secrets need GitHub Pro, Team or
+Enterprise, and required reviewers need Enterprise. Without them, set the
+same names below as **repository** secrets and variables of the private
+repository (drop `--env android-release`): the workflow reads them the same
+way, and only you can start it there. The approval gate is then your own
+decision to run the workflow.
 
 Secrets and variables with the GitHub CLI. `gh secret set` without
 `--body` prompts and does not echo; the keystore is read from a pipe:
@@ -126,8 +135,9 @@ gh variable set ANDROID_APPLICATION_ID     --env android-release --repo $R --bod
 gh variable set ANDROID_RELEASE_CERT_SHA256 --env android-release --repo $R --body <SHA256 from 3.2>
 ```
 
-Optional: `ANDROID_TEST_CERT_SHA256` (the test key's fingerprint, section 5)
-so a release run refuses the test key.
+Also set `ANDROID_TEST_CERT_SHA256` here (the test key's fingerprint, section
+5) so a release run refuses the test key; certificate fingerprints are not
+secret.
 
 ### 3.4 A production build
 
@@ -135,18 +145,19 @@ Actions > **Android release build** > Run workflow:
 
 | Input | Meaning |
 |---|---|
-| `ref` | Full commit SHA (or tag) of a reviewed commit; must be contained in `main` |
+| `ref` | Full commit SHA (or tag) of a reviewed commit; must be contained in `main` and include this release tooling (PR #26 or later; older commits such as `849552b` are refused) |
 | `version_name`, `version_code` | Section 2.2 |
 | `format` | `apk` or `aab` (section 2.3) |
 | `retention_days` | How long the signed artifact stays downloadable from the run (1-14; default 3) |
 
 What it does, in order (`.github/workflows/android-release.yml`):
-1. refuses a public repository; checks the commit is in `main`; checks the
-   version against the ledger; `flutter analyze` (errors fail) and
+1. refuses a public repository; checks the commit is in `main` and has this
+   tooling; checks the inputs; `flutter analyze` (errors fail) and
    `flutter test`;
-2. waits for the environment's approval; fails naming any missing secret or
-   variable (never values); refuses the placeholder id and any URL that is
-   not `https://<host>/api/v1`;
+2. waits for the environment's approval (where configured); checks the
+   version against the ledger **on main**; fails naming any missing secret
+   or variable (never values); refuses the placeholder id and any URL that
+   is not `https://<host>/api/v1`;
 3. writes the keystore to a private temporary file, checks its certificate
    against `ANDROID_RELEASE_CERT_SHA256` (and that it is not the test key)
    **before building**;
@@ -154,7 +165,11 @@ What it does, in order (`.github/workflows/android-release.yml`):
    (`invoicemeRequireSigning=true`: no fallback to the debug key);
 5. verifies the artifact: application id, version, signing certificate (not
    a debug certificate, the expected fingerprint), no cleartext-HTTP
-   permission; writes `SHA256SUMS` and `release-record.txt` (source commit,
+   permission. For an APK all of it is read from the APK. For an AAB the
+   signature and certificate come from the bundle, the application id must
+   appear in the bundle's own manifest, and version and cleartext come from
+   the merged manifest Gradle built it from. Writes `SHA256SUMS` and
+   `release-record.txt` (source commit,
    version, id, certificate DN and SHA-256, artifact SHA-256, URL scheme
    only, run link);
 6. deletes the keystore (also on failure) and uploads the artifact to the
@@ -214,8 +229,13 @@ gh secret set ANDROID_TEST_KEYSTORE_PASSWORD --repo $R
 gh secret set ANDROID_TEST_KEY_ALIAS --repo $R          # invoiceme-test
 gh secret set ANDROID_TEST_KEY_PASSWORD --repo $R
 gh variable set ANDROID_TEST_CERT_SHA256 --repo $R --body <SHA256>
-gh variable set ANDROID_RELEASE_CERT_SHA256 --repo $R --body <production SHA256>   # optional: refuse the production key here
+gh variable set ANDROID_RELEASE_CERT_SHA256 --repo $R --body <production SHA256>   # recommended: refuse the production key here
 ```
+
+The test workflow checks the test keystore's fingerprint **before** building:
+it must equal `ANDROID_TEST_CERT_SHA256` and, when
+`ANDROID_RELEASE_CERT_SHA256` is set in this repository, must differ from it.
+Fingerprints are public values; the production key itself never comes here.
 
 Repository secrets are not given to pull requests from forks; such PRs fall
 back to the per-build identity. A partly configured test key fails the run.

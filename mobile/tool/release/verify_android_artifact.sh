@@ -66,10 +66,14 @@ case "$ARTIFACT" in
     [ -n "$manifests" ] || fail "no merged release manifest for $EXPECT_APP_ID found next to the bundle"
     m=$(echo "$manifests" | head -1)
     # The bundle's own manifest (protobuf) must name the application id
-    unzip -p "$ARTIFACT" base/manifest/AndroidManifest.xml > "$OUT_DIR/.bundle-manifest.pb"
-    LC_ALL=C grep -aqF -- "$EXPECT_APP_ID" "$OUT_DIR/.bundle-manifest.pb" \
-      || fail "the bundle's manifest does not contain the application id $EXPECT_APP_ID"
-    rm -f "$OUT_DIR/.bundle-manifest.pb"
+    pb=$(mktemp)
+    unzip -p "$ARTIFACT" base/manifest/AndroidManifest.xml > "$pb" || { rm -f "$pb"; fail "no base/manifest/AndroidManifest.xml in the bundle"; }
+    # The id as a whole token: not followed by an identifier character or a
+    # dot, so "<id>.synctest" or the "<id>.fileprovider" authority do not count
+    if ! LC_ALL=C grep -aqP -- "\\Q${EXPECT_APP_ID}\\E(?![A-Za-z0-9_.])" "$pb"; then
+      rm -f "$pb"; fail "the bundle's manifest does not contain the application id $EXPECT_APP_ID"
+    fi
+    rm -f "$pb"
     app_id=$EXPECT_APP_ID
     version_code=$(sed -nE 's/.*android:versionCode="([^"]+)".*/\1/p' "$m" | head -1)
     version_name=$(sed -nE 's/.*android:versionName="([^"]+)".*/\1/p' "$m" | head -1)

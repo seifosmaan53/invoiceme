@@ -126,6 +126,7 @@ jobs:
           VERSION_CODE: ${{ inputs.version_code }}
           APP_ID: ${{ vars.ANDROID_APPLICATION_ID }}
         run: |
+          set -o pipefail
           [ -n "$APP_ID" ] || { echo "::error::Variable ANDROID_APPLICATION_ID is not set (the production application id: an owner decision, docs/release/ANDROID-RELEASE.md)"; exit 1; }
           # The ledger on main, not in the commit being built (an older commit has an older ledger)
           max=$(git show origin/main:docs/release/android-versions.tsv \

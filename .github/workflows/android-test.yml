@@ -225,6 +225,11 @@ jobs:
               echo "::error::a wrong certificate was accepted for $a"; exit 1
             fi
             echo "$out" | grep -q "wrong key: refusing" || { echo "$out"; echo "::error::refused for another reason"; exit 1; }
+            # A different (here: prefix) application id must be refused, also for the AAB
+            if out=$(ARTIFACT=$a EXPECT_APP_ID=org.invoiceme OUT_DIR=$RUNNER_TEMP/neg ./tool/release/verify_android_artifact.sh 2>&1); then
+              echo "::error::a wrong application id was accepted for $a"; exit 1
+            fi
+            echo "$out" | grep -qE "application id is org.invoiceme.cicheck|does not contain the application id" || { echo "$out"; echo "::error::refused for another reason"; exit 1; }
             # An http URL must be refused for production
             if out=$(ARTIFACT=$a API_BASE_URL=http://ci.invalid/api/v1 OUT_DIR=$RUNNER_TEMP/neg ./tool/release/verify_android_artifact.sh 2>&1); then
               echo "::error::an http:// API URL was accepted for $a"; exit 1

@@ -6,7 +6,7 @@ apart throughout:
 
 | | What it is | Status |
 |---|---|---|
-| **Tested source** | Code on `main`, with CI results | `849552b` (app and server); release tooling added afterwards in PR #26 |
+| **Tested source** | Code on `main`, with CI results | `ed065aa` (PR #27, per-account local storage) on `849552b` (app and server) and the release tooling of PR #26 |
 | **Test APK** | A debug-signed `.synctest` build for testing only | exists (below); not for customers |
 | **Production release** | A production-signed app distributed to users, and a server updated at an installation | **none.** No production app has been built or published; no server installation has been updated or verified, including the customer's warehouse installation, which the owner maintains privately |
 
@@ -26,7 +26,30 @@ mobile 124 tests, `dart analyze` 0 errors. E2E reliability: with the test
 harness fix in PR #25, 20 of 20 paired full E2E runs passed (3 of 20 failed
 before the fix); evidence kept outside the repository.
 
+### Update: `ed065aa` (2026-10-30), account isolation
+
+PR #27 fixed the account-switching defect (DEVICE-ACCEPTANCE.md item 10).
+The server code is unchanged since `849552b`.
+
+| Run | Workflow | Result | Contents |
+|---|---|---|---|
+| [41108401365](https://github.com/seifosmaan53/invoiceme/actions/runs/41108401365) | CI | success | backend unit, database E2E, restore-socket, container PDF; mobile `flutter test` (151 tests, including the account switch regression and isolation tests) |
+| [41108401392](https://github.com/seifosmaan53/invoiceme/actions/runs/41108401392) | Update bundle | success | Ubuntu and Windows install |
+| [41108435367](https://github.com/seifosmaan53/invoiceme/actions/runs/41108435367) | Android test candidate (manual, on main) | success | **Android 11 emulator against a real backend: 4 of 4 passed** (the earlier three plus account switching between two synthetic accounts); test APK below |
+
 ## 2. Test artifact
+
+**Current: `ed065aa`**
+
+| Item | Value |
+|---|---|
+| File | `invoiceme-synctest-1.0.0-100019-ed065aa.apk` (67,492,488 bytes), artifact `invoiceme-synctest-apk` of run 41108435367 (14-day retention); owner's local copy in the release workspace `mobile-rc/ed065aa/` with `SHA256SUMS` and `release-record.txt` |
+| SHA-256 | `844e107e19a44330ad0476e9c36562ceb503149cc1cca53cd093fcce575d720e` |
+| Application id | `com.example.invoiceme.synctest`, label "InvoiceMe (sync test)", versionName 1.0.0, versionCode 100019 |
+| Signing | that CI runner's throwaway **Android debug key** (`CN=Android Debug`, certificate SHA-256 `f8ea52e20d560698e7a15fd88fc7de3d9c7c4b3a0eb2fabd2583f25c530ac7bb`). **Not a release key** |
+| Compatibility | same application id as the `849552b` and `72ae129` test APKs but a **different key**: Android will not install it over them (and not beside them). Use a phone without an InvoiceMe test build, or keep the earlier build until its changes are synced; nothing requires removing it. A stable test key (ANDROID-RELEASE.md section 5) would allow updates between later test builds |
+
+**Superseded: `849552b`** (has the account-switching defect; do not switch accounts on a phone running it):
 
 | Item | Value |
 |---|---|

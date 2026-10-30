@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Synthetic test data for the Android sync test (android_sync_test.dart).
-# Creates a fresh user through the API, a paid invoice, and one synthetic
+# Creates two fresh users through the API (A with a paid invoice, B with a
+# client), and for A one synthetic
 # completed payment with a partial refund written straight to PostgreSQL
 # (no payment provider is called). Prints KEY=VALUE lines for --dart-define.
 #
@@ -35,6 +36,16 @@ if [ "$summary" != "partially_refunded" ]; then
   exit 1
 fi
 
+# Second synthetic account with its own client (account switching test).
+email_b="sync-e2e-b-${run_id}@example.test"
+password_b="E2e-Passw0rd-b-${run_id}"
+token_b=$(curl -fsS -X POST "$API/auth/register" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$email_b\",\"password\":\"$password_b\",\"name\":\"Sync E2E B\"}" | json accessToken)
+curl -fsS -X POST "$API/clients" -H "Authorization: Bearer $token_b" -H 'Content-Type: application/json' \
+  -d '{"name":"Synthetic B Client"}' > /dev/null
+
 echo "E2E_EMAIL=$email"
 echo "E2E_PASSWORD=$password"
 echo "E2E_PAID_INVOICE_ID=$invoice_id"
+echo "E2E_EMAIL_B=$email_b"
+echo "E2E_PASSWORD_B=$password_b"

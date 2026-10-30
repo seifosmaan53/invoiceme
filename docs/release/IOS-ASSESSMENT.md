@@ -53,5 +53,6 @@ Nothing here installed tools, created certificates or changed the project.
 8. **Testing.** The device checklist (DEVICE-ACCEPTANCE.md) on an iPhone,
    plus a check that the local SQLite migration and sync behave as on
    Android (no iOS evidence exists).
-9. **The account-switching defect** in DEVICE-ACCEPTANCE.md applies to iOS
-   too (shared Dart code).
+9. **Account switching** (DEVICE-ACCEPTANCE.md item 10): the fix is in shared
+   Dart code and has been tested on the host and an Android emulator, never
+   on iOS.

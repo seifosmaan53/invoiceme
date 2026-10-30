@@ -339,7 +339,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           working-directory: mobile
-          script: flutter test integration_test/android_sync_test.dart -d emulator-5554 --reporter expanded --dart-define=E2E_API=http://10.0.2.2:3000/api/v1 --dart-define=E2E_EMAIL="$E2E_EMAIL" --dart-define=E2E_PASSWORD="$E2E_PASSWORD" --dart-define=E2E_PAID_INVOICE_ID="$E2E_PAID_INVOICE_ID"
+          script: flutter test integration_test/android_sync_test.dart -d emulator-5554 --reporter expanded --dart-define=E2E_API=http://10.0.2.2:3000/api/v1 --dart-define=E2E_EMAIL="$E2E_EMAIL" --dart-define=E2E_PASSWORD="$E2E_PASSWORD" --dart-define=E2E_PAID_INVOICE_ID="$E2E_PAID_INVOICE_ID" --dart-define=E2E_EMAIL_B="$E2E_EMAIL_B" --dart-define=E2E_PASSWORD_B="$E2E_PASSWORD_B"
 
       - name: Backend log
         if: always()

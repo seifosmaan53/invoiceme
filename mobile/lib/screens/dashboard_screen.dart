@@ -179,7 +179,9 @@ class _DashboardHomeState extends ConsumerState<_DashboardHome> {
       if (cachedJson != null) {
         try {
           final cached = jsonDecode(cachedJson) as Map<String, dynamic>?;
-          if (cached != null) {
+          // Only the signed-in account's own figures.
+          final owner = ref.read(authServiceProvider).currentUser?.id;
+          if (cached != null && owner != null && cached['user_id'] == owner) {
             final timestampStr = cached['timestamp'] as String?;
             if (timestampStr != null) {
               final cacheTime = DateTime.tryParse(timestampStr);
@@ -218,8 +220,11 @@ class _DashboardHomeState extends ConsumerState<_DashboardHome> {
 
   Future<void> _saveCachedStats(Map<String, dynamic> stats) async {
     try {
+      final owner = ref.read(authServiceProvider).currentUser?.id;
+      if (owner == null) return;
       final prefs = await SharedPreferences.getInstance();
       final cacheData = {
+        'user_id': owner,
         'stats': stats,
         'timestamp': DateTime.now().toIso8601String(),
       };

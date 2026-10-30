@@ -19,6 +19,7 @@ dependencies:
   # Local Database
   sqflite: ^2.3.0
   path_provider: ^2.1.1
+  path: ^1.9.1
 
   # UUID
   uuid: ^4.1.0
@@ -81,6 +82,9 @@ dev_dependencies:
   build_runner: ^2.4.7
   mocktail: ^1.0.1
   sqflite_common_ffi: ^2.3.7+1
+  # Test fakes of plugin platforms (temp directories in host tests).
+  path_provider_platform_interface: ^2.1.2
+  plugin_platform_interface: ^2.1.8
 
 flutter:
   uses-material-design: true

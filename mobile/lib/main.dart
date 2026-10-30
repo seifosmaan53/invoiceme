@@ -8,6 +8,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 // Local imports - Core
 import 'core/database/database_helper.dart';
+import 'core/database/local_accounts.dart';
 import 'core/providers/providers.dart';
 import 'core/providers/theme_provider.dart';
 import 'core/services/api_client.dart';
@@ -62,10 +63,12 @@ void main() async {
     const secureStorage = FlutterSecureStorage();
     DatabaseHelper? dbHelper;
     
-    // Only initialize database on mobile platforms (sqflite doesn't work on web)
+    // Only initialize database on mobile platforms (sqflite doesn't work on web).
+    // Each account has its own database, opened when it signs in; the shared
+    // database of earlier versions is assigned to its one owner or quarantined.
     if (!kIsWeb) {
       dbHelper = DatabaseHelper();
-      await DatabaseHelper.getDatabase(); // Use static method
+      await LocalAccounts.instance.migrateLegacy();
     }
 
     final authService = AuthService(apiClient, secureStorage);

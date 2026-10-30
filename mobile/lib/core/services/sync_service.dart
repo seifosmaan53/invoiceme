@@ -5,12 +5,12 @@ import 'dart:math' show Random;
 // Package imports
 import 'package:dio/dio.dart' show DioException;
 import 'package:flutter/foundation.dart' show debugPrint;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:uuid/uuid.dart';
 
 // Local imports - Core
 import '../database/database_helper.dart';
+import '../database/local_accounts.dart';
 import '../services/api_client.dart';
 import 'sync_protocol.dart';
 
@@ -21,24 +21,30 @@ import '../../models/invoice.dart';
 import '../../models/invoice_item.dart';
 
 export 'sync_protocol.dart';
+export '../database/local_accounts.dart' show AccountChangedException, NoActiveAccountException;
 
 enum ChangeType { create, update, delete }
 
 enum ChangeObjectType { client, invoice, invoice_item, attachment }
 
-/// SharedPreferences keys.
-/// Time of the last completed pull, for display only (protocol 2 pulls by cursor).
-const String lastSyncTimestampKey = 'last_sync_timestamp';
+/// What the settings screen shows about the signed-in account's sync.
+class SyncStatus {
+  final DateTime? lastSync;
+  final int openConflicts;
+  final SyncState state;
+  final int pending;
 
-/// Opaque pull cursor, stored only after every page of a pull was applied.
-const String syncCursorKey = 'sync_cursor';
-const String syncStateKey = 'sync_state';
-const String syncOpenConflictsKey = 'sync_open_conflicts';
+  /// Rejected changes plus changes waiting to retry.
+  final int failedOrWaiting;
 
-/// Set by earlier builds when a change was rejected or discarded (read and
-/// cleared once; skipped server rows are now held, see sync_held_rows): the next pull fetches
-/// everything, because earlier pulls skipped that record while it was queued.
-const String syncFullPullNeededKey = 'sync_full_pull_needed';
+  const SyncStatus({
+    this.lastSync,
+    this.openConflicts = 0,
+    this.state = SyncState.ok,
+    this.pending = 0,
+    this.failedOrWaiting = 0,
+  });
+}
 
 
 /// Change object format (protocol 2):
@@ -127,6 +133,11 @@ class _PushOutcome {
 }
 
 /// Sync protocol 2 client (docs/SYNC-CONTRACT.md).
+///
+/// Works on the signed-in account's database ([LocalAccounts]). A sync is
+/// bound to the account it started for: once the account changes it stops
+/// before its next request or write ([AccountChangedException]), and sign-out
+/// waits for it to stop.
 class SyncService implements FailedChangesStore {
   final ApiClient _apiClient;
   // ignore: unused_field
@@ -135,13 +146,19 @@ class SyncService implements FailedChangesStore {
   final DateTime Function() _clock;
   final Random _random;
   final Future<Database> Function() _db;
+  final LocalAccounts? _accounts;
+  Future<SyncReport>? _running;
+
+  /// How long a sign-out waits for a running sync to stop.
+  static const Duration stopTimeout = Duration(seconds: 15);
 
   /// Push rounds per sync. A record with several queued changes sends one per
   /// round, so each is based on the revision the previous one produced.
   static const int maxPushRounds = 10;
 
   /// [clock], [random] and [database] are for tests (defaults: system clock,
-  /// a random jitter, the app database).
+  /// a random jitter, the signed-in account's database). A test [database]
+  /// without [accounts] is used as is, without account checks.
   SyncService(
     this._apiClient,
     this._dbHelper, {
@@ -149,25 +166,67 @@ class SyncService implements FailedChangesStore {
     DateTime Function()? clock,
     Random? random,
     Future<Database> Function()? database,
+    LocalAccounts? accounts,
   })  : _deviceId = deviceId ?? const Uuid().v4(),
         _clock = clock ?? DateTime.now,
         _random = random ?? Random(),
-        _db = database ?? DatabaseHelper.getDatabase;
+        _accounts = accounts ?? (database == null ? LocalAccounts.instance : null),
+        _db = database ?? (accounts ?? LocalAccounts.instance).database {
+    _accounts?.addTransitionHook(stop);
+  }
 
-  /// Push pending changes, then pull server updates.
+  /// Waits (bounded by [stopTimeout]) for a running sync to stop; called on
+  /// every account transition after the previous account was invalidated.
+  Future<void> stop() async {
+    final running = _running;
+    if (running == null) return;
+    try {
+      await running.timeout(stopTimeout);
+    } catch (_) {
+      // Stopped with an error (expected: the account changed) or timed out;
+      // a timed-out sync can still not write or send (see _check).
+    }
+  }
+
+  /// Throws [AccountChangedException] when the account this sync started for
+  /// ([generation]) is no longer the signed-in one.
+  void _check(int? generation) {
+    final accounts = _accounts;
+    if (accounts != null && generation != null && !accounts.isCurrent(generation)) {
+      throw const AccountChangedException();
+    }
+  }
+
+  /// Push pending changes, then pull server updates. A sync that is already
+  /// running is joined, not started twice.
   ///
   /// When the server does not speak protocol 2, nothing is pushed or pulled,
   /// the queue is kept and the report's state is [SyncState.serverUpdateRequired].
-  Future<SyncReport> sync() async {
-    final prefs = await SharedPreferences.getInstance();
+  Future<SyncReport> sync() {
+    final running = _running;
+    if (running != null) return running;
+    final started = _sync();
+    _running = started;
+    started.then((_) {}, onError: (_) {}).whenComplete(() {
+      if (identical(_running, started)) _running = null;
+    });
+    return started;
+  }
+
+  Future<SyncReport> _sync() async {
+    final generation = _accounts?.generation;
+    final db = await _db();
+    _check(generation);
     try {
-      final push = await _pushChanges();
+      final push = await _pushChanges(db, generation);
       if (push.state == SyncState.serverUpdateRequired) {
-        await prefs.setString(syncStateKey, push.state.name);
+        _check(generation);
+        await DatabaseHelper.writeMeta(db, SyncMeta.state, push.state.name);
         return SyncReport(state: push.state, message: push.message);
       }
-      final openConflicts = await _pullChanges();
-      await prefs.setString(syncStateKey, push.state.name);
+      final openConflicts = await _pullChanges(db, generation);
+      _check(generation);
+      await DatabaseHelper.writeMeta(db, SyncMeta.state, push.state.name);
       return SyncReport(
         state: push.state,
         synced: push.synced,
@@ -191,8 +250,7 @@ class SyncService implements FailedChangesStore {
 
   /// Push the queue, at most one change per record per round. Rows waiting
   /// for their next attempt are left for a later sync.
-  Future<_PushOutcome> _pushChanges() async {
-    final db = await _db();
+  Future<_PushOutcome> _pushChanges(Database db, int? generation) async {
     var state = SyncState.ok;
     var synced = 0, conflicts = 0, failed = 0;
     String? message;
@@ -202,6 +260,7 @@ class SyncService implements FailedChangesStore {
       final batch = selectPushBatch(pending, now: _clock());
       if (batch.isEmpty) break;
 
+      _check(generation);
       // Until a result arrives, the server may or may not have applied them.
       for (final row in batch) {
         await db.update('pending_changes', {'last_result': sentUnknown}, where: 'id = ?', whereArgs: [row['id']]);
@@ -210,8 +269,11 @@ class SyncService implements FailedChangesStore {
       PushPlan plan;
       try {
         final res = await _apiClient.post('/sync/push', data: buildPushBody(_deviceId, batch));
+        // A response that arrives after the account changed is not applied.
+        _check(generation);
         plan = planPushResults(batch, res.data as Map<String, dynamic>);
       } on DioException catch (e) {
+        _check(generation);
         final code = e.response?.statusCode;
         // A server without protocol 2 rejects the `protocol` field (400) and
         // applies nothing. Do not fall back to protocol 1: keep the queue.
@@ -344,34 +406,42 @@ class SyncService implements FailedChangesStore {
   /// Pull server changes page by page from the stored cursor; returns the
   /// open conflict count. The cursor is stored only after every page was
   /// applied.
-  Future<int> _pullChanges() async {
-    final prefs = await SharedPreferences.getInstance();
-    final db = await _db();
-    final fullPullNeeded = prefs.getBool(syncFullPullNeededKey) ?? false;
-    // An app that synced with `since` before has no cursor: full pull.
-    final start = startCursor(prefs.getString(syncCursorKey), fullPullNeeded: fullPullNeeded);
-    await _forgetResolvedConflicts(db);
+  Future<int> _pullChanges(Database db, int? generation) async {
+    // No cursor (a new account database, or one moved from an earlier
+    // version): full pull.
+    final start = startCursor(await DatabaseHelper.readMeta(db, SyncMeta.cursor), fullPullNeeded: false);
+    await _forgetResolvedConflicts(db, generation);
+    _check(generation);
     await _applyHeldRows(db);
 
     final result = await runCursorPull(
       storedCursor: start,
-      fetch: _pullPage,
-      applyPage: (page) => _applyPull(db, page),
+      fetch: (cursor) async {
+        _check(generation);
+        final page = await _pullPage(cursor);
+        _check(generation);
+        return page;
+      },
+      applyPage: (page) async {
+        _check(generation);
+        await _applyPull(db, page);
+      },
       clearCache: () async {
+        _check(generation);
         debugPrint('Sync pull: full resync required');
         await _clearLocalCache(db);
       },
-      dropCursor: () => prefs.remove(syncCursorKey),
+      dropCursor: () async {
+        _check(generation);
+        await DatabaseHelper.writeMeta(db, SyncMeta.cursor, null);
+      },
     );
 
-    if (result.cursor != null) {
-      await prefs.setString(syncCursorKey, result.cursor!);
-    } else {
-      await prefs.remove(syncCursorKey);
-    }
-    if (fullPullNeeded) await prefs.remove(syncFullPullNeededKey);
-    await prefs.setInt(syncOpenConflictsKey, result.openConflicts);
-    await prefs.setString(lastSyncTimestampKey, result.lastSyncTimestamp ?? _clock().toUtc().toIso8601String());
+    _check(generation);
+    await DatabaseHelper.writeMeta(db, SyncMeta.cursor, result.cursor);
+    await DatabaseHelper.writeMeta(db, SyncMeta.openConflicts, '${result.openConflicts}');
+    await DatabaseHelper.writeMeta(
+        db, SyncMeta.lastSync, result.lastSyncTimestamp ?? _clock().toUtc().toIso8601String());
     await _applyHeldRows(db);
     debugPrint('Sync pull: ${result.pages} page(s)');
     return result.openConflicts;
@@ -542,7 +612,7 @@ class SyncService implements FailedChangesStore {
   /// removed, so held server rows of the record can be applied. Each conflict
   /// is checked on its own (`GET /sync/conflicts/:id`; the list is capped by
   /// the server): 404 or not open => forget it; any other error => keep it.
-  Future<void> _forgetResolvedConflicts(Database db) async {
+  Future<void> _forgetResolvedConflicts(Database db, int? generation) async {
     // Conflicts no longer held locally leave the queue
     await db.rawDelete('''
         DELETE FROM sync_conflict_checks WHERE conflict_id NOT IN (
@@ -563,9 +633,11 @@ class SyncService implements FailedChangesStore {
     for (final id in ids) {
       // Back of the queue before the request, so a failing check is retried
       // only after the others
+      _check(generation);
       await _moveToBackOfChecks(db, id);
       try {
         final res = await _apiClient.get('/sync/conflicts/${Uri.encodeComponent(id)}', useCache: false);
+        _check(generation);
         final data = res.data;
         if (data is! Map || data['status'] == 'open') continue;
         final current = data['current'];
@@ -573,12 +645,15 @@ class SyncService implements FailedChangesStore {
             dropHeld: data['resolution'] != 'dismiss',
             currentRevision: current is Map ? parseRevision(current['revision']) : null);
       } on DioException catch (e) {
+        _check(generation);
         if (e.response?.statusCode == 404) {
           // Gone (pruned after retention): the server row stands.
           await _forgetConflict(db, id, dropHeld: false);
         } else {
           debugPrint('Sync: could not check conflict $id: ${e.message}');
         }
+      } on AccountChangedException {
+        rethrow;
       } catch (e) {
         debugPrint('Sync: could not check conflict $id: $e');
       }
@@ -686,8 +761,8 @@ class SyncService implements FailedChangesStore {
     int? parentRevision,
   }) async {
     final db = await _db();
-    final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('user_id') ?? '';
+    // The verified account the database belongs to.
+    final userId = _accounts?.activeUserId ?? await DatabaseHelper.readMeta(db, SyncMeta.owner) ?? '';
 
     var payload = data;
     if (changeType == ChangeType.update && previous != null) {
@@ -739,6 +814,25 @@ class SyncService implements FailedChangesStore {
     final rows = await db.query(table, columns: ['revision'], where: 'id = ?', whereArgs: [objectId], limit: 1);
     return rows.isEmpty ? null : parseRevision(rows.first['revision']);
   }
+
+  /// Sync status of the signed-in account.
+  Future<SyncStatus> status() async {
+    final db = await _db();
+    Future<int> count(String where, List<Object> args) async =>
+        Sqflite.firstIntValue(await db.rawQuery('SELECT COUNT(*) FROM pending_changes WHERE $where', args)) ?? 0;
+    return SyncStatus(
+      lastSync: DateTime.tryParse(await DatabaseHelper.readMeta(db, SyncMeta.lastSync) ?? ''),
+      openConflicts: int.tryParse(await DatabaseHelper.readMeta(db, SyncMeta.openConflicts) ?? '') ?? 0,
+      state: syncStateFromName(await DatabaseHelper.readMeta(db, SyncMeta.state)),
+      pending: await count('synced = 0 AND status = ?', [pendingStatus]),
+      failedOrWaiting: await count(
+          'synced = 0 AND (status = ? OR (status = ? AND attempts > 0))', [failedStatus, pendingStatus]),
+    );
+  }
+
+  /// Stores the open conflict count read from the server (display only).
+  Future<void> recordOpenConflicts(int count) async =>
+      DatabaseHelper.writeMeta(await _db(), SyncMeta.openConflicts, '$count');
 
   /// Get device ID
   String get deviceId => _deviceId;

@@ -1,6 +1,7 @@
 // On-device sync test (Android emulator in .github/workflows/android-test.yml):
 // native SQLite migration, protocol 2 against a real backend, and the
-// payment card from a real invoice response. Synthetic data only.
+// payment card from a real invoice response, account switching between two
+// synthetic accounts. Synthetic data only.
 //
 // flutter test integration_test/android_sync_test.dart \
 //   --dart-define=E2E_EMAIL=... --dart-define=E2E_PASSWORD=... --dart-define=E2E_PAID_INVOICE_ID=...
@@ -25,6 +26,10 @@ void main() {
       final api = await signedInClient();
       await conflictFlow(tester, api, databaseFactory, p.join(await getDatabasesPath(), 'sync_e2e.db'));
     });
+
+    testWidgets('account switching: A\'s queued change and data stay with A; B starts clean', (tester) async {
+      await accountSwitchFlow(tester, databaseFactory, p.join(await getDatabasesPath(), 'account_switch'));
+    }, skip: !E2eConfig.secondAccount);
 
     testWidgets('payment card from a real invoice response', (tester) async {
       final api = await signedInClient();

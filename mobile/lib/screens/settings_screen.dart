@@ -19,14 +19,14 @@ import '../core/services/share_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // Local imports - Core
-import '../core/database/database_helper.dart';
+import '../core/database/local_accounts.dart';
 import '../core/providers/providers.dart';
 import '../core/providers/refresh_provider.dart';
 import '../core/providers/theme_provider.dart';
 import '../core/services/csv_service.dart';
 import '../core/services/sync_conflicts_api.dart';
 import '../core/services/sync_service.dart'
-    show FailedChangesStore, SyncReport, SyncState, failedStatus, lastSyncTimestampKey, pendingStatus, syncOpenConflictsKey, syncStateFromName, syncStateKey, syncStateMessage;
+    show FailedChangesStore, SyncReport, SyncService, SyncState, SyncStatus, syncStateMessage;
 
 // Local imports - Screens
 import 'api_keys_screen.dart';
@@ -142,6 +142,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 icon: Icons.cloud_sync,
                 children: [
                   _SyncTile(syncService: syncService),
+                  if (syncService != null) const _QuarantinedDataTile(),
                   _DataManagementTile(),
                 ],
               ),
@@ -1211,19 +1212,19 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
     if (widget.syncService == null) return;
     
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final lastSync = prefs.getString(lastSyncTimestampKey);
-      final openConflicts = prefs.getInt(syncOpenConflictsKey) ?? 0;
-      final syncState = syncStateFromName(prefs.getString(syncStateKey));
+      // The signed-in account's own sync status (each account has its own).
+      final SyncStatus status = await (widget.syncService as SyncService).status();
       if (mounted) {
         setState(() {
-          _openConflicts = openConflicts;
-          _syncState = syncState;
+          _openConflicts = status.openConflicts;
+          _syncState = status.state;
+          _pendingChanges = status.pending;
+          _failedChanges = status.failedOrWaiting;
         });
       }
       
-      if (lastSync != null) {
-        final dateTime = DateTime.parse(lastSync);
+      final dateTime = status.lastSync?.toLocal();
+      if (dateTime != null) {
         final now = DateTime.now();
         final difference = now.difference(dateTime);
         
@@ -1238,31 +1239,11 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
           timeAgo = '${difference.inDays}d ago';
         }
         
-        setState(() {
-          _lastSyncTime = timeAgo;
-        });
-      }
-      
-      // Get pending changes count
-      final db = await DatabaseHelper.getDatabase();
-      final pending = await db.query(
-        'pending_changes',
-        where: 'synced = ? AND status = ?',
-        whereArgs: [0, pendingStatus],
-      );
-      
-      final failed = await db.query(
-        'pending_changes',
-        columns: ['id'],
-        where: 'synced = ? AND (status = ? OR (status = ? AND attempts > 0))',
-        whereArgs: [0, failedStatus, pendingStatus],
-      );
-      
-      if (mounted) {
-        setState(() {
-          _pendingChanges = pending.length;
-          _failedChanges = failed.length;
-        });
+        if (mounted) {
+          setState(() {
+            _lastSyncTime = timeAgo;
+          });
+        }
       }
     } catch (e) {
       print('Error loading sync info: $e');
@@ -1515,8 +1496,7 @@ class _SyncTileState extends ConsumerState<_SyncTile> {
     // Refresh the count from the server (only a number is kept on the device).
     try {
       final open = await api.listOpen();
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt(syncOpenConflictsKey, open.length);
+      await (widget.syncService as SyncService).recordOpenConflicts(open.length);
       if (mounted) setState(() => _openConflicts = open.length);
     } catch (_) {
       // Keep the last known count; the next sync updates it.
@@ -2653,32 +2633,59 @@ class _LogoutTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final authService = ref.read(authServiceProvider);
 
+    Future<void> toLogin() async {
+      if (context.mounted) {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const LoginScreen()),
+          (route) => false,
+        );
+      }
+    }
+
     return ListTile(
       leading: const Icon(Icons.logout, color: Colors.red),
       title: const Text('Logout', style: TextStyle(color: Colors.red)),
       subtitle: const Text('Sign out of your account'),
       trailing: const Icon(Icons.chevron_right, color: Colors.red),
-      onTap: () {
+      onTap: () async {
+        int unsynced = 0;
+        try {
+          unsynced = await authService.unsyncedLocalChanges();
+        } catch (_) {
+          // No local data (web, or not signed in).
+        }
+        if (!context.mounted) return;
         showDialog(
           context: context,
           builder: (context) => AlertDialog(
             title: const Text('Logout'),
-            content: const Text('Are you sure you want to logout?'),
+            content: Text(unsynced > 0
+                ? 'Are you sure you want to logout?\n\n'
+                    '$unsynced change(s) made on this phone have not been synced yet. They stay on this phone '
+                    'for this account, hidden from other accounts, and are sent when you sign in again.'
+                : 'Are you sure you want to logout?\n\n'
+                    "This account's data on this phone stays here, hidden from other accounts."),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context),
                 child: const Text('Cancel'),
               ),
+              TextButton(
+                key: const ValueKey('logout-remove-data'),
+                onPressed: () async {
+                  Navigator.pop(context);
+                  final removed = await _confirmRemoveLocalData(context, unsynced);
+                  if (!removed) return;
+                  await authService.logoutAndRemoveLocalData(confirmUnsyncedLoss: unsynced > 0);
+                  await toLogin();
+                },
+                child: const Text('Logout and remove data from this phone'),
+              ),
               ElevatedButton(
                 onPressed: () async {
                   Navigator.pop(context);
                   await authService.logout();
-                  if (context.mounted) {
-                    Navigator.of(context).pushAndRemoveUntil(
-                      MaterialPageRoute(builder: (_) => const LoginScreen()),
-                      (route) => false,
-                    );
-                  }
+                  await toLogin();
                 },
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.red,
@@ -2691,5 +2698,145 @@ class _LogoutTile extends ConsumerWidget {
         );
       },
     );
+  }
+
+  /// Second confirmation for permanently removing the account's local data;
+  /// with unsynced changes the person must tick that they accept losing them.
+  static Future<bool> _confirmRemoveLocalData(BuildContext context, int unsynced,
+      {String what = "This permanently removes this account's local data from this phone."}) async {
+    var accepted = unsynced == 0;
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('Remove data from this phone?'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('$what Data already synced stays on the server.'),
+              if (unsynced > 0) ...[
+                const SizedBox(height: 12),
+                Text(
+                  'Warning: $unsynced change(s) have not been synced and will be lost permanently. '
+                  'They cannot be recovered.',
+                  style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+                ),
+                CheckboxListTile(
+                  key: const ValueKey('accept-unsynced-loss'),
+                  contentPadding: EdgeInsets.zero,
+                  value: accepted,
+                  onChanged: (v) => setState(() => accepted = v ?? false),
+                  title: const Text('I understand these changes will be lost'),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+            ElevatedButton(
+              key: const ValueKey('confirm-remove-data'),
+              onPressed: accepted ? () => Navigator.pop(context, true) : null,
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+              child: const Text('Remove permanently'),
+            ),
+          ],
+        ),
+      ),
+    );
+    return result ?? false;
+  }
+}
+
+/// Local data from an earlier app version whose account could not be
+/// established: not shown to or synced for any account. The signed-in
+/// account can take back only the unsynced changes recorded for it, or the
+/// person can remove the data after a warning.
+class _QuarantinedDataTile extends StatefulWidget {
+  const _QuarantinedDataTile();
+
+  @override
+  State<_QuarantinedDataTile> createState() => _QuarantinedDataTileState();
+}
+
+class _QuarantinedDataTileState extends State<_QuarantinedDataTile> {
+  List<QuarantinedStore> _stores = const [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final stores = await LocalAccounts.instance.quarantinedStores();
+      if (mounted) setState(() => _stores = stores);
+    } catch (_) {
+      // Nothing to show.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_stores.isEmpty) return const SizedBox.shrink();
+    final total = _stores.fold<int>(0, (n, s) => n + s.unsyncedChanges);
+    final mine = _stores.fold<int>(0, (n, s) => n + s.unsyncedForActiveAccount);
+    return ListTile(
+      key: const ValueKey('quarantined-data'),
+      leading: const Icon(Icons.inventory_2_outlined, color: Colors.orange),
+      title: const Text('Data from an earlier app version'),
+      subtitle: Text('Its account could not be identified, so it is not used. '
+          '$total unsynced change(s); $mine recorded for your account.'),
+      trailing: const Icon(Icons.chevron_right),
+      onTap: () => _open(context, total, mine),
+    );
+  }
+
+  Future<void> _open(BuildContext context, int total, int mine) async {
+    final action = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Data from an earlier app version'),
+        content: Text(
+          'Before this version, all accounts on this phone shared one local store, and this one holds data of '
+          'more than one account (or of an unknown account). It is kept apart and never synced.\n\n'
+          '"Recover my changes" moves only the $mine unsynced change(s) recorded for the account you are '
+          'signed in with into your queue; changes of other accounts stay here for them.\n\n'
+          '"Remove" deletes it permanently, including $total unsynced change(s).',
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Keep')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'remove'),
+            child: const Text('Remove', style: TextStyle(color: Colors.red)),
+          ),
+          ElevatedButton(
+            onPressed: mine > 0 ? () => Navigator.pop(context, 'recover') : null,
+            child: const Text('Recover my changes'),
+          ),
+        ],
+      ),
+    );
+    if (action == 'recover') {
+      var recovered = 0;
+      for (final store in _stores) {
+        recovered += await LocalAccounts.instance.recoverFromQuarantine(store.path);
+      }
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$recovered change(s) recovered; they are sent with the next sync.')),
+        );
+      }
+    } else if (action == 'remove' && context.mounted) {
+      final confirmed = await _LogoutTile._confirmRemoveLocalData(context, total,
+          what: 'This permanently removes the data from the earlier app version from this phone.');
+      if (confirmed) {
+        for (final store in _stores) {
+          await LocalAccounts.instance.deleteQuarantined(store.path, confirmed: true);
+        }
+      }
+    }
+    await _load();
   }
 }

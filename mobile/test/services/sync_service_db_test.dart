@@ -13,6 +13,7 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 
 // Local imports
 import 'package:invoiceme/core/database/database_helper.dart';
+import 'package:invoiceme/core/database/local_accounts.dart' show SyncMeta;
 import 'package:invoiceme/core/services/api_client.dart';
 import 'package:invoiceme/core/services/sync_service.dart';
 
@@ -311,8 +312,8 @@ void main() {
     };
     await service.sync();
     expect(api.pulls, [null, 'p1']);
-    final prefs = await SharedPreferences.getInstance();
-    expect(prefs.getString(syncCursorKey), 'p2');
+    Future<String?> cursor() => DatabaseHelper.readMeta(db, SyncMeta.cursor);
+    expect(await cursor(), 'p2');
     expect((await db.query('clients_local')).single['revision'], 2);
 
     // Interrupted on the second page: the stored cursor stays p2.
@@ -320,20 +321,20 @@ void main() {
     api.pages = {'p2': FakeApi.emptyPage('p3', hasMore: true), 'p3': FakeApi.emptyPage('p4')};
     api.pullError = (c) => c == 'p3' ? DioException(requestOptions: RequestOptions(path: '/sync/pull')) : null;
     await expectLater(service.sync(), throwsA(isA<DioException>()));
-    expect(prefs.getString(syncCursorKey), 'p2');
+    expect(await cursor(), 'p2');
 
     // Next sync restarts from p2 (re-delivered pages are fine).
     api.pullError = null;
     api.pulls.clear();
     await service.sync();
     expect(api.pulls, ['p2', 'p3']);
-    expect(prefs.getString(syncCursorKey), 'p4');
+    expect(await cursor(), 'p4');
     await db.close();
   });
 
   test('fullResyncRequired clears cached tables (not the queue) and drops the cursor', () async {
     final (service, db) = await open();
-    SharedPreferences.setMockInitialValues({syncCursorKey: 'old'});
+    await DatabaseHelper.writeMeta(db, SyncMeta.cursor, 'old');
     await db.insert('clients_local', {'id': 'stale', 'user_id': 'u', 'name': 'S', 'created_at': 'x', 'updated_at': 'x'});
     final queued = (await service.queueChange(
         objectType: ChangeObjectType.client, objectId: 'q1', changeType: ChangeType.create, data: {'name': 'Q'}))!;
@@ -343,13 +344,13 @@ void main() {
     expect(api.pulls, ['old', null]);
     expect(await db.query('clients_local'), isEmpty);
     expect((await rowOf(db, queued))['status'], 'pending');
-    expect((await SharedPreferences.getInstance()).getString(syncCursorKey), 'fresh');
+    expect(await DatabaseHelper.readMeta(db, SyncMeta.cursor), 'fresh');
     await db.close();
   });
 
   test('invalid_cursor (400) drops the cursor and pulls from the start', () async {
     final (service, db) = await open();
-    SharedPreferences.setMockInitialValues({syncCursorKey: 'bad'});
+    await DatabaseHelper.writeMeta(db, SyncMeta.cursor, 'bad');
     api.pages = {null: FakeApi.emptyPage('good')};
     api.pullError = (c) => c == 'bad'
         ? DioException(
@@ -360,7 +361,7 @@ void main() {
         : null;
     await service.sync();
     expect(api.pulls, ['bad', null]);
-    expect((await SharedPreferences.getInstance()).getString(syncCursorKey), 'good');
+    expect(await DatabaseHelper.readMeta(db, SyncMeta.cursor), 'good');
     await db.close();
   });
 

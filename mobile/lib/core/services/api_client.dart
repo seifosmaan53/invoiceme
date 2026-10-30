@@ -1,5 +1,8 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart' show kIsWeb, kDebugMode, defaultTargetPlatform, debugPrint;
+import 'package:flutter/foundation.dart' show kIsWeb, kDebugMode, defaultTargetPlatform, debugPrint, visibleForTesting;
 import 'package:flutter/services.dart' show TargetPlatform;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -25,6 +28,57 @@ class ApiClient {
   // Simple in-memory cache for GET requests (5 second TTL for performance)
   final Map<String, _CacheEntry> _cache = {};
   static const Duration _defaultCacheTTL = Duration(seconds: 5);
+
+  // Account session. Every request carries the session it was sent in; a
+  // session ends on sign-out (in-flight requests are cancelled), and nothing
+  // that arrives for an ended session may change the tokens of the next one.
+  int _sessionEpoch = 0;
+  CancelToken _sessionCancel = CancelToken();
+  String? _sessionUserId;
+
+  /// Called (not awaited) when the session's tokens were rejected and could
+  /// not be refreshed; the app signs out.
+  void Function()? onSessionExpired;
+
+  /// The account (`sub` claim) of an access token, or null if unreadable.
+  /// Only for binding a stored token to its account; the server verifies it.
+  static String? tokenSubject(String? token) {
+    if (token == null) return null;
+    final parts = token.split('.');
+    if (parts.length != 3) return null;
+    try {
+      final claims = jsonDecode(utf8.decode(base64Url.decode(base64Url.normalize(parts[1]))));
+      final sub = claims is Map ? claims['sub'] : null;
+      return sub is String && sub.isNotEmpty ? sub : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Starts a session for [userId]; tokens refreshed later must belong to it.
+  void bindSession(String userId) {
+    _sessionUserId = userId;
+    _cache.clear();
+  }
+
+  String? get sessionUserId => _sessionUserId;
+
+  /// Ends the current session: in-flight requests are cancelled, cached
+  /// responses dropped and the access token cleared.
+  Future<void> endSession() async {
+    _sessionEpoch++;
+    _sessionCancel.cancel('account session ended');
+    _sessionCancel = CancelToken();
+    _sessionUserId = null;
+    _cache.clear();
+    await clearToken();
+  }
+
+  @visibleForTesting
+  Dio get dio => _dio;
+
+  /// The session of a request, taken when it is made (interceptors run later).
+  Options _session() => Options(extra: {'session_epoch': _sessionEpoch});
 
   ApiClient() {
     // Get the base URL with environment detection and fallback logic
@@ -71,6 +125,10 @@ class ApiClient {
 
     _dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
+        // Requests made through this class carry the session of the call;
+        // others get the current one.
+        options.extra['session_epoch'] ??= _sessionEpoch;
+        options.cancelToken ??= _sessionCancel;
         // Attach token to request if available
         // Token should already be loaded in _loadToken() or set via setToken()
         if (_accessToken != null && _accessToken!.isNotEmpty) {
@@ -92,7 +150,12 @@ class ApiClient {
           }
         }
         
-        if (error.response?.statusCode == 401) {
+        // A request of an ended session: never touch the current tokens.
+        final epoch = error.requestOptions.extra['session_epoch'];
+        if (epoch != _sessionEpoch) {
+          return handler.next(error);
+        }
+        if (error.response?.statusCode == 401 && error.requestOptions.extra['no_refresh'] != true) {
           // Try to refresh token if we have a refresh token
           try {
             final refreshToken = await _readSecure('refresh_token');
@@ -101,7 +164,7 @@ class ApiClient {
                 debugPrint('Attempting to refresh token...');
               }
               // Create a new dio instance without interceptors to avoid recursion
-              final refreshDio = Dio(_dio.options);
+              final refreshDio = Dio(_dio.options)..httpClientAdapter = _dio.httpClientAdapter;
               final refreshResponse = await refreshDio.post(
                 '${_dio.options.baseUrl}/auth/refresh',
                 data: {'refreshToken': refreshToken},
@@ -110,7 +173,11 @@ class ApiClient {
               if (refreshResponse.statusCode == 200) {
                 // Backend returns 'accessToken' not 'token'
                 final newToken = refreshResponse.data['accessToken'] as String? ?? refreshResponse.data['token'] as String?;
-                if (newToken != null) {
+                // Only for the same session and the same account.
+                final boundUser = _sessionUserId;
+                if (newToken != null &&
+                    epoch == _sessionEpoch &&
+                    (boundUser == null || tokenSubject(newToken) == boundUser)) {
                   await setToken(newToken);
                   // Also save refresh token if provided
                   final newRefreshToken = refreshResponse.data['refreshToken'] as String?;
@@ -126,9 +193,11 @@ class ApiClient {
                   opts.headers['Authorization'] = 'Bearer $newToken';
                   final cloneReq = await _dio.request(
                     opts.path,
+                    cancelToken: opts.cancelToken,
                     options: Options(
                       method: opts.method,
                       headers: opts.headers,
+                      extra: {'no_refresh': true},
                     ),
                     data: opts.data,
                     queryParameters: opts.queryParameters,
@@ -149,11 +218,16 @@ class ApiClient {
           }
           
           // If refresh failed or no refresh token, clear and require re-login
-          if (kDebugMode) {
-            debugPrint('Token expired. Please log in again.');
+          // (unless the session ended meanwhile: then it is not ours to clear).
+          if (epoch == _sessionEpoch) {
+            if (kDebugMode) {
+              debugPrint('Token expired. Please log in again.');
+            }
+            await clearToken();
+            await _deleteSecure('refresh_token');
+            final expired = onSessionExpired;
+            if (expired != null) scheduleMicrotask(expired);
           }
-          await clearToken();
-          await _deleteSecure('refresh_token');
         }
         return handler.next(error);
       },
@@ -177,6 +251,7 @@ class ApiClient {
   }
 
   Future<void> setToken(String token) async {
+    if (_accessToken != token) _cache.clear();
     _accessToken = token;
     await _writeSecure('access_token', token);
     // Update Dio headers immediately
@@ -301,7 +376,7 @@ class ApiClient {
     }
 
     // Make actual request
-    final response = await _dio.get(path, queryParameters: queryParameters);
+    final response = await _dio.get(path, queryParameters: queryParameters, options: _session(), cancelToken: _sessionCancel);
     
     // Cache successful GET responses (only if useCache is true)
     if (useCache && response.statusCode == 200) {
@@ -318,23 +393,23 @@ class ApiClient {
   Future<Response> post(String path, {dynamic data}) async {
     // Invalidate related cache entries on POST
     clearCache(path);
-    return await _dio.post(path, data: data);
+    return await _dio.post(path, data: data, options: _session(), cancelToken: _sessionCancel);
   }
 
   Future<Response> patch(String path, {dynamic data}) async {
     // Invalidate related cache entries on PATCH
     clearCache(path);
-    return await _dio.patch(path, data: data);
+    return await _dio.patch(path, data: data, options: _session(), cancelToken: _sessionCancel);
   }
 
   Future<Response> delete(String path) async {
     // Invalidate related cache entries on DELETE
     clearCache(path);
-    return await _dio.delete(path);
+    return await _dio.delete(path, options: _session(), cancelToken: _sessionCancel);
   }
 
   Future<Response> postMultipart(String path, FormData formData) async {
-    return await _dio.post(path, data: formData);
+    return await _dio.post(path, data: formData, options: _session(), cancelToken: _sessionCancel);
   }
 
   void setBaseUrl(String url) {

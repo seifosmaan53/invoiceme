@@ -40,3 +40,6 @@ Thumbs.db
 # mobile/build/ - in mobile/.gitignore
 
 release/
+# Source folders named release (release docs and tooling) are not build output
+!docs/release/
+!mobile/tool/release/

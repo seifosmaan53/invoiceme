@@ -8,5 +8,8 @@
 - **[Testing](TESTING.md)** — unit, controller, guard, and e2e test coverage for the backend
 - **[Developer Guide](DEVELOPER_GUIDE.md)** — local setup, folder structure, coding standards, contributing
 - **[User Manual](USER_MANUAL.md)** — end-user walkthrough of the app
+- **[Release handoff](release/RELEASE-HANDOFF.md)** — what is tested, test APKs, what a real release still needs
+- **[Server release checklist](operations/SERVER-RELEASE-CHECKLIST.md)** — authoritative order for updating an existing server
+- **[Android release](release/ANDROID-RELEASE.md)**, **[device acceptance](release/DEVICE-ACCEPTANCE.md)**, **[iOS assessment](release/IOS-ASSESSMENT.md)**
 
 See the [main README](../README.md) for the project overview and quickstart.

@@ -1,5 +1,9 @@
 # Updating an on-site InvoiceMe installation
 
+> The order of work for the current release is
+> [SERVER-RELEASE-CHECKLIST.md](SERVER-RELEASE-CHECKLIST.md); this document is
+> the detailed procedure it links to.
+
 This procedure updates an InvoiceMe backend installed on a customer's own
 computer (for example a warehouse PC) to a release that contains the security
 fixes merged in `6dd9ad2` and later. It assumes nothing about the installation:
@@ -93,7 +97,7 @@ It reads the schema first. A check whose tables/columns are missing, or whose
 query fails, is `[NOT CHECKED]`; exit code 3 means **not verified**, never
 clean. Exit codes: 0 every check ran, no findings; 1 findings that need
 review; 2 could not run; 3 not verified. The **schema fingerprint** it prints
-(markers for migrations 001-020, origin guessed from index names) is a
+(markers for migrations 001-022, origin guessed from index names) is a
 diagnostic clue, not a migration history. The info line
 `encrypted_client_fields` lists clients whose fields look encrypted; if it
 lists any, or if it is NOT CHECKED, keep `ENCRYPTION_KEY` exactly as it is.

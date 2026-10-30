@@ -18,6 +18,15 @@ class AuthService {
   final LocalAccounts? _accounts;
   User? _currentUser;
 
+  // Sign-in, sign-out and the start-up session check run one at a time.
+  Future<void> _transitions = Future.value();
+
+  Future<T> _serialized<T>(Future<T> Function() action) {
+    final result = _transitions.then((_) => action());
+    _transitions = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
   /// [accounts]: per-account local storage (default: the app's; none on web).
   AuthService(this._apiClient, this._secureStorage, {LocalAccounts? accounts})
       : _accounts = accounts ?? (kIsWeb ? null : LocalAccounts.instance) {
@@ -69,7 +78,7 @@ class AuthService {
           throw Exception('Registration succeeded but tokens are missing');
         }
 
-        await _startSession(token, refreshToken, userData);
+        await _serialized(() => _startSession(token, refreshToken, userData));
       } else {
         // Just create the user object without saving tokens
         _currentUser = User.fromJson(userData);
@@ -151,7 +160,7 @@ class AuthService {
         throw Exception('Login succeeded but tokens are missing');
       }
 
-      await _startSession(token, refreshToken, userData);
+      await _serialized(() => _startSession(token, refreshToken, userData));
       return _currentUser!;
     } on DioException catch (e) {
       // Log detailed error for debugging
@@ -205,27 +214,6 @@ class AuthService {
       if (kDebugMode) {
         debugPrint('Unexpected login error: $e');
       }
-      rethrow;
-    }
-  }
-
-  /// Refresh access token
-  Future<void> refreshToken() async {
-    try {
-      final refreshToken = await _readSecure('refresh_token');
-      if (refreshToken == null) {
-        throw Exception('No refresh token available');
-      }
-
-      final response = await _apiClient.post('/auth/refresh', data: {
-        'refreshToken': refreshToken,
-      });
-
-      final token = response.data['token'] as String;
-      await _writeSecure('access_token', token);
-      await _apiClient.setToken(token);
-    } catch (e) {
-      await logout();
       rethrow;
     }
   }
@@ -292,7 +280,7 @@ class AuthService {
     try {
       await _accounts?.activate(userId);
     } catch (e) {
-      await logout();
+      await _endSession();
       rethrow;
     }
     _currentUser = User.fromJson(userData);
@@ -301,6 +289,8 @@ class AuthService {
   /// Ends the session: stops and hides the signed-in account's local data
   /// (kept on the device for that account), then removes its credentials.
   Future<void> _endSession() async {
+    // Before any await: the running sync must not send or write again.
+    _accounts?.invalidate();
     _currentUser = null;
     await _apiClient.endSession();
     await _accounts?.deactivate();
@@ -334,7 +324,7 @@ class AuthService {
 
   /// Logout user. The account's local data (including changes not synced
   /// yet) stays on the device for this account and is hidden until it signs in again.
-  Future<void> logout() => _endSession();
+  Future<void> logout() => _serialized(_endSession);
 
   /// Unsynced changes of the signed-in account on this device.
   Future<int> unsyncedLocalChanges() async => await _accounts?.unsyncedCount() ?? 0;
@@ -353,7 +343,9 @@ class AuthService {
 
   /// Check if user is logged in by validating the token with the backend
   /// This is more reliable than just checking if a token exists
-  Future<bool> isLoggedIn() async {
+  Future<bool> isLoggedIn() => _serialized(_checkSession);
+
+  Future<bool> _checkSession() async {
     try {
       // First check if we have a token
       final hasToken = await _apiClient.hasToken();
@@ -361,35 +353,39 @@ class AuthService {
         return false;
       }
 
+      // The stored token and the stored account must be the same account
+      // (they are written separately; an interrupted sign-in could leave
+      // one account's token with another's details, or no details).
+      await _loadUserData();
+      final user = _currentUser;
+      final token = await _readSecure('access_token');
+      final tokenUser = await _readSecure('token_user_id');
+      final subject = ApiClient.tokenSubject(token);
+      if (user == null || subject != user.id || (tokenUser != null && tokenUser != user.id)) {
+        if (kDebugMode) debugPrint('Stored token does not match the stored account; signing out');
+        await _endSession();
+        return false;
+      }
+      // Bound before the first request, so a refresh can only accept this account.
+      if (_apiClient.sessionUserId != user.id) _apiClient.bindSession(user.id);
+
       // Validate token by making a lightweight API call
       // This ensures the token is still valid and not expired
       try {
         // Try to fetch clients (lightweight call that requires auth)
         await _apiClient.get('/clients', queryParameters: {'limit': 1});
-        
-        // Token is valid, load user data
-        await _loadUserData();
-        final user = _currentUser;
-        if (user == null) return false;
-
-        // The stored token and the stored account must be the same account
-        // (they are written separately; an interrupted sign-in could leave
-        // one account's token with another's details).
-        final token = await _readSecure('access_token');
-        final tokenUser = await _readSecure('token_user_id');
-        final subject = ApiClient.tokenSubject(token);
-        if (subject != user.id || (tokenUser != null && tokenUser != user.id)) {
-          if (kDebugMode) debugPrint('Stored token does not match the stored account; signing out');
-          await logout();
+        try {
+          await _accounts?.activate(user.id);
+        } catch (e) {
+          if (kDebugMode) debugPrint('Could not open the account\'s local data: $e');
+          await _endSession();
           return false;
         }
-        if (_apiClient.sessionUserId != user.id) _apiClient.bindSession(user.id);
-        await _accounts?.activate(user.id);
         return true;
       } on DioException catch (e) {
         // 401 means token expired/invalid
         if (e.response?.statusCode == 401) {
-          await logout();
+          await _endSession();
           return false;
         }
         // Network errors - don't clear token, just return false

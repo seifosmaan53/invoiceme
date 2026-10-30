@@ -59,16 +59,26 @@ class QuarantinedStore {
   final String path;
   final DateTime? quarantinedAt;
 
-  /// Changes never sent, in total and those recorded for the signed-in account.
-  final int unsyncedChanges;
-  final int unsyncedForActiveAccount;
+  /// Changes never sent: in total, recorded for the signed-in account, and
+  /// recorded for other accounts (the rest have no account). All null when
+  /// the file could not be read (it may hold unsynced changes).
+  final int? unsyncedChanges;
+  final int? unsyncedForActiveAccount;
+  final int? unsyncedForOtherAccounts;
 
   const QuarantinedStore({
     required this.path,
     required this.quarantinedAt,
     required this.unsyncedChanges,
     required this.unsyncedForActiveAccount,
+    required this.unsyncedForOtherAccounts,
   });
+
+  bool get readable => unsyncedChanges != null;
+
+  /// Removable by the signed-in account: holds no change recorded for
+  /// another account (those stay until that account recovers them).
+  bool get removable => unsyncedForOtherAccounts == null || unsyncedForOtherAccounts == 0;
 }
 
 /// Per-account local storage. Every account that signs in on this device has
@@ -183,6 +193,11 @@ class LocalAccounts {
         _activeUserId = userId;
       });
 
+  /// Marks the signed-in account's running work as stale at once (it stops
+  /// before its next request or write); [deactivate] follows. Called first
+  /// on sign-out, before anything else is awaited.
+  void invalidate() => _generation++;
+
   /// Stops the signed-in account's work and closes its database; its data
   /// stays on the device.
   Future<void> deactivate() => _serialized(_deactivateLocked);
@@ -290,6 +305,15 @@ class LocalAccounts {
         UNION SELECT user_id FROM invoices_local''');
     final ids = {for (final r in rows) (r['user_id'] as String?) ?? ''};
     if (ids.length != 1 || ids.single.isEmpty) return null;
+    // Rows without a user id of their own must belong to a record of that
+    // account (held server rows cannot be attributed).
+    final unattributed = sqflite.Sqflite.firstIntValue(await db.rawQuery('''
+        SELECT (SELECT COUNT(*) FROM invoice_items_local
+                 WHERE invoice_id NOT IN (SELECT id FROM invoices_local))
+             + (SELECT COUNT(*) FROM attachments_local
+                 WHERE owner_id NOT IN (SELECT id FROM invoices_local UNION SELECT id FROM clients_local))
+             + (SELECT COUNT(*) FROM sync_held_rows)''')) ?? 0;
+    if (unattributed > 0) return null;
     return ids.single;
   }
 
@@ -309,7 +333,9 @@ class LocalAccounts {
   }
 
   Future<void> _moveDatabase(String from, String to) async {
-    for (final suffix in ['', '-journal', '-wal', '-shm']) {
+    // Side files first, so an interruption never leaves the main file
+    // separated from its journal.
+    for (final suffix in ['-journal', '-wal', '-shm', '']) {
       final f = File('$from$suffix');
       if (await f.exists()) await f.rename('$to$suffix');
     }
@@ -330,7 +356,13 @@ class LocalAccounts {
         db = await DatabaseHelper.openAt(_factory, f.path);
       } catch (_) {
         // Unreadable (kept as it was found); counts unknown.
-        stores.add(QuarantinedStore(path: f.path, quarantinedAt: null, unsyncedChanges: 0, unsyncedForActiveAccount: 0));
+        stores.add(QuarantinedStore(
+          path: f.path,
+          quarantinedAt: null,
+          unsyncedChanges: null,
+          unsyncedForActiveAccount: null,
+          unsyncedForOtherAccounts: null,
+        ));
         continue;
       }
       try {
@@ -345,6 +377,10 @@ class LocalAccounts {
           quarantinedAt: DateTime.tryParse(await DatabaseHelper.readMeta(db, SyncMeta.quarantinedAt) ?? ''),
           unsyncedChanges: await _unsynced(db),
           unsyncedForActiveAccount: mine,
+          unsyncedForOtherAccounts: sqflite.Sqflite.firstIntValue(
+                await db.rawQuery("SELECT COUNT(*) FROM pending_changes WHERE synced = 0 AND user_id <> '' AND user_id IS NOT ?", [active]),
+              ) ??
+              0,
         ),);
       } finally {
         await db.close();
@@ -398,6 +434,20 @@ class LocalAccounts {
   Future<void> deleteQuarantined(String path, {required bool confirmed}) => _serialized(() async {
         _checkQuarantinePath(path);
         if (!confirmed) throw StateError('Removing quarantined data needs the person\'s confirmation');
+        // Refused while it holds changes recorded for another account than
+        // the signed-in one: only that account may recover its work.
+        int others = 0;
+        try {
+          final db = await DatabaseHelper.openAt(_factory, path);
+          try {
+            others = sqflite.Sqflite.firstIntValue(await db.rawQuery("SELECT COUNT(*) FROM pending_changes WHERE synced = 0 AND user_id <> '' AND user_id IS NOT ?", [_activeUserId])) ?? 0;
+          } finally {
+            await db.close();
+          }
+        } catch (_) {
+          // Unreadable: nothing can be recovered from it; removable once confirmed.
+        }
+        if (others > 0) throw UnsyncedChangesException(others);
         await _factory.deleteDatabase(path);
       });
 

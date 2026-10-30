@@ -174,10 +174,13 @@ class ApiClient {
                 // Backend returns 'accessToken' not 'token'
                 final newToken = refreshResponse.data['accessToken'] as String? ?? refreshResponse.data['token'] as String?;
                 // Only for the same session and the same account.
+                // A session without a bound account (ended, or not
+                // started) never takes a refreshed token.
                 final boundUser = _sessionUserId;
                 if (newToken != null &&
                     epoch == _sessionEpoch &&
-                    (boundUser == null || tokenSubject(newToken) == boundUser)) {
+                    boundUser != null &&
+                    tokenSubject(newToken) == boundUser) {
                   await setToken(newToken);
                   // Also save refresh token if provided
                   final newRefreshToken = refreshResponse.data['refreshToken'] as String?;
@@ -259,9 +262,10 @@ class ApiClient {
   }
 
   Future<void> clearToken() async {
+    // In memory first: no request made after this call carries the token.
     _accessToken = null;
-    await _deleteSecure('access_token');
     _dio.options.headers.remove('Authorization');
+    await _deleteSecure('access_token');
   }
 
   /// Check if a token exists (in memory or storage)

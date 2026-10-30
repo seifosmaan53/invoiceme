@@ -2676,7 +2676,11 @@ class _LogoutTile extends ConsumerWidget {
                   Navigator.pop(context);
                   final removed = await _confirmRemoveLocalData(context, unsynced);
                   if (!removed) return;
-                  await authService.logoutAndRemoveLocalData(confirmUnsyncedLoss: unsynced > 0);
+                  try {
+                    await authService.logoutAndRemoveLocalData(confirmUnsyncedLoss: unsynced > 0);
+                  } on UnsyncedChangesException {
+                    // Changes appeared after the warning: signed out, data kept.
+                  }
                   await toLogin();
                 },
                 child: const Text('Logout and remove data from this phone'),
@@ -2702,9 +2706,15 @@ class _LogoutTile extends ConsumerWidget {
 
   /// Second confirmation for permanently removing the account's local data;
   /// with unsynced changes the person must tick that they accept losing them.
-  static Future<bool> _confirmRemoveLocalData(BuildContext context, int unsynced,
+  /// [unsynced] null: unknown (the data could not be read).
+  static Future<bool> _confirmRemoveLocalData(BuildContext context, int? unsynced,
       {String what = "This permanently removes this account's local data from this phone."}) async {
     var accepted = unsynced == 0;
+    final warning = unsynced == null
+        ? 'Warning: this data could not be read. It may contain changes that were never synced; '
+            'they would be lost permanently.'
+        : 'Warning: $unsynced change(s) have not been synced and will be lost permanently. '
+            'They cannot be recovered.';
     final result = await showDialog<bool>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -2715,11 +2725,10 @@ class _LogoutTile extends ConsumerWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text('$what Data already synced stays on the server.'),
-              if (unsynced > 0) ...[
+              if (unsynced != 0) ...[
                 const SizedBox(height: 12),
                 Text(
-                  'Warning: $unsynced change(s) have not been synced and will be lost permanently. '
-                  'They cannot be recovered.',
+                  warning,
                   style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
                 ),
                 CheckboxListTile(
@@ -2780,8 +2789,8 @@ class _QuarantinedDataTileState extends State<_QuarantinedDataTile> {
   @override
   Widget build(BuildContext context) {
     if (_stores.isEmpty) return const SizedBox.shrink();
-    final total = _stores.fold<int>(0, (n, s) => n + s.unsyncedChanges);
-    final mine = _stores.fold<int>(0, (n, s) => n + s.unsyncedForActiveAccount);
+    final total = _stores.fold<int>(0, (n, s) => n + (s.unsyncedChanges ?? 0));
+    final mine = _stores.fold<int>(0, (n, s) => n + (s.unsyncedForActiveAccount ?? 0));
     return ListTile(
       key: const ValueKey('quarantined-data'),
       leading: const Icon(Icons.inventory_2_outlined, color: Colors.orange),
@@ -2794,6 +2803,12 @@ class _QuarantinedDataTileState extends State<_QuarantinedDataTile> {
   }
 
   Future<void> _open(BuildContext context, int total, int mine) async {
+    // Removable here: only stores without changes recorded for other
+    // accounts (those stay until that account recovers them).
+    final removable = _stores.where((s) => s.removable).toList();
+    final unreadable = removable.any((s) => !s.readable);
+    final removableUnsynced = removable.fold<int>(0, (n, s) => n + (s.unsyncedChanges ?? 0));
+    final othersKept = _stores.length - removable.length;
     final action = await showDialog<String>(
       context: context,
       builder: (context) => AlertDialog(
@@ -2803,12 +2818,14 @@ class _QuarantinedDataTileState extends State<_QuarantinedDataTile> {
           'more than one account (or of an unknown account). It is kept apart and never synced.\n\n'
           '"Recover my changes" moves only the $mine unsynced change(s) recorded for the account you are '
           'signed in with into your queue; changes of other accounts stay here for them.\n\n'
-          '"Remove" deletes it permanently, including $total unsynced change(s).',
+          '"Remove" deletes it permanently${removable.isEmpty ? '' : ', including $removableUnsynced unsynced change(s) without an account'}'
+          '${unreadable ? ' and data that could not be read' : ''}.'
+          '${othersKept > 0 ? ' Data with changes of other accounts is kept until they sign in and recover them.' : ''}',
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Keep')),
           TextButton(
-            onPressed: () => Navigator.pop(context, 'remove'),
+            onPressed: removable.isEmpty ? null : () => Navigator.pop(context, 'remove'),
             child: const Text('Remove', style: TextStyle(color: Colors.red)),
           ),
           ElevatedButton(
@@ -2829,11 +2846,15 @@ class _QuarantinedDataTileState extends State<_QuarantinedDataTile> {
         );
       }
     } else if (action == 'remove' && context.mounted) {
-      final confirmed = await _LogoutTile._confirmRemoveLocalData(context, total,
+      final confirmed = await _LogoutTile._confirmRemoveLocalData(context, unreadable ? null : removableUnsynced,
           what: 'This permanently removes the data from the earlier app version from this phone.');
       if (confirmed) {
-        for (final store in _stores) {
-          await LocalAccounts.instance.deleteQuarantined(store.path, confirmed: true);
+        for (final store in removable) {
+          try {
+            await LocalAccounts.instance.deleteQuarantined(store.path, confirmed: true);
+          } on UnsyncedChangesException {
+            // Holds another account's changes: kept.
+          }
         }
       }
     }

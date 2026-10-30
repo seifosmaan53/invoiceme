@@ -191,6 +191,38 @@ void main() {
   });
 
   group('restart during a transition', () {
+    test('a stored token without account details signs out and clears the token', () async {
+      const storage = FlutterSecureStorage();
+      await storage.write(key: 'access_token', value: fakeJwt('user-b'));
+      await storage.write(key: 'refresh_token', value: 'refresh-user-b');
+      app.restart();
+      expect(await app.auth.isLoggedIn(), isFalse);
+      expect(await storage.read(key: 'access_token'), isNull);
+      expect(await storage.read(key: 'refresh_token'), isNull);
+    });
+
+    test('a local store that cannot be opened for the account signs out instead of keeping the session', () async {
+      await app.auth.login(a, 'pw');
+      await app.auth.logout();
+      await app.withFileOf('user-a', (db) => DatabaseHelper.writeMeta(db, SyncMeta.owner, 'someone-else'));
+      await expectLater(app.auth.login(a, 'pw'), throwsStateError);
+      expect(app.accounts.activeUserId, isNull);
+      expect(await const FlutterSecureStorage().read(key: 'access_token'), isNull);
+    });
+
+    test('a start-up session check and a sign-in of another account do not interleave', () async {
+      await app.auth.login(a, 'pw');
+      app.restart();
+      final check = app.auth.isLoggedIn();
+      final signIn = app.auth.login(b, 'pw');
+      expect(await check, isTrue);
+      await signIn;
+      expect(app.accounts.activeUserId, 'user-b');
+      expect(app.auth.currentUser?.id, 'user-b');
+      expect(app.server.sessionUserId, 'user-b');
+      expect(ApiClient.tokenSubject(await const FlutterSecureStorage().read(key: 'access_token')), 'user-b');
+    });
+
     test('restart after A signed out: B signs in to an empty store; A\'s file keeps its queue', () async {
       await app.auth.login(a, 'pw');
       await app.queueCreate('a-offline');
@@ -384,6 +416,38 @@ void main() {
       expect(await app.unsynced(), isEmpty);
       final store = (await app.accounts.quarantinedStores()).single;
       expect(await File(store.path).readAsString(), 'not a database');
+      expect((store.readable, store.unsyncedChanges), (false, null), reason: 'unknown, not "0 unsynced"');
+    });
+
+    test('rows without their own user id that do not belong to the owner\'s records: quarantined', () async {
+      await legacy((db) async {
+        await db.insert('pending_changes', pendingRow('legacy-a', 'user-a', 'a-legacy'));
+        await db.insert('invoice_items_local', {
+          'id': 'item-1', 'invoice_id': 'invoice-of-unknown', 'description': 'd', 'quantity': 1, 'unit_price': 1,
+          'tax_rate': 0, 'discount_rate': 0, 'line_total': 1, 'created_at': 'x',
+        });
+      });
+      await app.accounts.migrateLegacy();
+      await app.auth.login(a, 'pw');
+      expect(await app.unsynced(), isEmpty);
+      expect((await app.accounts.quarantinedStores()).single.unsyncedForActiveAccount, 1);
+    });
+
+    test('a signed-in account cannot remove a quarantined store holding another account\'s changes', () async {
+      await legacy((db) async {
+        await db.insert('pending_changes', pendingRow('legacy-a', 'user-a', 'a-legacy'));
+        await db.insert('pending_changes', pendingRow('legacy-b', 'user-b', 'b-legacy'));
+      });
+      await app.accounts.migrateLegacy();
+      await app.auth.login(a, 'pw');
+      final store = (await app.accounts.quarantinedStores()).single;
+      expect((store.unsyncedForOtherAccounts, store.removable), (1, false));
+      await expectLater(app.accounts.deleteQuarantined(store.path, confirmed: true),
+          throwsA(isA<UnsyncedChangesException>()));
+      expect(File(store.path).existsSync(), isTrue);
+      await app.auth.logout();
+      await app.auth.login(b, 'pw');
+      expect(await app.accounts.recoverFromQuarantine(store.path), 1);
     });
 
         test('an empty one is removed', () async {
@@ -454,6 +518,40 @@ void main() {
       expect(adapter.paths, isNot(contains(endsWith('/auth/refresh'))));
       expect(await const FlutterSecureStorage().read(key: 'access_token'), fakeJwt('user-b'));
       expect(await const FlutterSecureStorage().read(key: 'refresh_token'), 'refresh-user-b');
+    });
+
+    test('a request made right after sign-out starts carries no token', () async {
+      final api = ApiClient();
+      final adapter = _Adapter();
+      api.dio.httpClientAdapter = adapter;
+      final seen = <Object?>[];
+      adapter.handler = (options) async {
+        seen.add(options.headers['Authorization']);
+        return _json(200, {});
+      };
+      api.bindSession('user-a');
+      await api.setToken(fakeJwt('user-a'));
+      final ending = api.endSession(); // not awaited: the storage delete is still running
+      await api.post('/sync/push', data: {});
+      await ending;
+      expect(seen, [null]);
+    });
+
+    test('no refresh is accepted without a bound account', () async {
+      final api = ApiClient();
+      final adapter = _Adapter()
+        ..handler = (options) async {
+          if (options.path.endsWith('/auth/refresh')) {
+            return _json(200, {'accessToken': '${fakeJwt('user-a')}2', 'refreshToken': 'r2'});
+          }
+          // The retry with the refreshed token would succeed.
+          return options.headers['Authorization'] == 'Bearer ${fakeJwt('user-a')}2' ? _json(200, {}) : _json(401, {});
+        };
+      api.dio.httpClientAdapter = adapter;
+      await api.setToken(fakeJwt('user-a'));
+      await const FlutterSecureStorage().write(key: 'refresh_token', value: 'refresh-user-a');
+      await expectLater(api.get('/clients', useCache: false), throwsA(isA<DioException>()));
+      expect(await const FlutterSecureStorage().read(key: 'access_token'), isNull);
     });
 
     test('ending a session cancels its requests in flight', () async {

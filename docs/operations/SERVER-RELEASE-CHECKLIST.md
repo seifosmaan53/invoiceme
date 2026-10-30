@@ -31,9 +31,12 @@ previous one passed:
    configuration (timezone, HTTPS/proxy, API-key scopes, legacy cutoff
    **unset**, historical overdue e-mails **off** unless explicitly opted
    in), Stripe webhook, verification.
-2. **Mobile acceptance** on a spare phone against the isolated phone-test
-   backend with synthetic data (docs/release/DEVICE-ACCEPTANCE.md), with a
-   test build of the same commit as the release candidate.
+2. **Mobile acceptance**: owner-reported physical-phone testing of an
+   earlier build; repeat testing of the current build declined by the owner
+   (2026-10-30; docs/release/DEVICE-ACCEPTANCE.md). Automated emulator and
+   host evidence covers the current app code. The pilot (step 11) is
+   therefore the first time the current app runs on phones: keep it small
+   and start with a test account and synthetic records.
 3. **Production build** (docs/release/ANDROID-RELEASE.md) and **pilot**
    (step 11): one or two phones, synthetic or agreed test records on the
    updated server, before any real customer use.

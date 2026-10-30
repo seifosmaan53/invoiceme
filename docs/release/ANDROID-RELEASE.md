@@ -17,16 +17,32 @@ holds only test builds (`.synctest`, versionCodes 1 and 1000xx); a test
 build's versionCode is not production history. What phones in the field run
 is unknown to these records (section 1, owner check).
 
-| Item | Proposal | Status |
+| Item | Value | Status |
 |---|---|---|
-| Application id | `com.seifosman.invoiceme` | **Owner decision.** Confirm you control `seifosman.com` (or choose the customer's reversed domain with their agreement), and that no InvoiceMe app is already installed on staff phones (section 1) or published under that id |
-| Distribution | Direct APK to a few phones for an initial controlled pilot (section 2.3) | **Owner decision** |
+| Application id | `com.seifosman.invoiceme` | **Decided by the owner (2026-10-30).** Permanent. An InvoiceMe app already on a phone under another id stays a separate app (section 2.1) |
+| Distribution | Direct APK to one or two pilot phones first, then the rest (section 2.3) | **Decided by the owner (2026-10-30)** |
 | Format | `apk` | follows from the distribution |
-| Version | `1.1.0`, versionCode `10100` (scheme `MAJOR*10000+MINOR*100+PATCH`, section 2.2); above every production line in the ledger (there are none) | **Owner decision** (accept or change) |
+| Version | `1.1.0`, versionCode `10100` (scheme `MAJOR*10000+MINOR*100+PATCH`, section 2.2); above every production line in the ledger (there are none) | **Decided by the owner (2026-10-30)** |
 | Signing key | A new production key created by you on your own machine (section 3.2); never the test key | **Not created.** Needs your explicit go-ahead; never sent to chat |
 | Server address | `https://<host>/api/v1` with a certificate the phones trust (section 4) | **Owner decision**, from the installation |
 | Build repository | A private repository of yours with the `android-release` environment (sections 3.1, 3.3) | **Owner action** |
 | Source | A full commit SHA in `main` that was reviewed and tested | chosen at build time |
+
+**Values for the first production build** (no secret among them):
+
+| Where | Name | Value |
+|---|---|---|
+| Variable (`android-release`) | `ANDROID_APPLICATION_ID` | `com.seifosman.invoiceme` |
+| Variable (`android-release`) | `ANDROID_RELEASE_CERT_SHA256` | fingerprint of the key from section 3.2 (after it exists) |
+| Run input | `ref` | full SHA of the reviewed `main` commit chosen for release (app code tested as `ed065aa`; `765fe72` or later has the same app code and the release tooling) |
+| Run input | `version_name` / `version_code` | `1.1.0` / `10100` |
+| Run input | `format` | `apk` |
+
+```sh
+R=<you>/invoiceme-release
+gh variable set ANDROID_APPLICATION_ID --env android-release --repo $R --body com.seifosman.invoiceme
+gh workflow run android-release.yml --repo $R -f ref=<full SHA> -f version_name=1.1.0 -f version_code=10100 -f format=apk
+```
 
 **Configuration changes:** none in the code. The id, version, key and URL
 are inputs, variables and secrets of the release workflow (sections 3.3,

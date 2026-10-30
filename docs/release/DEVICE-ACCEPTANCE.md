@@ -6,9 +6,16 @@ accounts A and B. Never a customer server, never real customer data;
 payments only as the seeded synthetic record (no payment provider is
 configured, so nothing can be charged and no email is sent).
 
-**Status: nothing below has been run on a physical phone.** Every "Phone"
-cell is **NOT RUN** until you run it and record the result. The automated
-evidence is listed separately and is not phone evidence:
+**Status (2026-10-30): physical-phone testing is owner-reported; repeat
+testing declined by the owner.** The owner reports having tested the app on
+a phone earlier; which build and which of the checks below were covered is
+not recorded. The owner declined another physical-phone test of the current
+build. So for the current build (`ed065aa` app code) **no individual check
+below is verified on a phone**: every "Phone" cell stays **NOT RUN (current
+build)**, and the owner-reported testing is not evidence for any single row.
+The checklist and the phone-test tooling remain available if testing is
+resumed. The automated evidence is listed separately and is not phone
+evidence:
 - **Emulator**: passed in CI on an Android 11 emulator against a real
   backend (`android-test.yml` job `emulator-e2e`; on `ed065aa`, run
   41108435367, 4 of 4).
@@ -45,18 +52,18 @@ conflict in the real conflict screen, on the phone's own SQLite.
 
 | # | Do | Expected | Automated evidence (not phone) | Phone |
 |---|---|---|---|---|
-| 1 | **Install.** `adb -d install <phone APK>` (from the handoff folder; never over another build). Open "InvoiceMe (sync test)" | Installs as a new app; opens the sign-in screen | Emulator (install, sign-in) | NOT RUN |
-| 2 | **A signs in and syncs.** Sign in as A (`A_EMAIL`/`A_PASSWORD`). Settings > Data & Sync > Sync | Clients "Northwind Test Co (A)", "Delete-me Test Client (A)"; three invoices (draft $120, sent $250, paid $100); sync completes; "Last synced" shows | Emulator, Host | NOT RUN |
-| 3 | **Switch to B.** Logout (keep data). Sign in as B. Look at clients, invoices, Settings > Data & Sync (incl. "could not be synced" and conflicts); Sync | Only "Contoso Test Ltd (B)" and its sent $75 invoice; Data & Sync shows nothing of A (no pending, failed or conflict entries; its own last-sync time); sync completes | Emulator (B starts with an empty store, never sends A's changes), Host | NOT RUN |
-| 4 | **Back to A.** Logout, sign in as A, Data & Sync, Sync | A's data and sync status as in step 2; nothing of B | Emulator (A's queued change is still there and is sent by A), Host | NOT RUN |
-| 5 | **Switch during an active sync.** As A: tap Sync and immediately Logout; sign in as B; Sync | No crash; B sees only B; A's next sign-in and Sync work | Host (switch during an in-flight download or upload: nothing written to either account) | NOT RUN |
-| 6 | **Deletion delivery.** On the computer: `scripts/phone-test/as-account.sh A DELETE /clients/<A_DELETE_ME_CLIENT_ID>`; on the phone as A: Sync, open Clients | "Delete-me Test Client (A)" is gone | Server (tombstones), Host (tombstones applied) | NOT RUN |
-| 7 | **Payment state.** As A open the paid $100 invoice | Payment card: Partially refunded; Paid (gross) $100.00, Refunded $30.00, Net received $70.00; Reopen only after a confirmation (cancel it if you will run step 10 afterwards) | Emulator (same seeded state) | NOT RUN |
-| 8 | **Attachment link.** As A open the paid $100 invoice > attachments | Only "normal-link.pdf" is listed and opens the browser at example.com; the seeded unsafe `javascript:` link is never shown | Server (unsafe URLs left out), Host (URL check) | NOT RUN |
-| 9 | **PDF.** As A open the draft $120 invoice > PDF (view, share) | The PDF renders, for that invoice | Server (PDF rendering); the test backend renders with this computer's Chrome | NOT RUN |
-| 10 | **On-device sync tests.** `scripts/phone-test/run-device-tests.sh` (needs Flutter on the computer; installs a separate debug test app, package `com.example.invoiceme`, with the synthetic passwords compiled in; it does not touch the phone build; remove it afterwards if you like: `adb -d uninstall com.example.invoiceme`) | `All tests passed!` for: native SQLite migration; a queued offline change and a server edit of the same field produce a conflict, resolved with "Use my version" in the conflict screen; account switching (A's queued change stays with A, B starts clean and never sends it, A sends it after signing in again); payment card | Emulator (identical tests) | NOT RUN |
-| 11 | **Restart keeps state.** As A: force-close the app (Settings > Apps > Force stop), reopen | Still signed in as A (or the sign-in screen if the session expired); same data and Data & Sync status | Host (restart while signed in) | NOT RUN |
-| 12 | **Remove local data.** As A: Logout > "Logout and remove data from this phone" | A second confirmation; with unsynced changes a warning and a tick box. Afterwards A signs in to an empty phone store and Sync downloads A's data again | Host (removal needs confirmation with unsynced changes) | NOT RUN |
+| 1 | **Install.** `adb -d install <phone APK>` (from the handoff folder; never over another build). Open "InvoiceMe (sync test)" | Installs as a new app; opens the sign-in screen | Emulator (install, sign-in) | NOT RUN (current build) |
+| 2 | **A signs in and syncs.** Sign in as A (`A_EMAIL`/`A_PASSWORD`). Settings > Data & Sync > Sync | Clients "Northwind Test Co (A)", "Delete-me Test Client (A)"; three invoices (draft $120, sent $250, paid $100); sync completes; "Last synced" shows | Emulator, Host | NOT RUN (current build) |
+| 3 | **Switch to B.** Logout (keep data). Sign in as B. Look at clients, invoices, Settings > Data & Sync (incl. "could not be synced" and conflicts); Sync | Only "Contoso Test Ltd (B)" and its sent $75 invoice; Data & Sync shows nothing of A (no pending, failed or conflict entries; its own last-sync time); sync completes | Emulator (B starts with an empty store, never sends A's changes), Host | NOT RUN (current build) |
+| 4 | **Back to A.** Logout, sign in as A, Data & Sync, Sync | A's data and sync status as in step 2; nothing of B | Emulator (A's queued change is still there and is sent by A), Host | NOT RUN (current build) |
+| 5 | **Switch during an active sync.** As A: tap Sync and immediately Logout; sign in as B; Sync | No crash; B sees only B; A's next sign-in and Sync work | Host (switch during an in-flight download or upload: nothing written to either account) | NOT RUN (current build) |
+| 6 | **Deletion delivery.** On the computer: `scripts/phone-test/as-account.sh A DELETE /clients/<A_DELETE_ME_CLIENT_ID>`; on the phone as A: Sync, open Clients | "Delete-me Test Client (A)" is gone | Server (tombstones), Host (tombstones applied) | NOT RUN (current build) |
+| 7 | **Payment state.** As A open the paid $100 invoice | Payment card: Partially refunded; Paid (gross) $100.00, Refunded $30.00, Net received $70.00; Reopen only after a confirmation (cancel it if you will run step 10 afterwards) | Emulator (same seeded state) | NOT RUN (current build) |
+| 8 | **Attachment link.** As A open the paid $100 invoice > attachments | Only "normal-link.pdf" is listed and opens the browser at example.com; the seeded unsafe `javascript:` link is never shown | Server (unsafe URLs left out), Host (URL check) | NOT RUN (current build) |
+| 9 | **PDF.** As A open the draft $120 invoice > PDF (view, share) | The PDF renders, for that invoice | Server (PDF rendering); the test backend renders with this computer's Chrome | NOT RUN (current build) |
+| 10 | **On-device sync tests.** `scripts/phone-test/run-device-tests.sh` (needs Flutter on the computer; installs a separate debug test app, package `com.example.invoiceme`, with the synthetic passwords compiled in; it does not touch the phone build; remove it afterwards if you like: `adb -d uninstall com.example.invoiceme`) | `All tests passed!` for: native SQLite migration; a queued offline change and a server edit of the same field produce a conflict, resolved with "Use my version" in the conflict screen; account switching (A's queued change stays with A, B starts clean and never sends it, A sends it after signing in again); payment card | Emulator (identical tests) | NOT RUN (current build) |
+| 11 | **Restart keeps state.** As A: force-close the app (Settings > Apps > Force stop), reopen | Still signed in as A (or the sign-in screen if the session expired); same data and Data & Sync status | Host (restart while signed in) | NOT RUN (current build) |
+| 12 | **Remove local data.** As A: Logout > "Logout and remove data from this phone" | A second confirmation; with unsynced changes a warning and a tick box. Afterwards A signs in to an empty phone store and Sync downloads A's data again | Host (removal needs confirmation with unsynced changes) | NOT RUN (current build) |
 
 Not checkable on a phone with this version (no screen queues changes):
 **retry after a restart** (a change "waiting to retry" survives restarts and

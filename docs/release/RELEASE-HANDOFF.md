@@ -87,7 +87,8 @@ All builds are listed in [android-versions.tsv](android-versions.tsv).
    in `849552b` and the test APK built from it (found 2026-10-29). Fixed in
    the app source after this baseline (per-account local storage; host and
    emulator tests), see [DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md) item 10;
-   not yet tested on a physical phone. Do not switch accounts on a phone
+   not verified on a physical phone (repeat testing declined by the owner,
+   2026-10-30). Do not switch accounts on a phone
    running the `849552b` test APK.
 2. Overdue emails are sent at most once and **not retried** if the server
    stops between marking and sending, or a send fails.
@@ -100,27 +101,28 @@ All builds are listed in [android-versions.tsv](android-versions.tsv).
 6. A device that resolves a conflict with "use my version" may briefly show
    an older server row if the server did not report the new revision; the
    next pull corrects it.
-7. No physical-device testing has been done; no iOS build exists.
+7. Physical-phone testing is **owner-reported** (an earlier build; build and
+   coverage not recorded); the owner declined repeat testing of the current
+   build (2026-10-30), so no individual phone check is verified for it
+   (DEVICE-ACCEPTANCE.md). No iOS build exists.
 
 ## 4. Owner-managed requirements before a real release
 
 Android (details and secure setup: [ANDROID-RELEASE.md](ANDROID-RELEASE.md)):
-1. Decide the **application id** (proposal `com.seifosman.invoiceme`) after
-   checking whether staff phones already run an InvoiceMe app.
-2. Decide the **distribution method** (APK sideload/device management, or
-   Google Play with AAB) and the **version plan** (proposal: 1.1.0 =
-   versionCode 10100).
+1. **Decided (2026-10-30):** application id `com.seifosman.invoiceme`.
+2. **Decided (2026-10-30):** direct APK pilot, version 1.1.0 = versionCode
+   10100 (values in ANDROID-RELEASE.md section 0).
 3. Create the **production key** on your own machine; back it up twice.
 4. Create a **private repository** and its `android-release` environment
    (required reviewer = you); store key, passwords and the production URL as
    environment secrets with `gh secret set` (prompts, nothing in chat).
 5. Optional: a **dedicated test key** in this repository's secrets, so test
    builds keep one identity.
-6. Test **account switching** on a physical phone (DEVICE-ACCEPTANCE.md
-   item 10) with a test build that contains the fix.
-7. Run [DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md) on a physical phone
-   against a test backend; then build with the release workflow, verify the
-   record, and distribute yourself.
+6. Physical-phone acceptance: **owner-reported, repeat declined**
+   (DEVICE-ACCEPTANCE.md status). The pilot (SERVER-RELEASE-CHECKLIST.md
+   step 11) is the first use of the production build on phones.
+7. Build with the release workflow, verify the artifact and record
+   (ANDROID-RELEASE.md 3.4), and distribute yourself, pilot phones first.
 
 Server ([SERVER-RELEASE-CHECKLIST.md](../operations/SERVER-RELEASE-CHECKLIST.md)):
 8. Identify the installation, verify a backup restores, review and rehearse
@@ -134,7 +136,9 @@ It does not block an Android-only test release.
 
 ## 5. What can be tested now, and what must happen before a real release
 
-**Now:** start the isolated phone-test backend (`scripts/phone-test/start.sh`),
+**Phone testing:** owner-reported; the owner declined repeat testing of the
+current build (2026-10-30). The tooling below stays available if that
+changes: start the isolated phone-test backend (`scripts/phone-test/start.sh`),
 connect a spare phone by USB (`scripts/phone-test/connect-phone.sh`),
 install the phone build of the `.synctest` test APK, sign in with the
 synthetic accounts A and B, and work through
@@ -143,9 +147,8 @@ seeded synthetic record (the phone-test backend has no payment provider), or
 in Stripe test mode on another test backend. The server release can be rehearsed on a
 restored copy of a database, never on the live installation.
 
-**Before a real release:** the owner decisions and setup in section 4, the
-account-switching check on a physical phone (item 10) and the rest of the
-physical-device acceptance, the server update done per the checklist at the installation by
+**Before a real release:** the remaining owner setup in section 4 (key,
+private repository, `https://` address), the server update done per the checklist at the installation by
 the owner, and then a production build from the release workflow in the
 private repository, distributed by the owner. Until then nothing has been
 released.

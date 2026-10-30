@@ -3,4 +3,5 @@
 # After a production build, add its line here (from its release-record.txt) in a reviewed commit.
 # version_code	version_name	application_id	source_commit	date	kind	artifact_sha256	signing_cert_sha256	note
 1	1.0.0	com.example.invoiceme.synctest	72ae129	2026-10-29	test	50fb63381717883de999904f783ba0811f20a476a66e9fb93f51643d924d1a75	8170b77e2f553950e22bdb0a3e1e424eb7234558ca59c37f4af51df6ecff32ce	sync test APK, per-build debug key, superseded
-1	1.0.0	com.example.invoiceme.synctest	849552b	2026-10-29	test	9fa0882fb0fb3bf6300c1748d8fce4a9352cdee808a418effda2dae23041364d	dd2654080ed10386436d66b9c3ac71047dc4280fb7438b4fbf2483f4ad43933b	sync test APK, per-build debug key, current
+1	1.0.0	com.example.invoiceme.synctest	849552b	2026-10-29	test	9fa0882fb0fb3bf6300c1748d8fce4a9352cdee808a418effda2dae23041364d	dd2654080ed10386436d66b9c3ac71047dc4280fb7438b4fbf2483f4ad43933b	sync test APK, per-build debug key, superseded (has the account-switching defect)
+100019	1.0.0	com.example.invoiceme.synctest	ed065aa	2026-10-30	test	844e107e19a44330ad0476e9c36562ceb503149cc1cca53cd093fcce575d720e	f8ea52e20d560698e7a15fd88fc7de3d9c7c4b3a0eb2fabd2583f25c530ac7bb	sync test APK with per-account local storage, per-build debug key, current

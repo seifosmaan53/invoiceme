@@ -51,8 +51,9 @@ the owner on a phone (not by tooling here):
 
 1. On the phone: Settings > Apps > InvoiceMe > App details (or "App info");
    note the package name if shown. With a computer and USB debugging:
-   `adb shell pm list packages | grep -i invoice` and
-   `adb shell dumpsys package <package> | grep -E "versionName|versionCode"`.
+   `adb -d shell pm list packages | grep -i invoice` and
+   `adb -d shell dumpsys package <package> | grep -E "versionName|versionCode"`
+   (`-d`: the USB-connected phone only).
 2. If a build with the same package exists and you still have the file that
    was installed: `apksigner verify --print-certs <file>.apk` shows its
    certificate. A certificate `CN=Android Debug` means it was signed with a

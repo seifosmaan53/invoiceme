@@ -5,9 +5,12 @@
 #   as-account.sh A PATCH /clients/<id> '{"name":"Edited on the other device"}'
 #   as-account.sh A DELETE /clients/<id>
 # Prints the response; never prints the token or password.
+# The password and token pass briefly through process arguments of node and
+# curl on this computer (synthetic test accounts only).
 set -euo pipefail
-STATE="${INVOICEME_PHONE_TEST_HOME:-$HOME/.invoiceme-phone-test}"
-API="http://127.0.0.1:3900/api/v1"
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
+API="http://127.0.0.1:$PORT/api/v1"
 who="$1"; method="$2"; path="$3"; body="${4:-}"
 case "$who" in A|B) ;; *) echo "account must be A or B" >&2; exit 1 ;; esac
 # shellcheck disable=SC1091

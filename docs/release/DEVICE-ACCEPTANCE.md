@@ -22,8 +22,9 @@ The screens save directly to the server; **no screen queues offline
 changes**, and sync runs only from Settings > Data & Sync > Sync. On a phone
 you therefore cannot create an offline change, a device-side conflict or a
 retry by tapping. Those checks run on the phone with the **on-device tests**
-(`scripts/phone-test/run-device-tests.sh`): the same flows as the emulator
-job, queueing changes through the app's real sync service and resolving a
+(`scripts/phone-test/run-device-tests.sh`): the test code of the emulator
+job (CI builds it as the `.synctest` variant, the script as a plain debug
+app), queueing changes through the app's real sync service and resolving a
 conflict in the real conflict screen, on the phone's own SQLite.
 
 ## Before you start
@@ -35,7 +36,8 @@ conflict in the real conflict screen, on the phone's own SQLite.
 3. Connect the phone by USB, accept "Allow USB debugging" for this computer,
    then on the computer: `scripts/phone-test/connect-phone.sh`. It must print
    `backend reachable`. (Needs Android platform-tools `adb`.)
-4. Check for an earlier test build: `adb shell pm list packages | grep invoiceme`.
+4. Check for an earlier test build: `adb -d shell pm list packages | grep invoiceme`
+   (`-d` = the USB device only; never a TV or other network device).
    If `com.example.invoiceme.synctest` is listed, **stop**: see
    "An earlier test build is on the phone" below.
 
@@ -43,7 +45,7 @@ conflict in the real conflict screen, on the phone's own SQLite.
 
 | # | Do | Expected | Automated evidence (not phone) | Phone |
 |---|---|---|---|---|
-| 1 | **Install.** `adb install <phone APK>` (from the handoff folder; never over another build). Open "InvoiceMe (sync test)" | Installs as a new app; opens the sign-in screen | Emulator (install, sign-in) | NOT RUN |
+| 1 | **Install.** `adb -d install <phone APK>` (from the handoff folder; never over another build). Open "InvoiceMe (sync test)" | Installs as a new app; opens the sign-in screen | Emulator (install, sign-in) | NOT RUN |
 | 2 | **A signs in and syncs.** Sign in as A (`A_EMAIL`/`A_PASSWORD`). Settings > Data & Sync > Sync | Clients "Northwind Test Co (A)", "Delete-me Test Client (A)"; three invoices (draft $120, sent $250, paid $100); sync completes; "Last synced" shows | Emulator, Host | NOT RUN |
 | 3 | **Switch to B.** Logout (keep data). Sign in as B. Look at clients, invoices, Settings > Data & Sync (incl. "could not be synced" and conflicts); Sync | Only "Contoso Test Ltd (B)" and its sent $75 invoice; Data & Sync shows nothing of A (no pending, failed or conflict entries; its own last-sync time); sync completes | Emulator (B starts with an empty store, never sends A's changes), Host | NOT RUN |
 | 4 | **Back to A.** Logout, sign in as A, Data & Sync, Sync | A's data and sync status as in step 2; nothing of B | Emulator (A's queued change is still there and is sent by A), Host | NOT RUN |
@@ -52,7 +54,7 @@ conflict in the real conflict screen, on the phone's own SQLite.
 | 7 | **Payment state.** As A open the paid $100 invoice | Payment card: Partially refunded; Paid (gross) $100.00, Refunded $30.00, Net received $70.00; Reopen only after a confirmation (cancel it if you will run step 10 afterwards) | Emulator (same seeded state) | NOT RUN |
 | 8 | **Attachment link.** As A open the paid $100 invoice > attachments | Only "normal-link.pdf" is listed and opens the browser at example.com; the seeded unsafe `javascript:` link is never shown | Server (unsafe URLs left out), Host (URL check) | NOT RUN |
 | 9 | **PDF.** As A open the draft $120 invoice > PDF (view, share) | The PDF renders, for that invoice | Server (PDF rendering); the test backend renders with this computer's Chrome | NOT RUN |
-| 10 | **On-device sync tests.** `scripts/phone-test/run-device-tests.sh` (needs Flutter on the computer; installs a separate debug test app, package `com.example.invoiceme`) | `All tests passed!` for: native SQLite migration; a queued offline change and a server edit of the same field produce a conflict, resolved with "Use my version" in the conflict screen; account switching (A's queued change stays with A, B starts clean and never sends it, A sends it after signing in again); payment card | Emulator (identical tests) | NOT RUN |
+| 10 | **On-device sync tests.** `scripts/phone-test/run-device-tests.sh` (needs Flutter on the computer; installs a separate debug test app, package `com.example.invoiceme`, with the synthetic passwords compiled in; it does not touch the phone build; remove it afterwards if you like: `adb -d uninstall com.example.invoiceme`) | `All tests passed!` for: native SQLite migration; a queued offline change and a server edit of the same field produce a conflict, resolved with "Use my version" in the conflict screen; account switching (A's queued change stays with A, B starts clean and never sends it, A sends it after signing in again); payment card | Emulator (identical tests) | NOT RUN |
 | 11 | **Restart keeps state.** As A: force-close the app (Settings > Apps > Force stop), reopen | Still signed in as A (or the sign-in screen if the session expired); same data and Data & Sync status | Host (restart while signed in) | NOT RUN |
 | 12 | **Remove local data.** As A: Logout > "Logout and remove data from this phone" | A second confirmation; with unsynced changes a warning and a tick box. Afterwards A signs in to an empty phone store and Sync downloads A's data again | Host (removal needs confirmation with unsynced changes) | NOT RUN |
 
@@ -66,8 +68,9 @@ the result, and screenshots of failures.
 
 ## Diagnostics without secrets
 
-`scripts/phone-test/collect-logs.sh` writes the test app's own log lines
-(logcat filtered to its process) and the test backend's log, with tokens,
+`scripts/phone-test/collect-logs.sh` (into `~/.invoiceme-phone-test/`) writes
+the test app's own log lines (logcat of its running process; open the app
+first) and the test backend's log, with tokens,
 JWTs, passwords and e-mail addresses masked. Review the files before sharing.
 Do not share `accounts.txt`, screenshots of the sign-in fields, or a full
 `adb bugreport` (it contains much more than this app).

@@ -7,7 +7,10 @@
 # Usage: seed.sh <api> <state-dir>
 set -euo pipefail
 API="$1"
-STATE="$2"
+INVOICEME_PHONE_TEST_HOME="$2"
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
+use_test_database
 run="$(date +%s)"
 
 json() { node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const v=JSON.parse(d);let x=v;for(const p of process.argv[1].split("."))x=x?.[p];if(x==null){console.error("missing "+process.argv[1]);process.exit(1)}console.log(x)})' "$1"; }
@@ -49,6 +52,8 @@ INSERT INTO attachments (id, owner_type, owner_id, url, filename, content_type, 
   VALUES (gen_random_uuid(), 'invoice', '$paid', 'https://example.com/', 'normal-link.pdf', 'application/pdf', 1024, now()),
          (gen_random_uuid(), 'invoice', '$paid', 'javascript:alert(1)', 'unsafe-link.pdf', 'application/pdf', 1024, now());
 SQL
+summary=$(call "$ta" GET "/invoices/$paid" | json paymentSummary.state)
+[ "$summary" = partially_refunded ] || { echo "unexpected payment state: $summary" >&2; exit 1; }
 
 cat >"$STATE/accounts.txt" <<EOF
 # Synthetic accounts of the InvoiceMe phone-test backend (test data only).

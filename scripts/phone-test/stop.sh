@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Stops the phone-test backend and its database; the test data is kept.
 #   stop.sh          stop
-#   stop.sh --wipe   stop and delete the whole test folder (synthetic data only)
+#   stop.sh --wipe   stop and delete the test folder (synthetic data only)
 set -euo pipefail
-STATE="${INVOICEME_PHONE_TEST_HOME:-$HOME/.invoiceme-phone-test}"
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
 if [ -f "$STATE/backend.pid" ]; then
   pid=$(cat "$STATE/backend.pid")
@@ -19,8 +20,19 @@ fi
 echo "stopped"
 
 if [ "${1:-}" = "--wipe" ]; then
-  case "$STATE" in
-    */.invoiceme-phone-test|*invoiceme-phone-test*) rm -rf "$STATE"; echo "deleted $STATE" ;;
-    *) echo "refusing to delete $STATE (not an invoiceme-phone-test folder)" >&2; exit 1 ;;
+  [ -d "$STATE" ] || { echo "nothing to delete"; exit 0; }
+  real=$(cd "$STATE" && pwd -P)
+  # Only a folder this tooling created: a plain name ending in
+  # invoiceme-phone-test, not the home folder or /, with its marker files.
+  case "$(basename "$real")" in
+    .invoiceme-phone-test|invoiceme-phone-test) ;;
+    *) echo "refusing to delete $real (not an invoiceme-phone-test folder)" >&2; exit 1 ;;
   esac
+  if [ "$real" = "$(cd "$HOME" && pwd -P)" ] || [ "$real" = / ] \
+     || [ ! -f "$real/secrets.env" ] || [ ! -f "$real/pgdata/PG_VERSION" ]; then
+    echo "refusing to delete $real (not a phone-test folder created by start.sh)" >&2
+    exit 1
+  fi
+  rm -rf "$real"
+  echo "deleted $real"
 fi

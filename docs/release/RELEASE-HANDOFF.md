@@ -138,8 +138,9 @@ It does not block an Android-only test release.
 connect a spare phone by USB (`scripts/phone-test/connect-phone.sh`),
 install the phone build of the `.synctest` test APK, sign in with the
 synthetic accounts A and B, and work through
-[DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md). Payments only in
-Stripe test mode or mocked. The server release can be rehearsed on a
+[DEVICE-ACCEPTANCE.md](DEVICE-ACCEPTANCE.md). Payments only as the
+seeded synthetic record (the phone-test backend has no payment provider), or
+in Stripe test mode on another test backend. The server release can be rehearsed on a
 restored copy of a database, never on the live installation.
 
 **Before a real release:** the owner decisions and setup in section 4, the

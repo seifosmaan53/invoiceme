@@ -17,8 +17,8 @@
 #   state folder (mode 600). Synthetic, fictional data only.
 set -euo pipefail
 
-STATE="${INVOICEME_PHONE_TEST_HOME:-$HOME/.invoiceme-phone-test}"
-PORT=3900
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 BACKEND="$REPO/backend"
 PGDATA="$STATE/pgdata"
@@ -49,14 +49,16 @@ if [ ! -f "$PGDATA/PG_VERSION" ]; then
   initdb -D "$PGDATA" -U invoiceme_test --auth=trust --no-instructions >"$LOG/initdb.log"
   cat >>"$PGDATA/postgresql.conf" <<EOF
 listen_addresses = ''
+port = 5432
 unix_socket_directories = '$SOCK'
 unix_socket_permissions = 0700
 EOF
 fi
+grep -q "^port = 5432" "$PGDATA/postgresql.conf" || echo "port = 5432" >>"$PGDATA/postgresql.conf"
 if ! pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
   pg_ctl -D "$PGDATA" -l "$LOG/postgres.log" -w start </dev/null >/dev/null 2>&1
 fi
-export PGHOST="$SOCK" PGUSER=invoiceme_test PGDATABASE=invoiceme_phone_test
+use_test_database
 psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='invoiceme_phone_test'" | grep -q 1 \
   || createdb invoiceme_phone_test
 

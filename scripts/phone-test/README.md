@@ -3,7 +3,8 @@
 An isolated InvoiceMe backend for testing the `.synctest` app on a physical
 Android phone (docs/release/DEVICE-ACCEPTANCE.md). macOS or Linux with
 PostgreSQL client and server tools (`initdb`, `pg_ctl`, `psql`), Node.js and
-npm; `adb` for the phone.
+npm; `adb` for the phone; Google Chrome for invoice PDFs (macOS path
+detected; without it the PDF check fails).
 
 | Command | Does |
 |---|---|
@@ -45,5 +46,7 @@ until the cable is unplugged or `connect-phone.sh --disconnect`; run it
 again after reconnecting. To simulate being offline, disconnect the
 mapping.
 
-Network adb devices (for example a TV at `host:port`) are never used; with
-several USB phones set `ANDROID_SERIAL`.
+Only phones attached by USB cable are used: network and wireless-debugging
+adb devices (for example a TV) are never selected; with several USB phones
+set `ANDROID_SERIAL`. In your own `adb` commands use `adb -d` (USB device
+only).

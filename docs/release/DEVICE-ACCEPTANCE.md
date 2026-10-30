@@ -71,7 +71,8 @@ the result, and screenshots of failures.
 `scripts/phone-test/collect-logs.sh` (into `~/.invoiceme-phone-test/`) writes
 the test app's own log lines (logcat of its running process; open the app
 first) and the test backend's log, with tokens,
-JWTs, passwords and e-mail addresses masked. Review the files before sharing.
+JWTs, passwords and e-mail addresses masked. Review the files before sharing,
+and copy them out before `stop.sh --wipe` (which deletes that folder).
 Do not share `accounts.txt`, screenshots of the sign-in fields, or a full
 `adb bugreport` (it contains much more than this app).
 

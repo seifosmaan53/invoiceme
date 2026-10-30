@@ -26,6 +26,10 @@ if adb -s "$serial" shell pm list packages | tr -d '\r' | grep -qx "package:com.
   echo "the phone already has an app com.example.invoiceme; not installing a test app over it" >&2
   exit 1
 fi
+if grep -qsE "^\s*invoicemeTestBuild|^\s*invoicemeApplicationId" "${GRADLE_USER_HOME:-$HOME/.gradle}/gradle.properties"; then
+  echo "invoicemeTestBuild/invoicemeApplicationId is set in your Gradle user properties; remove it for this run" >&2
+  exit 1
+fi
 # shellcheck disable=SC1091
 . "$STATE/accounts.txt"
 cd "$REPO/mobile"

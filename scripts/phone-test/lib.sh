@@ -16,7 +16,7 @@ pick_usb_phone() {
   local phones count
   phones=$(usb_phones)
   if [ -n "${ANDROID_SERIAL:-}" ]; then
-    printf '%s\n' "$phones" | grep -qx "$ANDROID_SERIAL" \
+    printf '%s\n' "$phones" | grep -Fqx -- "$ANDROID_SERIAL" \
       || { echo "ANDROID_SERIAL=$ANDROID_SERIAL is not an authorised USB phone" >&2; exit 1; }
     echo "$ANDROID_SERIAL"
     return

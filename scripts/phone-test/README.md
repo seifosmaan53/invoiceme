@@ -10,7 +10,7 @@ detected; without it the PDF check fails).
 |---|---|
 | `scripts/phone-test/start.sh` | Starts it; the first start creates the database and seeds accounts A and B |
 | `scripts/phone-test/stop.sh` | Stops it (data kept) |
-| `scripts/phone-test/stop.sh --wipe` | Stops it and deletes all its test data |
+| `scripts/phone-test/stop.sh --wipe` | Stops it and deletes all its test data, including saved diagnostics (copy those elsewhere first) |
 | `scripts/phone-test/connect-phone.sh` | Connects the single USB phone (`--disconnect` removes it) |
 | `scripts/phone-test/as-account.sh A\|B METHOD PATH [JSON]` | One API call as A or B ("the other device") |
 | `scripts/phone-test/run-device-tests.sh` | On-device sync tests on the phone (needs Flutter) |

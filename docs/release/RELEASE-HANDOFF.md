@@ -1,8 +1,34 @@
-# Release handoff (2026-10-29)
+# Release handoff (final, 2026-10-30)
 
-Where InvoiceMe stands after the 2026 security and sync work, what can be
-tested now, and what must happen before a real release. Three things are kept
-apart throughout:
+Where InvoiceMe stands after the 2026 security and sync work. Three things
+are kept apart throughout: tested source, test artifacts, and a production
+release.
+
+## Final status
+
+**Development of this scope is complete; the Android production release is
+deferred by the owner.** Nothing has been deployed, installed on a customer
+phone, distributed or published, and this is not proof of production
+readiness. The customer's warehouse installation is maintained privately by
+the owner; it was not accessed or updated, and its compatibility with this
+repository is unverified.
+
+| Item | State |
+|---|---|
+| Final source | `main` at the commit containing this section (handoff update on `c28b80a`). App code last changed in `ed065aa`; server code last changed in `849552b` |
+| Merged work (latest) | #24 `6c4802a` release blockers; #25 `849552b` sync integrity; #26 `bf4582f` release workflow and handoff; #27 `ed065aa` per-account local storage (account-switching fix); #28 `6c3c230` test APK record; #29 `765fe72` phone-test backend and checklist; #30 `c28b80a` owner decisions; this handoff update |
+| Approved production settings (owner, 2026-10-30) | application id `com.seifosman.invoiceme`; direct APK pilot; version `1.1.0`, versionCode `10100` (ANDROID-RELEASE.md section 0) |
+| Production signing key, private release repository and its secrets, production build, distribution | **DEFERRED BY OWNER.** None exists: no key was created, no release repository or production secret/variable was configured (this repository has no Actions secrets or variables) |
+| Server update at an installation | owner-managed, not done (SERVER-RELEASE-CHECKLIST.md) |
+| Physical-phone testing | **owner-reported** on an earlier, unspecified build; the owner declined repeat testing (2026-10-30). No individual phone check is marked passed for the current build (DEVICE-ACCEPTANCE.md) |
+| Automated evidence | sections 1 and 2 below (CI, update bundle, Android emulator runs) |
+| Test artifacts | debug-signed `.synctest` test APKs only (section 2); handoff folder `/Users/seifosman/Desktop/🚀 launch/security-2026-10-25/InvoiceMe-phone-test-ed065aa/` (outside the repository) |
+
+**Existing limitation of the app:** the screens save directly to the
+server. Offline editing through the normal UI is not implemented: no screen
+queues offline changes, and sync runs only from Settings > Data & Sync. The
+protocol-2 sync client, its conflict screen and the per-account storage
+exist and are tested by the automated tests, which queue changes directly.
 
 | | What it is | Status |
 |---|---|---|
@@ -81,7 +107,7 @@ checklist.
 
 All builds are listed in [android-versions.tsv](android-versions.tsv).
 
-## 3. Known limitations (as of `849552b`)
+## 3. Known limitations
 
 1. **Account switching on one phone leaked queued changes across accounts**
    in `849552b` and the test APK built from it (found 2026-10-29). Fixed in
@@ -105,36 +131,42 @@ All builds are listed in [android-versions.tsv](android-versions.tsv).
    coverage not recorded); the owner declined repeat testing of the current
    build (2026-10-30), so no individual phone check is verified for it
    (DEVICE-ACCEPTANCE.md). No iOS build exists.
+8. **Offline editing through the UI is not implemented** (screens save
+   directly to the server; see "Final status").
 
-## 4. Owner-managed requirements before a real release
+## 4. Production release tasks (deferred by owner)
+
+All of these are **DEFERRED BY OWNER** (2026-10-30) except items 1 and 2,
+which are decided. Nothing below has been started.
 
 Android (details and secure setup: [ANDROID-RELEASE.md](ANDROID-RELEASE.md)):
 1. **Decided (2026-10-30):** application id `com.seifosman.invoiceme`.
 2. **Decided (2026-10-30):** direct APK pilot, version 1.1.0 = versionCode
    10100 (values in ANDROID-RELEASE.md section 0).
-3. Create the **production key** on your own machine; back it up twice.
-4. Create a **private repository** and its `android-release` environment
+3. **Deferred:** create the **production key** on your own machine (needs a
+   JDK); back it up twice.
+4. **Deferred:** create a **private repository** and its `android-release` environment
    (required reviewer = you); store key, passwords and the production URL as
    environment secrets with `gh secret set` (prompts, nothing in chat).
-5. Optional: a **dedicated test key** in this repository's secrets, so test
+5. **Deferred (optional):** a **dedicated test key** in this repository's secrets, so test
    builds keep one identity.
 6. Physical-phone acceptance: **owner-reported, repeat declined**
    (DEVICE-ACCEPTANCE.md status). The pilot (SERVER-RELEASE-CHECKLIST.md
    step 11) is the first use of the production build on phones.
-7. Build with the release workflow, verify the artifact and record
+7. **Deferred:** build with the release workflow, verify the artifact and record
    (ANDROID-RELEASE.md 3.4), and distribute yourself, pilot phones first.
 
 Server ([SERVER-RELEASE-CHECKLIST.md](../operations/SERVER-RELEASE-CHECKLIST.md)):
-8. Identify the installation, verify a backup restores, review and rehearse
+8. **Owner-managed, not done:** identify the installation, verify a backup restores, review and rehearse
    migrations 018-022, configure (timezone, HTTPS/proxy, API keys, legacy
    cutoff unset, historical overdue emails off), Stripe webhook, verify.
-9. Give phones an `https://` address with a certificate they trust.
+9. **Deferred:** give phones an `https://` address with a certificate they trust.
 
 iOS ([IOS-ASSESSMENT.md](IOS-ASSESSMENT.md)): separate track; needs bundle
 id, Apple Developer membership, signing, privacy strings, a Mac toolchain.
 It does not block an Android-only test release.
 
-## 5. What can be tested now, and what must happen before a real release
+## 5. If testing or the release is resumed
 
 **Phone testing:** owner-reported; the owner declined repeat testing of the
 current build (2026-10-30). The tooling below stays available if that
@@ -147,7 +179,7 @@ seeded synthetic record (the phone-test backend has no payment provider), or
 in Stripe test mode on another test backend. The server release can be rehearsed on a
 restored copy of a database, never on the live installation.
 
-**Before a real release:** the remaining owner setup in section 4 (key,
+**Before a real release (deferred):** the remaining owner setup in section 4 (key,
 private repository, `https://` address), the server update done per the checklist at the installation by
 the owner, and then a production build from the release workflow in the
 private repository, distributed by the owner. Until then nothing has been

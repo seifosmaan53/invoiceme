@@ -648,11 +648,13 @@ open (`LocalAccounts`, `mobile/lib/core/database/local_accounts.dart`).
 - **Earlier versions** kept one database (`invoiceme.db`) and one cursor for
   every account. On the first start of this version that database becomes
   the database of its one account when every record and queued change in it
-  carries the same user id; otherwise (more than one account, or a change
+  carries the same user id (and its items, attachments and held rows belong
+  to that account's records); otherwise (more than one account, or a change
   without one) it is quarantined: not used or synced by any account. In
   Settings > Data & Sync the signed-in account can recover the unsynced
-  changes recorded with its own user id, or the data can be removed after a
-  warning. The old device-wide cursor is dropped: every account's next sync
+  changes recorded with its own user id, or remove the data after a
+  warning; data holding changes recorded for another account is not
+  removable until that account has recovered them. The old device-wide cursor is dropped: every account's next sync
   is a full pull (queued changes are kept and held as usual).
 
 The server's ownership checks are unchanged; the per-account storage is an

@@ -183,7 +183,7 @@ invoiceme/
 
 ## Upgrading an existing installation
 
-For the 2026-10-28 changes (sync protocol 2, payment state, business dates), follow the ordered checklist in [docs/operations/upgrade-2026-10-28.md](docs/operations/upgrade-2026-10-28.md).
+Follow the authoritative [server release checklist](docs/operations/SERVER-RELEASE-CHECKLIST.md) (it links the detailed procedures). The mobile app's release status, Android release workflow and device checklist are in [docs/release/](docs/release/RELEASE-HANDOFF.md).
 
 Changes merged on 2026-10-25 that an existing installation must account for:
 

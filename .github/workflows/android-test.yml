@@ -1,9 +1,17 @@
 name: Android test candidate
 
 # A sync TEST build of the Android app plus on-device tests on an emulator
-# against a real backend started in the same job. Nothing is published or
-# installed anywhere else; the test APK is signed with the runner's Android
-# debug keystore (no key is stored in the repository).
+# against a real backend started in the same job, and a check of the
+# production build configuration with a throwaway key. Nothing is published or
+# installed anywhere else (docs/release/ANDROID-RELEASE.md).
+#
+# Test signing: with the repository secrets ANDROID_TEST_KEYSTORE_BASE64,
+# ANDROID_TEST_KEYSTORE_PASSWORD, ANDROID_TEST_KEY_ALIAS,
+# ANDROID_TEST_KEY_PASSWORD and the variable ANDROID_TEST_CERT_SHA256, the test
+# APK is signed with that dedicated test key (never the production key), so a
+# later test APK installs over an earlier one. Without them it is signed with
+# the runner's throwaway debug key: a different key on every run, so each
+# test APK is its own identity and cannot update the previous one.
 
 on:
   workflow_dispatch:
@@ -16,6 +24,8 @@ on:
     paths:
       - 'mobile/**'
       - '.github/workflows/android-test.yml'
+      - '.github/workflows/android-release.yml'
+      - 'docs/release/**'
 
 permissions:
   contents: read
@@ -59,33 +69,178 @@ jobs:
 
       - run: flutter pub get
 
-      - name: Build the sync test APK (debug-signed)
+      - name: Test signing key (dedicated test key if configured, else per-build debug key)
+        id: testkey
+        env:
+          KS: ${{ secrets.ANDROID_TEST_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_TEST_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_TEST_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_TEST_KEY_PASSWORD }}
+          TEST_CERT: ${{ vars.ANDROID_TEST_CERT_SHA256 }}
+          RELEASE_CERT: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+        run: |
+          if [ -z "$KS" ]; then
+            echo "No dedicated test key configured: signing with this runner's throwaway debug key (a new identity per run)."
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          for v in KS_PASS KEY_ALIAS KEY_PASS TEST_CERT; do
+            [ -n "${!v}" ] || { echo "::error::The test key is partly configured: set all of ANDROID_TEST_KEYSTORE_BASE64, ANDROID_TEST_KEYSTORE_PASSWORD, ANDROID_TEST_KEY_ALIAS, ANDROID_TEST_KEY_PASSWORD (secrets) and ANDROID_TEST_CERT_SHA256 (variable)"; exit 1; }
+          done
+          umask 077
+          mkdir -p "$RUNNER_TEMP/test-signing"
+          printf '%s' "$KS" | base64 -d > "$RUNNER_TEMP/test-signing/test.jks"
+          # Before building: the key must be the recorded test key, never the production key
+          got=$(keytool -list -v -keystore "$RUNNER_TEMP/test-signing/test.jks" -storepass:env KS_PASS -alias "$KEY_ALIAS" \
+            | sed -nE 's/^[[:space:]]*SHA256: (.*)$/\1/p' | head -1 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+          norm() { echo "$1" | tr -d ': ' | tr '[:upper:]' '[:lower:]'; }
+          [ "$got" = "$(norm "$TEST_CERT")" ] || { echo "::error::the test keystore's certificate is not ANDROID_TEST_CERT_SHA256"; exit 1; }
+          if [ -n "$RELEASE_CERT" ] && [ "$got" = "$(norm "$RELEASE_CERT")" ]; then
+            echo "::error::the configured test key is the production key: refusing"; exit 1
+          fi
+          echo "stable=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build the sync test APK
         env:
           API_BASE_URL: ${{ inputs.api_base_url }}
+          STABLE: ${{ steps.testkey.outputs.stable }}
+          KS_PASS: ${{ secrets.ANDROID_TEST_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_TEST_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_TEST_KEY_PASSWORD }}
         run: |
           defines=()
           if [ -n "$API_BASE_URL" ]; then defines+=("--dart-define=API_BASE_URL=$API_BASE_URL"); fi
-          flutter build apk --release "${defines[@]}"
+          if [ "$STABLE" = true ]; then
+            export INVOICEME_SIGNING_STORE_FILE="$RUNNER_TEMP/test-signing/test.jks"
+            export INVOICEME_SIGNING_STORE_PASSWORD="$KS_PASS" INVOICEME_SIGNING_KEY_ALIAS="$KEY_ALIAS" INVOICEME_SIGNING_KEY_PASSWORD="$KEY_PASS"
+            export ORG_GRADLE_PROJECT_invoicemeRequireSigning=true
+          fi
+          # Increasing versionCode, so a stable-key test APK installs over an older one
+          flutter build apk --release --build-name=1.0.0 --build-number=$((100000 + GITHUB_RUN_NUMBER)) "${defines[@]}"
 
-      - name: Check app id, label and signature; checksum
+      - name: Remove the test keystore
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/test-signing"
+
+      - name: Verify (app id, label, signature, version); checksum and record
+        env:
+          STABLE: ${{ steps.testkey.outputs.stable }}
+          TEST_CERT: ${{ vars.ANDROID_TEST_CERT_SHA256 }}
+          RELEASE_CERT: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+          API_BASE_URL: ${{ inputs.api_base_url }}
         run: |
-          apk=build/app/outputs/flutter-apk/app-release.apk
-          bt="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
-          "$bt/aapt" dump badging "$apk" | grep -E "^package:|^application-label:" | tee badging.txt
-          grep -q "name='com.example.invoiceme.synctest'" badging.txt
-          grep -q "application-label:'InvoiceMe (sync test)'" badging.txt
-          "$bt/apksigner" verify --print-certs "$apk" | tee signature.txt
-          grep -q "CN=Android Debug" signature.txt
-          mkdir -p ../apk-out
-          cp "$apk" ../apk-out/invoiceme-synctest-${GITHUB_SHA::7}.apk
-          (cd ../apk-out && sha256sum *.apk > SHA256SUMS && cat SHA256SUMS)
-          cp badging.txt signature.txt ../apk-out/
+          export ARTIFACT=build/app/outputs/flutter-apk/app-release.apk
+          export EXPECT_APP_ID=com.example.invoiceme.synctest EXPECT_VERSION_NAME=1.0.0 EXPECT_VERSION_CODE=$((100000 + GITHUB_RUN_NUMBER))
+          export SOURCE_COMMIT=$GITHUB_SHA KIND=synctest OUT_DIR=$GITHUB_WORKSPACE/apk-out
+          if [ "$STABLE" = true ]; then
+            export EXPECT_CERT_SHA256="$TEST_CERT" FORBID_CERT_SHA256="$RELEASE_CERT" FORBID_DEBUG_CERT=true
+          else
+            export REQUIRE_DEBUG_CERT=true
+          fi
+          ./tool/release/verify_android_artifact.sh
+          grep -q "label=InvoiceMe (sync test)" "$OUT_DIR/release-record.txt"
+          grep -q "cleartext_http_allowed=true" "$OUT_DIR/release-record.txt"
+          # The production checks must refuse this test build (cleartext HTTP)
+          if out=$(FORBID_CLEARTEXT=true API_BASE_URL=https://ci.invalid/api/v1 OUT_DIR=$RUNNER_TEMP/neg ./tool/release/verify_android_artifact.sh 2>&1); then
+            echo "::error::the production checks accepted a cleartext test build"; exit 1
+          fi
+          echo "$out" | grep -q "allows cleartext HTTP" || { echo "$out"; echo "::error::refused for another reason"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
           name: invoiceme-synctest-apk
           path: apk-out/
           retention-days: 14
+
+  release-config:
+    # The production build path with a throwaway key generated in this job and
+    # discarded with it (never uploaded, never stored): app id from the
+    # property, required signing, no cleartext, https URL, APK and AAB, and
+    # the refusals. Proves the configuration; it is not a release.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: mobile
+    env:
+      ORG_GRADLE_PROJECT_invoicemeTestBuild: 'false'
+      CHECK_APP_ID: org.invoiceme.cicheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Required signing without a key fails clearly
+        run: |
+          if ORG_GRADLE_PROJECT_invoicemeRequireSigning=true flutter build apk --release > "$RUNNER_TEMP/nokey.log" 2>&1; then
+            echo "::error::a build with required signing and no key succeeded"; exit 1
+          fi
+          grep -q "Release signing is required (invoicemeRequireSigning=true) but not configured. Missing: INVOICEME_SIGNING_STORE_FILE" "$RUNNER_TEMP/nokey.log"
+          echo "refused as expected"
+
+      - name: Throwaway key for this job only
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/ci-signing"
+          openssl rand -hex 24 > "$RUNNER_TEMP/ci-signing/pass"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/ci-signing/pass")"
+          PASS=$(cat "$RUNNER_TEMP/ci-signing/pass")
+          export PASS
+          keytool -genkeypair -keystore "$RUNNER_TEMP/ci-signing/ci.jks" -storepass:env PASS -keypass:env PASS \
+            -alias ci -keyalg RSA -keysize 2048 -validity 30 -dname "CN=InvoiceMe CI release-config check (throwaway), O=CI" > /dev/null 2>&1
+          fp=$(keytool -list -v -keystore "$RUNNER_TEMP/ci-signing/ci.jks" -storepass:env PASS -alias ci | sed -nE 's/^[[:space:]]*SHA256: (.*)$/\1/p' | head -1)
+          echo "CI_CERT=$fp" >> "$GITHUB_ENV"
+
+      - name: Production-mode APK and AAB with the throwaway key
+        run: |
+          export INVOICEME_SIGNING_STORE_FILE="$RUNNER_TEMP/ci-signing/ci.jks" INVOICEME_SIGNING_KEY_ALIAS=ci
+          INVOICEME_SIGNING_STORE_PASSWORD=$(cat "$RUNNER_TEMP/ci-signing/pass"); INVOICEME_SIGNING_KEY_PASSWORD=$INVOICEME_SIGNING_STORE_PASSWORD
+          export INVOICEME_SIGNING_STORE_PASSWORD INVOICEME_SIGNING_KEY_PASSWORD
+          export ORG_GRADLE_PROJECT_invoicemeApplicationId=$CHECK_APP_ID ORG_GRADLE_PROJECT_invoicemeRequireSigning=true
+          for target in apk appbundle; do
+            flutter build "$target" --release --build-name=9.8.7 --build-number=987 --dart-define=API_BASE_URL=https://ci.invalid/api/v1
+          done
+
+      - name: Verify both as production artifacts; the refusals work
+        run: |
+          export EXPECT_APP_ID=$CHECK_APP_ID EXPECT_VERSION_NAME=9.8.7 EXPECT_VERSION_CODE=987 EXPECT_CERT_SHA256=$CI_CERT
+          export FORBID_DEBUG_CERT=true FORBID_CLEARTEXT=true API_BASE_URL=https://ci.invalid/api/v1 SOURCE_COMMIT=$GITHUB_SHA KIND=cicheck
+          for a in build/app/outputs/flutter-apk/app-release.apk build/app/outputs/bundle/release/app-release.aab; do
+            ARTIFACT=$a OUT_DIR=$RUNNER_TEMP/out-$(basename "$a") ./tool/release/verify_android_artifact.sh
+            grep -q "cleartext_http_allowed=false" "$RUNNER_TEMP/out-$(basename "$a")/release-record.txt"
+            grep -q "debug_certificate=false" "$RUNNER_TEMP/out-$(basename "$a")/release-record.txt"
+            # A different expected certificate (lineage check) must be refused
+            if out=$(ARTIFACT=$a EXPECT_CERT_SHA256=00ff OUT_DIR=$RUNNER_TEMP/neg ./tool/release/verify_android_artifact.sh 2>&1); then
+              echo "::error::a wrong certificate was accepted for $a"; exit 1
+            fi
+            echo "$out" | grep -q "wrong key: refusing" || { echo "$out"; echo "::error::refused for another reason"; exit 1; }
+            # A different (here: prefix) application id must be refused, also for the AAB
+            if out=$(ARTIFACT=$a EXPECT_APP_ID=org.invoiceme OUT_DIR=$RUNNER_TEMP/neg ./tool/release/verify_android_artifact.sh 2>&1); then
+              echo "::error::a wrong application id was accepted for $a"; exit 1
+            fi
+            echo "$out" | grep -qE "application id is org.invoiceme.cicheck|does not contain the application id|no merged release manifest for org.invoiceme found" || { echo "$out"; echo "::error::refused for another reason"; exit 1; }
+            # An http URL must be refused for production
+            if out=$(ARTIFACT=$a API_BASE_URL=http://ci.invalid/api/v1 OUT_DIR=$RUNNER_TEMP/neg ./tool/release/verify_android_artifact.sh 2>&1); then
+              echo "::error::an http:// API URL was accepted for $a"; exit 1
+            fi
+            echo "$out" | grep -q "must be an https:// URL" || { echo "$out"; echo "::error::refused for another reason"; exit 1; }
+          done
+          echo "Production configuration verified (throwaway key; nothing uploaded)."
+
+      - name: Remove the throwaway key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ci-signing"
 
   emulator-e2e:
     runs-on: ubuntu-latest

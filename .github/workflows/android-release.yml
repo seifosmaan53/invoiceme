@@ -1,0 +1,253 @@
+name: Android release build
+
+# Manually started, production-signed Android build of a reviewed commit
+# (docs/release/ANDROID-RELEASE.md). It builds, verifies and records; it never
+# publishes, uploads to a store or installs anything.
+#
+# Runs only in a PRIVATE repository (a public repository exposes run inputs,
+# logs and artifacts to every signed-in GitHub user). Signing material and the
+# production server URL come only from the `android-release` environment's
+# secrets; nothing is read from the repository. Missing configuration fails
+# the run and names what is missing, never values.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Reviewed commit SHA (40 hex) or tag to build; must be contained in main'
+        required: true
+      version_name:
+        description: 'versionName, e.g. 1.1.0'
+        required: true
+      version_code:
+        description: 'versionCode: an integer above every code in docs/release/android-versions.tsv for this app id'
+        required: true
+      format:
+        description: 'apk (sideloading / device management) or aab (Google Play)'
+        required: true
+        type: choice
+        options: [apk, aab]
+        default: apk
+      retention_days:
+        description: 'Days the signed artifact stays downloadable from this run (1-14)'
+        required: true
+        default: '3'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: '3.35.7'
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Refuse to run in a public repository
+        if: ${{ !github.event.repository.private }}
+        run: |
+          echo "::error::The release workflow runs only in a private repository: in a public one the run's inputs, logs and signed artifact are visible to every signed-in GitHub user. Run it from the owner's private copy (docs/release/ANDROID-RELEASE.md)."
+          exit 1
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Source is a reviewed commit (contained in main) that has this release tooling
+        id: source
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          # fetch-depth 0 already fetched origin/main (no further fetch: no credentials are kept)
+          if ! git merge-base --is-ancestor "$sha" origin/main; then
+            echo "::error::$REF ($sha) is not contained in main: only merged, reviewed commits are released"
+            exit 1
+          fi
+          if [ ! -x mobile/tool/release/verify_android_artifact.sh ] || ! grep -q invoicemeRequireSigning mobile/android/app/build.gradle.kts; then
+            echo "::error::$REF predates the release tooling (PR #26): build a later commit of main"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Building $REF = $sha"
+
+      - name: Inputs are well formed
+        env:
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          RETENTION: ${{ inputs.retention_days }}
+        run: |
+          [[ "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::version_name must look like 1.2.3"; exit 1; }
+          [[ "$VERSION_CODE" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::version_code must be a positive integer"; exit 1; }
+          [[ "$RETENTION" =~ ^([1-9]|1[0-4])$ ]] || { echo "::error::retention_days must be 1-14"; exit 1; }
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Analyze and test the app
+        working-directory: mobile
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq libsqlite3-dev
+          flutter pub get
+          flutter analyze --no-fatal-infos --no-fatal-warnings
+          flutter test
+
+  build:
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Protection rules (required reviewers) and the secrets live here
+    environment: android-release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.checks.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Version is above every recorded production build of this app id (ledger on main)
+        env:
+          VERSION_CODE: ${{ inputs.version_code }}
+          APP_ID: ${{ vars.ANDROID_APPLICATION_ID }}
+        run: |
+          set -o pipefail
+          [ -n "$APP_ID" ] || { echo "::error::Variable ANDROID_APPLICATION_ID is not set (the production application id: an owner decision, docs/release/ANDROID-RELEASE.md)"; exit 1; }
+          # The ledger on main, not in the commit being built (an older commit has an older ledger)
+          max=$(git show origin/main:docs/release/android-versions.tsv \
+            | awk -F'\t' -v id="$APP_ID" '!/^#/ && $3 == id && $6 == "production" { if ($1 > m) m = $1 } END { print m + 0 }')
+          if [ "$VERSION_CODE" -le "$max" ]; then
+            echo "::error::version_code $VERSION_CODE is not above $max, the highest recorded production code for $APP_ID"
+            exit 1
+          fi
+
+      - name: Release configuration is complete
+        env:
+          APP_ID: ${{ vars.ANDROID_APPLICATION_ID }}
+          ACCEPT_EXAMPLE_ID: ${{ vars.ANDROID_ACCEPT_EXAMPLE_ID }}
+          EXPECT_CERT: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+          KS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+          API_URL: ${{ secrets.ANDROID_RELEASE_API_BASE_URL }}
+        run: |
+          missing=()
+          [ -n "$APP_ID" ] || missing+=("variable ANDROID_APPLICATION_ID")
+          [ -n "$EXPECT_CERT" ] || missing+=("variable ANDROID_RELEASE_CERT_SHA256")
+          [ -n "$KS" ] || missing+=("secret ANDROID_RELEASE_KEYSTORE_BASE64")
+          [ -n "$KS_PASS" ] || missing+=("secret ANDROID_RELEASE_KEYSTORE_PASSWORD")
+          [ -n "$KEY_ALIAS" ] || missing+=("secret ANDROID_RELEASE_KEY_ALIAS")
+          [ -n "$KEY_PASS" ] || missing+=("secret ANDROID_RELEASE_KEY_PASSWORD")
+          [ -n "$API_URL" ] || missing+=("secret ANDROID_RELEASE_API_BASE_URL")
+          if [ ${#missing[@]} -gt 0 ]; then
+            printf '::error::Release configuration missing in environment android-release: %s\n' "$(IFS=', '; echo "${missing[*]}")"
+            exit 1
+          fi
+          case "$APP_ID" in
+            com.example.*)
+              if [ "$ACCEPT_EXAMPLE_ID" != true ]; then
+                echo "::error::ANDROID_APPLICATION_ID is the placeholder $APP_ID. Choose the production id (docs/release/ANDROID-RELEASE.md); keep it only if devices already run a released app under it, then set ANDROID_ACCEPT_EXAMPLE_ID=true."
+                exit 1
+              fi ;;
+          esac
+          case "$API_URL" in
+            https://*/api/v1) ;;
+            *) echo "::error::ANDROID_RELEASE_API_BASE_URL must be https://<host>/api/v1"; exit 1 ;;
+          esac
+
+      - name: Write the keystore to a private temporary file and check its certificate
+        env:
+          KS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          EXPECT_CERT: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+          FORBID_CERT: ${{ vars.ANDROID_TEST_CERT_SHA256 }}
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/release-signing"
+          printf '%s' "$KS" | base64 -d > "$RUNNER_TEMP/release-signing/release.jks"
+          # Password through the environment, never on a command line
+          got=$(keytool -list -v -keystore "$RUNNER_TEMP/release-signing/release.jks" -storepass:env KS_PASS -alias "$KEY_ALIAS" \
+            | sed -nE 's/^[[:space:]]*SHA256: (.*)$/\1/p' | head -1 | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+          want=$(echo "$EXPECT_CERT" | tr -d ': ' | tr '[:upper:]' '[:lower:]')
+          [ -n "$got" ] || { echo "::error::could not read the key's certificate (alias or password wrong?)"; exit 1; }
+          [ "$got" = "$want" ] || { echo "::error::the keystore's certificate ($got) is not ANDROID_RELEASE_CERT_SHA256: refusing to sign with a different key"; exit 1; }
+          if [ -n "$FORBID_CERT" ] && [ "$got" = "$(echo "$FORBID_CERT" | tr -d ': ' | tr '[:upper:]' '[:lower:]')" ]; then
+            echo "::error::this is the test key (ANDROID_TEST_CERT_SHA256): production builds never use it"; exit 1
+          fi
+          echo "Release key certificate SHA-256: $got"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+
+      - name: Build the signed ${{ inputs.format }}
+        working-directory: mobile
+        env:
+          INVOICEME_SIGNING_STORE_FILE: ${{ runner.temp }}/release-signing/release.jks
+          INVOICEME_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+          INVOICEME_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_RELEASE_KEY_ALIAS }}
+          INVOICEME_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEY_PASSWORD }}
+          ORG_GRADLE_PROJECT_invoicemeApplicationId: ${{ vars.ANDROID_APPLICATION_ID }}
+          ORG_GRADLE_PROJECT_invoicemeRequireSigning: 'true'
+          API_BASE_URL: ${{ secrets.ANDROID_RELEASE_API_BASE_URL }}
+          FORMAT: ${{ inputs.format }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          VERSION_CODE: ${{ inputs.version_code }}
+        run: |
+          flutter pub get
+          target=apk; [ "$FORMAT" = aab ] && target=appbundle
+          flutter build "$target" --release --build-name="$VERSION_NAME" --build-number="$VERSION_CODE" \
+            --dart-define=API_BASE_URL="$API_BASE_URL"
+
+      - name: Verify the artifact and write the release record
+        working-directory: mobile
+        env:
+          FORMAT: ${{ inputs.format }}
+          EXPECT_APP_ID: ${{ vars.ANDROID_APPLICATION_ID }}
+          EXPECT_VERSION_NAME: ${{ inputs.version_name }}
+          EXPECT_VERSION_CODE: ${{ inputs.version_code }}
+          EXPECT_CERT_SHA256: ${{ vars.ANDROID_RELEASE_CERT_SHA256 }}
+          FORBID_CERT_SHA256: ${{ vars.ANDROID_TEST_CERT_SHA256 }}
+          FORBID_DEBUG_CERT: 'true'
+          FORBID_CLEARTEXT: 'true'
+          API_BASE_URL: ${{ secrets.ANDROID_RELEASE_API_BASE_URL }}
+          SOURCE_COMMIT: ${{ needs.checks.outputs.sha }}
+          KIND: production
+          OUT_DIR: ${{ github.workspace }}/release-out
+        run: |
+          if [ "$FORMAT" = aab ]; then ARTIFACT=build/app/outputs/bundle/release/app-release.aab; else ARTIFACT=build/app/outputs/flutter-apk/app-release.apk; fi
+          ARTIFACT="$ARTIFACT" ./tool/release/verify_android_artifact.sh
+
+      - name: Remove the keystore
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/release-signing"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: invoiceme-release-${{ inputs.version_name }}-${{ inputs.version_code }}
+          path: release-out/
+          retention-days: ${{ inputs.retention_days }}
+          if-no-files-found: error
